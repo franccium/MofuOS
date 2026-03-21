@@ -1,0 +1,9 @@
+/limine
+/ovmf
+*.iso
+*.hdd
+/target
+notes.md
+esp
+
+kernel/kernel
