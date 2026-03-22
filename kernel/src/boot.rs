@@ -1,6 +1,6 @@
 use acpi::rsdp;
 use core::cell::UnsafeCell;
-use kernel::memory::{MemoryMapFrameAllocator, STACK_SIZE};
+use kernel::memory::MemoryMapFrameAllocator;
 use limine::{
     BaseRevision, framebuffer,
     framebuffer::{Framebuffer, VideoMode},
@@ -8,10 +8,10 @@ use limine::{
     paging::Mode,
     request::{
         EfiMemoryMapRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, PagingModeRequest,
-        RequestsEndMarker, RequestsStartMarker, RsdpRequest, StackSizeRequest,
+        RequestsEndMarker, RequestsStartMarker, RsdpRequest,
     },
     response::{
-        EfiMemoryMapResponse, HhdmResponse, MemoryMapResponse, RsdpResponse, StackSizeResponse,
+        EfiMemoryMapResponse, HhdmResponse, MemoryMapResponse, RsdpResponse,
     },
 };
 use spin::Mutex;
@@ -23,7 +23,7 @@ use x86_64::{
 };
 
 use crate::main;
-use kernel::{allocator, io::interrupts, memory, serial_println};
+use kernel::{allocator, init_globals, interrupts, memory, serial_println};
 
 /// Sets the base revision to the latest revision supported by the crate.
 /// See specification for further info.
@@ -36,10 +36,6 @@ static BASE_REVISION: BaseRevision = BaseRevision::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
-
-#[used]
-#[unsafe(link_section = ".requests")]
-static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(STACK_SIZE);
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -71,7 +67,6 @@ static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
 pub struct BootInfo {
-    pub stack_size: u64,
     pub hhdm_offset: u64,
     pub paging_mode: Mode,
     pub framebuffer: Mutex<Framebuffer<'static>>,
@@ -87,9 +82,7 @@ pub fn boot_info() -> &'static BootInfo {
 unsafe extern "C" fn kmain() -> ! {
     assert!(BASE_REVISION.is_supported());
 
-    let stack_size_response: &StackSizeResponse = STACK_SIZE_REQUEST
-        .get_response()
-        .expect("Failed to get stack size response");
+    serial_println!("MofuOS Booted!");
 
     // memory::init_acpi_memory_map(rsdp_phys_addr);
 
@@ -129,27 +122,7 @@ unsafe extern "C" fn kmain() -> ! {
         .next()
         .expect("No framebuffer found");
 
-    if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response() {
-        if let Some(framebuffer) = framebuffer_response.framebuffers().next() {
-            for i in 0..100_u64 {
-                // Calculate the pixel offset using the framebuffer information we obtained above.
-                // We skip `i` scanlines (pitch is provided in bytes) and add `i * 4` to skip `i` pixels forward.
-                let pixel_offset = i * framebuffer.pitch() + i * 4;
-
-                // Write 0xFFFFFFFF to the provided pixel offset to fill it white.
-                unsafe {
-                    framebuffer
-                        .addr()
-                        .add(pixel_offset as usize)
-                        .cast::<u32>()
-                        .write(0xFFFFFFFF)
-                };
-            }
-        }
-    }
-
     let boot_info = BootInfo {
-        stack_size: STACK_SIZE,
         hhdm_offset,
         paging_mode,
         framebuffer: Mutex::new(framebuffer),
@@ -157,30 +130,37 @@ unsafe extern "C" fn kmain() -> ! {
 
     BOOT_INFO.call_once(|| boot_info);
 
+    init_globals();
+
     let mut mapper = unsafe { memory::init_offset_page_table(hhdm_offset) };
     serial_println!("Offset page table initialized");
 
     serial_println!("Creating frame_allocator");
     let mut frame_allocator =
         unsafe { MemoryMapFrameAllocator::init(memory_map_response.entries()) };
-        
-    memory::map_acpi_regions(&mut mapper, &mut frame_allocator, rsdp_phys_addr, hhdm_offset).expect("Failed to map ACPI regions");
-    
+
+    memory::map_acpi_regions(
+        &mut mapper,
+        &mut frame_allocator,
+        rsdp_phys_addr,
+        hhdm_offset,
+    )
+    .expect("Failed to map ACPI regions");
+
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
     serial_println!("Heap initialized");
 
-
-    // let rsdp_phys_page = PhysFrame::containing_address(PhysAddr::new(rsdp_phys_addr as u64));
-    // let rsdp_virt_addr = VirtAddr::new(rsdp_phys_addr as u64 + hhdm_offset);
-
-    // mapper.map_to(
-    //     rsdp_phys_page,
-    //     PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-    // ).expect("Failed to map ACPI RSDP")
-    // .flush();
-
-    unsafe { interrupts::init_acpi(rsdp_phys_addr, hhdm_offset) };
+    unsafe {
+        interrupts::init_acpi(
+            rsdp_phys_addr,
+            hhdm_offset,
+            &mut mapper,
+            &mut frame_allocator,
+        )
+    };
+    
+    interrupts::enable_interrupts();
 
     main()
 }

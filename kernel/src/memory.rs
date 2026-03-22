@@ -1,7 +1,6 @@
 use crate::serial_println;
-use acpi::{AcpiError, AcpiTables, Handler, PhysicalMapping};
+use acpi::{Handler, PhysicalMapping};
 use limine::memory_map::{Entry, EntryType};
-use limine::paging::Mode;
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3,
@@ -11,7 +10,6 @@ use x86_64::{
     },
 };
 
-pub const STACK_SIZE: u64 = 1024 * 1024; // 1 MiB
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
 
 #[derive(Clone, Copy)]
@@ -105,7 +103,6 @@ fn map_region(
     // );
 
     let mut phys = phys_start;
-    let mut page_count = 0;
     let flags = if cached_pages {
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE
     } else {
@@ -125,14 +122,14 @@ fn map_region(
                 Err(e) => match e {
                     MapToError::PageAlreadyMapped(_) => {
                         serial_println!(
-                            "Error: Mapping page phys {:#x} -> virt {:#x} --> already mapped!", 
+                            "Error: Mapping page phys {:#x} -> virt {:#x} --> already mapped!",
                             phys,
                             virt.as_u64()
                         );
                     }
                     _ => {
                         serial_println!(
-                            "Error: Mapping page phys {:#x} -> virt {:#x} - failed!", 
+                            "Error: Mapping page phys {:#x} -> virt {:#x} - failed!",
                             phys,
                             virt.as_u64()
                         );
@@ -216,7 +213,7 @@ impl Handler for IdendtityAcpiHandler {
 
         PhysicalMapping {
             physical_start: phys_addr,
-            virtual_start: core::ptr::NonNull::new_unchecked(virt_addr),
+            virtual_start: unsafe { core::ptr::NonNull::new_unchecked(virt_addr) },
             region_length: size,
             mapped_length: size,
             handler: *self,

@@ -2,12 +2,16 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+pub mod allocator;
+pub mod gdt;
+pub mod graphics;
+pub mod interrupts;
 pub mod io;
 pub mod memory;
-pub mod graphics;
-pub mod allocator;
 
-pub fn init() {
+pub fn init_globals() {
+    gdt::init();
+    interrupts::init_idt();
 }
 
 #[inline(always)]

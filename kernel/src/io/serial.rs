@@ -1,10 +1,6 @@
-use core::fmt::Write;
 use lazy_static::lazy_static;
 use spin::Mutex;
-use uart_16550::{
-    Config, Uart16550Tty,
-    backend::{PioBackend, PortIoAddress},
-};
+use uart_16550::{Config, Uart16550Tty, backend::PioBackend};
 
 lazy_static! {
     pub static ref SERIAL1: Mutex<Uart16550Tty<PioBackend>> = {
@@ -31,7 +27,7 @@ pub fn _print(args: ::core::fmt::Arguments) {
 #[macro_export]
 macro_rules! serial_print {
     ($($arg:tt)*) => {
-        $crate::io::serial::_print(format_args!($($arg)*));
+        $crate::io::serial::_print(format_args!($($arg)*))
     };
 }
 
