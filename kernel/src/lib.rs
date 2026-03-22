@@ -4,6 +4,8 @@
 
 pub mod io;
 pub mod memory;
+pub mod graphics;
+pub mod allocator;
 
 pub fn init() {
 }
