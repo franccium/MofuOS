@@ -13,7 +13,7 @@ use x86_64::{
 };
 
 #[global_allocator]
-static ALLOCATOR: MutexWrapper<FixedSizeBlockAllocator> =
+pub static ALLOCATOR: MutexWrapper<FixedSizeBlockAllocator> =
     MutexWrapper::new(FixedSizeBlockAllocator::new());
 
 pub const HEAP_POINTER: usize = 0xFFFF_8080_0000_0000;

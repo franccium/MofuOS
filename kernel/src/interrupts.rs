@@ -1,5 +1,4 @@
-use core::u32;
-
+#![allow(unused)]
 use crate::{
     gdt, hlt_loop,
     memory::{IdendtityAcpiHandler, MemoryMapFrameAllocator},

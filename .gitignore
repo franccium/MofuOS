@@ -4,6 +4,8 @@
 *.hdd
 /target
 notes.md
+architecture.md
 esp
+notes/
 
 kernel/kernel

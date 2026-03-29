@@ -93,7 +93,7 @@ impl<'a> Theophe<'a> {
 
     fn _write_bytes(&mut self, bytes: &[u8]) {
         let mut bytes_start = 0;
-        let mut bytes_len = bytes.len();
+        let bytes_len = bytes.len();
 
         for i in 0..bytes_len {
             if bytes[i] == b'\n' {

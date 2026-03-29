@@ -1,14 +1,22 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![feature(allocator_api)]
 
 pub mod allocator;
+extern crate alloc;
+pub mod data_structures;
 pub mod gdt;
 pub mod graphics;
 pub mod interrupts;
 pub mod io;
 pub mod memory;
+pub mod process;
 pub mod programs;
+
+pub use alloc::string::String;
+
+extern crate lazy_static;
 
 pub fn init_globals() {
     gdt::init();

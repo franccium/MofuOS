@@ -6,11 +6,14 @@ mod boot;
 use core::arch::asm;
 use core::fmt::Write;
 use embedded_graphics::prelude::*;
+use kernel::data_structures::vector::Vec;
 use kernel::{
     allocator, graphics::framebuffer::FrameBufferTarget, programs::theophe::Theophe, serial_print,
     serial_println,
 };
 use x86_64::{instructions::hlt, structures::paging::frame};
+extern crate alloc;
+use alloc::string::String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -38,8 +41,92 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     exit_qemu(QemuExitCode::Failed);
 }
 
+fn test_process_system() {
+    use kernel::process::{
+        process_manager::PROCESS_MANAGER,
+        syscall::{SyscallError, SystemCall, handle_syscall}
+    };
+
+    // Check arche
+    {
+        let pm = PROCESS_MANAGER.lock();
+        if let Ok(arche) = pm.get_process(0) {
+            serial_println!("Arche PID: {}, Name: {}", arche.pid, arche.name);
+        }
+    }
+
+    let process_name = "process_1";
+    let process_2_name = "process_2";
+
+    let result1 = handle_syscall(
+        0,
+        SystemCall::CreateProcess {
+            parent_pid: 0,
+            name_ptr: process_name.as_ptr(),
+            name_len: process_name.len() as u8,
+            is_out: false,
+        },
+    );
+
+    let result2 = handle_syscall(
+        0,
+        SystemCall::CreateProcess {
+            parent_pid: 0,
+            name_ptr: process_2_name.as_ptr(),
+            name_len: process_2_name.len() as u8,
+            is_out: false,
+        },
+    );
+
+    if result1.is_ok() && result2.is_ok() {
+        {
+            let pm = PROCESS_MANAGER.lock();
+            if let Ok(p1) = pm.get_process(1) {
+                serial_println!(
+                    "P1 - PID: {}, Name: {}, Parent: {}",
+                    p1.pid,
+                    p1.name,
+                    p1.parent_pid
+                );
+                serial_println!("P1 - Memory limit: {}", p1.resources.memory_limit);
+            }
+            if let Ok(p2) = pm.get_process(2) {
+                serial_println!(
+                    "P2 - PID: {}, Name: {}, Parent: {}",
+                    p2.pid,
+                    p2.name,
+                    p2.parent_pid
+                );
+                serial_println!("P2 - Memory limit: {}", p2.resources.memory_limit);
+            }
+        }
+
+        let _ = handle_syscall(
+            1,
+            SystemCall::TerminateProcess {
+                pid_to_kill: 1,
+                exit_code: 0,
+                kill_children: false,
+            },
+        );
+
+        {
+            let pm = PROCESS_MANAGER.lock();
+            if let Ok(p1) = pm.get_process(1) {
+                serial_println!("Process 1 after termination:");
+                serial_println!("State: {:?}", p1.state);
+                serial_println!("Exit code: {:?}", p1.exit_code);
+            }
+        }
+    } else {
+        serial_println!("Failed to create processes");
+    }
+}
+
 fn main() -> ! {
     serial_println!("Welcome to MofuOS!");
+
+    test_process_system();
 
     use embedded_graphics::pixelcolor::Rgb888;
     use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
@@ -69,6 +156,18 @@ fn main() -> ! {
             .draw(&mut framebuffer_target)
             .unwrap();
     }
+
+    let mut vec = Vec::<i32>::with_capacity(4);
+    vec.push(1);
+    vec.push(2);
+    vec.push(3);
+    vec.push(1);
+    vec.push(2);
+    vec.push(3);
+    for i in 0..vec.size {
+        serial_println!("vec[{}] = {}", i, vec.get(i));
+    }
+    serial_println!("Vector capacity: {}", vec.capacity);
 
     let mut theophe = Theophe::new(framebuffer_target);
     theophe.write_line("Welcome to Theophe");
