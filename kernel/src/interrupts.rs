@@ -97,7 +97,7 @@ unsafe fn init_io_apic(
 ) {
     serial_println!("Mapping IO APIC");
 
-    let virt_addr = map_apic_mem(phys_address, mapper, frame_allocator);
+    let virt_addr = unsafe { map_apic_mem(phys_address, mapper, frame_allocator) };
 
     let io_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
@@ -116,7 +116,7 @@ unsafe fn init_local_apic(
 ) {
     serial_println!("Mapping Local APIC");
 
-    let virt_addr = map_apic_mem(phys_address, mapper, frame_allocator);
+    let virt_addr = unsafe { map_apic_mem(phys_address, mapper, frame_allocator) };
 
     let local_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
@@ -284,10 +284,14 @@ pub unsafe fn init_acpi(
     //     }
     // }
 
-    init_local_apic(lapic_addr, mapper, frame_allocator);
+    unsafe {
+        init_local_apic(lapic_addr, mapper, frame_allocator);
+    }
 
     if got_apic_addr {
-        init_io_apic(io_apic_addr, mapper, frame_allocator);
+        unsafe {
+            init_io_apic(io_apic_addr, mapper, frame_allocator);
+        }
     } else {
         serial_println!("ERROR: Cannot find IO apic");
     }

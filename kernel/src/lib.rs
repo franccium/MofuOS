@@ -8,6 +8,7 @@ pub mod graphics;
 pub mod interrupts;
 pub mod io;
 pub mod memory;
+pub mod programs;
 
 pub fn init_globals() {
     gdt::init();
