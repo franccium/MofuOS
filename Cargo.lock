@@ -240,6 +240,7 @@ name = "kernel"
 version = "0.1.0"
 dependencies = [
  "acpi",
+ "bitflags",
  "embedded-graphics",
  "lazy_static",
  "limine",

@@ -17,7 +17,7 @@ pub static ALLOCATOR: MutexWrapper<FixedSizeBlockAllocator> =
     MutexWrapper::new(FixedSizeBlockAllocator::new());
 
 pub const HEAP_POINTER: usize = 0xFFFF_8080_0000_0000;
-pub const HEAP_SIZE_BYTES: usize = 2 * 1024 * 1024;
+pub const HEAP_SIZE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Wrapper around spin::Mutex to implement GlobalAlloc on a foreign type.
 pub struct MutexWrapper<T> {

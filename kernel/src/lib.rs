@@ -6,6 +6,7 @@
 pub mod allocator;
 extern crate alloc;
 pub mod data_structures;
+pub mod filesystem;
 pub mod gdt;
 pub mod graphics;
 pub mod interrupts;

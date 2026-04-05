@@ -8,8 +8,11 @@ use core::fmt::Write;
 use embedded_graphics::prelude::*;
 use kernel::data_structures::vector::Vec;
 use kernel::{
-    allocator, graphics::framebuffer::FrameBufferTarget, programs::theophe::Theophe, serial_print,
-    serial_println,
+    allocator,
+    filesystem::sirius::{FileType, get_sirius},
+    graphics::framebuffer::FrameBufferTarget,
+    programs::theophe::Theophe,
+    serial_print, serial_println,
 };
 use x86_64::{instructions::hlt, structures::paging::frame};
 extern crate alloc;
@@ -44,7 +47,7 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 fn test_process_system() {
     use kernel::process::{
         process_manager::PROCESS_MANAGER,
-        syscall::{SyscallError, SystemCall, handle_syscall}
+        syscall::{SyscallError, SystemCall, handle_syscall},
     };
 
     // Check arche
@@ -123,10 +126,64 @@ fn test_process_system() {
     }
 }
 
+fn test_filesystem_system() {
+    use kernel::filesystem::{
+        fat32::test_data::create_fat32_image, init_filesystem, sirius::get_sirius,
+    };
+
+    serial_println!("\nTesting Filesystem");
+
+    let fat32_image_data = create_fat32_image();
+
+    let image_slice = &*fat32_image_data;
+
+    match init_filesystem(image_slice) {
+        Ok(_) => {
+            serial_println!("Filesystem initialized");
+
+            // Try to read root directory
+            {
+                let mut sirius = get_sirius();
+                match sirius.list_directory("/") {
+                    Ok(entries) => {
+                        serial_println!("Root directory opened");
+                        serial_println!("  Found {} entries:", entries.len());
+                        for entry in &entries {
+                            serial_println!("   - {} ({} bytes)", entry.name, entry.size);
+
+                            if entry.file_type == FileType::File {
+                                let mut buffer = [0u8; 64];
+                                match sirius.read_file(&entry.name, 0, &mut buffer) {
+                                    Ok(contents) => {
+                                        serial_println!(
+                                            "    Read file contents: '{}' {}",
+                                            contents,
+                                            entry.size
+                                        );
+                                        let content_str = core::str::from_utf8(&buffer[..contents])
+                                            .unwrap_or("not utf8?");
+                                        serial_println!("    Content: '{}'", content_str);
+                                    }
+                                    Err(e) => {
+                                        serial_println!("    Failed to read file: {:?}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => serial_println!("Failed to open root: {:?}", e),
+                }
+            }
+        }
+        Err(e) => serial_println!("Failed to initialize filesystem: {}", e),
+    }
+}
+
 fn main() -> ! {
     serial_println!("Welcome to MofuOS!");
 
     test_process_system();
+    test_filesystem_system();
 
     use embedded_graphics::pixelcolor::Rgb888;
     use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
