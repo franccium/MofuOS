@@ -2,7 +2,6 @@ extern crate alloc;
 use crate::allocator::ALLOCATOR;
 use crate::serial_println;
 use alloc::alloc::{GlobalAlloc, Layout};
-use core::mem;
 use core::ops::{Deref, DerefMut, Index, IndexMut, Range};
 use core::ptr::{self, NonNull};
 use core::slice;

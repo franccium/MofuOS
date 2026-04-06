@@ -12,14 +12,24 @@ use x86_64::{
     },
 };
 
+
+const ALLOC_DEBUG: bool = false; 
+macro_rules! alloc_debug {
+    ($($arg:tt)*) => {
+        if ALLOC_DEBUG {
+            serial_println!($($arg)*);
+        }
+    };
+}
+
 #[global_allocator]
 pub static ALLOCATOR: MutexWrapper<FixedSizeBlockAllocator> =
     MutexWrapper::new(FixedSizeBlockAllocator::new());
 
 pub const HEAP_POINTER: usize = 0xFFFF_8080_0000_0000;
-pub const HEAP_SIZE_BYTES: usize = 16 * 1024 * 1024;
+pub const HEAP_SIZE_BYTES: usize = 16 * 1024 * 1024; // 16 MB
 
-/// Wrapper around spin::Mutex to implement GlobalAlloc on a foreign type.
+// Wrapper around spin::Mutex to implement GlobalAlloc on a foreign type
 pub struct MutexWrapper<T> {
     inner: spin::Mutex<T>,
 }
@@ -38,7 +48,7 @@ impl<T> MutexWrapper<T> {
 
 /// Block sizes used by the fixed-size block allocator.
 /// Also used as alignment for each block so they need to be powers of two.
-const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048];
+const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 
 struct AllocatorListNode {
     next: Option<&'static mut AllocatorListNode>,
@@ -127,8 +137,14 @@ impl FixedSizeBlockAllocator {
 
     fn allocate_with_fallback_allocator(&mut self, layout: Layout) -> *mut u8 {
         match self.fallback_allocator.allocate_first_fit(layout) {
-            Ok(ptr) => ptr.as_ptr(),
-            Err(_) => core::ptr::null_mut(),
+            Ok(ptr) => {
+                alloc_debug!("[FALLBACK ALLOC] Success, ptr: {:p}", ptr.as_ptr());
+                ptr.as_ptr()
+            }
+            Err(e) => {
+                alloc_debug!("[FALLBACK ALLOC] Failed: {:?}", e);
+                core::ptr::null_mut()
+            }
         }
     }
 }
@@ -140,27 +156,65 @@ fn get_block_index(layout: &Layout) -> Option<usize> {
 
 unsafe impl GlobalAlloc for MutexWrapper<FixedSizeBlockAllocator> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        alloc_debug!(
+            "[ALLOC] Request: size={}, align={}",
+            layout.size(),
+            layout.align()
+        );
+
         let mut allocator = self.lock();
+        alloc_debug!("[ALLOC] Lock acquired");
 
         if let Some(index) = get_block_index(&layout) {
+            alloc_debug!(
+                "[ALLOC] Using block index={}, size={}",
+                index,
+                BLOCK_SIZES[index]
+            );
             match allocator.lists[index].take() {
                 Some(node) => {
                     // reuse an existing block
+                    alloc_debug!("[ALLOC] Reusing existing block");
                     allocator.lists[index] = node.next.take();
-                    node as *mut AllocatorListNode as *mut u8
+
+                    let ptr = node as *mut AllocatorListNode as *mut u8;
+                    alloc_debug!("[ALLOC] Returning ptr: {:p}", ptr);
+
+                    ptr
                 }
 
                 None => {
                     // allocate a new block
+                    alloc_debug!(
+                        "[ALLOC] No free block, allocating new block of size {}",
+                        BLOCK_SIZES[index]
+                    );
                     let block_size = BLOCK_SIZES[index];
                     let align = block_size;
 
                     let layout = core::alloc::Layout::from_size_align(block_size, align).unwrap();
-                    allocator.allocate_with_fallback_allocator(layout)
+                    alloc_debug!(
+                        "[ALLOC] New block layout: size={}, align={}",
+                        layout.size(),
+                        layout.align()
+                    );
+
+                    let res = allocator.allocate_with_fallback_allocator(layout);
+                    alloc_debug!(
+                        "[ALLOC] allocate_with_fallback_allocator returned: {:p}",
+                        res
+                    );
+
+                    res
                 }
             }
         } else {
-            allocator.allocate_with_fallback_allocator(layout)
+            alloc_debug!(
+                "[ALLOC] No block size found, using fallback directly with original layout"
+            );
+            let res = allocator.allocate_with_fallback_allocator(layout);
+            alloc_debug!("[ALLOC] Fallback allocator returned: {:p}", res);
+            res
         }
     }
 

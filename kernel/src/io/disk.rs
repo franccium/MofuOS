@@ -1,10 +1,18 @@
-use crate::io::serial;
-use crate::serial_println;
+use crate::{serial_println};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use spin::{Mutex, Once};
 
-const SECTOR_SIZE: usize = 512;
+const DISK_OP_DEBUG: bool = false; 
+macro_rules! disk_op_debug {
+    ($($arg:tt)*) => {
+        if DISK_OP_DEBUG {
+            serial_println!($($arg)*);
+        }
+    };
+}
+
+pub const SECTOR_SIZE: usize = 512;
 
 pub type DiskOpResult<T> = Result<T, DiskOpError>;
 
@@ -14,6 +22,7 @@ pub enum DiskOpError {
     WriteError,
     InvalidSector,
     DeviceNotFound,
+    BufferTooSmall,
     Timeout,
 }
 
@@ -69,14 +78,14 @@ impl DiskDevice for MockDiskDevice {
     ) -> DiskOpResult<()> {
         let start_byte = (start_sector as usize) * SECTOR_SIZE;
         let end_byte = start_byte + (count * SECTOR_SIZE);
-        serial_println!(
+        disk_op_debug!(
             "MockDiskDevice: Reading sectors from {} to {}",
             start_sector,
             start_sector + count as u64
         );
 
         if end_byte > self.size_bytes {
-            serial_println!(
+            disk_op_debug!(
                 "MockDiskDevice: Read error - end byte {} exceeds disk size {}",
                 end_byte,
                 self.size_bytes
@@ -85,7 +94,7 @@ impl DiskDevice for MockDiskDevice {
         }
 
         if out_buffer.len() < count * SECTOR_SIZE {
-            serial_println!(
+            disk_op_debug!(
                 "MockDiskDevice: Read error - out_buffer size {} is too small for {} sectors",
                 out_buffer.len(),
                 count
@@ -94,7 +103,7 @@ impl DiskDevice for MockDiskDevice {
         }
 
         out_buffer[..count * SECTOR_SIZE].copy_from_slice(&self.data[start_byte..end_byte]);
-        serial_println!(
+        disk_op_debug!(
             "MockDiskDevice: Successfully read {} bytes",
             count * SECTOR_SIZE
         );
@@ -114,7 +123,14 @@ impl DiskDevice for MockDiskDevice {
             return Err(DiskOpError::InvalidSector);
         }
 
+        disk_op_debug!(
+            "MockDiskDevice: write_sectors: start_byte: {}, byte_count: {}, end_byte: {}",
+            start_byte,
+            byte_count,
+            end_byte
+        );
         self.data[start_byte..end_byte].copy_from_slice(&data[..byte_count]);
+        disk_op_debug!("MockDiskDevice: write_sectors: finished");
         Ok(())
     }
 
@@ -154,6 +170,13 @@ impl DiskManager {
             return Err(DiskOpError::InvalidSector);
         }
         self.device.write_sectors(sector, 1, data)
+    }
+
+    pub fn write_sectors(&mut self, sector: u64, count: usize, data: &[u8]) -> DiskOpResult<()> {
+        if data.len() < SECTOR_SIZE {
+            return Err(DiskOpError::InvalidSector);
+        }
+        self.device.write_sectors(sector, count, data)
     }
 
     pub fn sector_count(&self) -> u64 {

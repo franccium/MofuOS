@@ -1,6 +1,6 @@
 use acpi::rsdp;
 use core::cell::UnsafeCell;
-use kernel::memory::MemoryMapFrameAllocator;
+use kernel::{io::DiskDevice, memory::MemoryMapFrameAllocator};
 use limine::{
     BaseRevision, framebuffer,
     framebuffer::{Framebuffer, VideoMode},
@@ -10,9 +10,7 @@ use limine::{
         EfiMemoryMapRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, PagingModeRequest,
         RequestsEndMarker, RequestsStartMarker, RsdpRequest,
     },
-    response::{
-        EfiMemoryMapResponse, HhdmResponse, MemoryMapResponse, RsdpResponse,
-    },
+    response::{EfiMemoryMapResponse, HhdmResponse, MemoryMapResponse, RsdpResponse},
 };
 use spin::Mutex;
 use spin::Once;
@@ -159,7 +157,7 @@ unsafe extern "C" fn kmain() -> ! {
             &mut frame_allocator,
         )
     };
-    
+
     interrupts::enable_interrupts();
 
     main()

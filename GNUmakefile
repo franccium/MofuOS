@@ -24,6 +24,15 @@ run: run-$(KARCH)
 .PHONY: run-hdd
 run-hdd: run-hdd-$(KARCH)
 
+.PHONY: fat32-image
+fat32-image: test_disk_image.fat32.img
+
+#		-drive file=test_disk_image.fat32.img,format=raw,if=none,id=drive0 \
+#		-device virtio-blk-pci,drive=drive0,disable-legacy=on,disable-modern=off \
+
+# -device virtio-blk-pci,drive=drive0,disable-modern=on,disable-legacy=off,id=virtblk0,num-queues=4 \
+#		-drive file=test_disk_image.fat32.img,format=raw,if=none,id=drive0 \
+
 .PHONY: run-x86_64
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
 	qemu-system-$(KARCH) \
@@ -31,19 +40,37 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \
+		-drive file=test_disk_image.fat32.img,format=raw,if=none,id=drive0 \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio \
 		-no-reboot \
+		-monitor telnet:127.0.0.1:1234,server,nowait \
 		$(QEMUFLAGS)
 
 .PHONY: run-hdd-x86_64
-run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd $(IMAGE_NAME).fat32.img
+run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd test_disk_image.fat32.img
 	qemu-system-$(KARCH) \
 		-M q35 \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-hda $(IMAGE_NAME).hdd \
-		-hdb $(IMAGE_NAME).fat32.img \
+		-hdb test_disk_image.fat32.img \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		-serial stdio \
+		-no-reboot \
+		$(QEMUFLAGS)
+
+.PHONY: run-fs
+run-fs: run-fs-$(KARCH)
+
+.PHONY: run-fs-x86_64
+run-fs-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso test_disk_image.fat32.img
+	qemu-system-$(KARCH) \
+		-M q35 \
+		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
+		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
+		-cdrom $(IMAGE_NAME).iso \
+		-drive file=test_disk_image.fat32.img,format=raw \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio \
 		-no-reboot \
@@ -75,6 +102,17 @@ limine/limine:
 .PHONY: kernel
 kernel:
 	$(MAKE) -C kernel
+
+
+# Clean the FAT32 image
+.PHONY: clean-fat32
+clean-fat32:
+	rm -f test_disk_image.fat32.img
+
+# Update all-hdd to depend on fat32-image
+.PHONY: all-hdd
+all-hdd: $(IMAGE_NAME).hdd test_disk_image.fat32.img
+
 
 $(IMAGE_NAME).iso: limine/limine kernel
 	rm -rf iso_root
@@ -123,37 +161,38 @@ endif
 $(IMAGE_NAME).hdd: limine/limine kernel
 	rm -f $(IMAGE_NAME).hdd
 	dd if=/dev/zero bs=1M count=0 seek=64 of=$(IMAGE_NAME).hdd
-	sgdisk $(IMAGE_NAME).hdd -n 1:2048 -t 1:ef00
+	parted -s $(IMAGE_NAME).hdd mklabel gpt
+	parted -s $(IMAGE_NAME).hdd mkpart primary 2048s 4095s
+	parted -s $(IMAGE_NAME).hdd set 1 bios_grub on
+	parted -s $(IMAGE_NAME).hdd mkpart ESP fat32 4096s 100%
+	parted -s $(IMAGE_NAME).hdd set 2 esp on
 ifeq ($(KARCH),x86_64)
 	./limine/limine bios-install $(IMAGE_NAME).hdd
 endif
-	mformat -i $(IMAGE_NAME).hdd@@1M
-	mmd -i $(IMAGE_NAME).hdd@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
-	mcopy -i $(IMAGE_NAME).hdd@@1M kernel/bin-$(KARCH)/kernel ::/boot
-	mcopy -i $(IMAGE_NAME).hdd@@1M limine.conf ::/boot/limine
+	mkfs.fat -F 32 --offset=4096 template-x86_64.hdd
+	mmd -i $(IMAGE_NAME).hdd@@2M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
+	mcopy -i $(IMAGE_NAME).hdd@@2M kernel/kernel ::/boot
+	mcopy -i $(IMAGE_NAME).hdd@@2M limine.conf ::/boot/limine
+	mcopy -i $(IMAGE_NAME).hdd@@2M limine/limine-uefi-cd.bin ::/boot/limine
 ifeq ($(KARCH),x86_64)
-	mcopy -i $(IMAGE_NAME).hdd@@1M limine/limine-bios.sys ::/boot/limine
-	mcopy -i $(IMAGE_NAME).hdd@@1M limine/BOOTX64.EFI ::/EFI/BOOT
-	mcopy -i $(IMAGE_NAME).hdd@@1M limine/BOOTIA32.EFI ::/EFI/BOOT
+	mcopy -i $(IMAGE_NAME).hdd@@2M limine/limine-bios.sys ::/boot/limine
+	mcopy -i $(IMAGE_NAME).hdd@@2M limine/BOOTX64.EFI ::/EFI/BOOT
+	mcopy -i $(IMAGE_NAME).hdd@@2M limine/BOOTIA32.EFI ::/EFI/BOOT
 endif
 ifeq ($(KARCH),aarch64)
-	mcopy -i $(IMAGE_NAME).hdd@@1M limine/BOOTAA64.EFI ::/EFI/BOOT
+	mcopy -i $(IMAGE_NAME).hdd@@2M limine/BOOTAA64.EFI ::/EFI/BOOT
 endif
 ifeq ($(KARCH),riscv64)
-	mcopy -i $(IMAGE_NAME).hdd@@1M limine/BOOTRISCV64.EFI ::/EFI/BOOT
+	mcopy -i $(IMAGE_NAME).hdd@@2M limine/BOOTRISCV64.EFI ::/EFI/BOOT
 endif
 ifeq ($(KARCH),loongarch64)
-	mcopy -i $(IMAGE_NAME).hdd@@1M limine/BOOTLOONGARCH64.EFI ::/EFI/BOOT
+	mcopy -i $(IMAGE_NAME).hdd@@2M limine/BOOTLOONGARCH64.EFI ::/EFI/BOOT
 endif
 
-# Create FAT32 test disk image
-$(IMAGE_NAME).fat32.img: 
-	@echo "Creating FAT32 disk image..."
-	@if [ ! -f "$@" ]; then \
-		bash create_fat32_image.sh "$@" 4; \
-	fi
+test_disk_image.fat32.img:
+	./scripts/create_fat32_image.sh $@ 16
 
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel clean
-	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd $(IMAGE_NAME).fat32.img
+	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd test_disk_image.fat32.img

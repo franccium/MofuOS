@@ -1,11 +1,13 @@
 use crate::filesystem::fat32::{MAX_CLUSTER, ROOT_CLUSTER};
 use crate::filesystem::sirius::FileType;
+use crate::serial_println;
 use alloc::string::String;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
 pub enum FatFileAttributes {
     // TODO: can i use the reserved upper 2 bits for my stuff
+    None = 0x00,
     ReadOnly = 0x01,  // reject changes to the file (write, delete, rename)
     Hidden = 0x02,    // listing should hide the file unless -a flag
     System = 0x04,    // indicates that its a system file (means nothing for now)
@@ -16,6 +18,10 @@ pub enum FatFileAttributes {
 
 pub const FIRST_BYTE_IS_EMPTY_FLAG: u8 = 0x00;
 pub const FIRST_BYTE_IS_DELETED_FLAG: u8 = 0xE5;
+
+pub const MAX_NAME_LENGTH: usize = 8;
+pub const MAX_EXT_LENGTH: usize = 3;
+pub const MAX_FULL_NAME_LENGTH: usize = MAX_NAME_LENGTH + MAX_EXT_LENGTH;
 
 pub const DIRECTORY_ENTRY_SIZE: usize = 32;
 
@@ -137,11 +143,53 @@ impl DirectoryEntry {
         }
     }
 
+    pub fn create_empty() -> Self {
+        DirectoryEntry {
+            name: [0u8; MAX_NAME_LENGTH],
+            extension: [0u8; MAX_EXT_LENGTH],
+            attributes: FatFileAttributes::None as u8,
+            nt_reserved: 0,
+            creation_time_tenth: 0,
+            creation_time: 0,
+            creation_date: 0,
+            access_date: 0,
+            first_cluster_high: 0,
+            write_time: 0,
+            write_date: 0,
+            first_cluster_low: 0,
+            file_size: 0,
+        }
+    }
+
+    pub fn create_dot_entry(cluster: u32) -> Self {
+        let mut entry = DirectoryEntry::create_empty();
+        entry.name.copy_from_slice(&THIS_DIR_ENTRY_NAME);
+        entry.attributes = FatFileAttributes::Directory as u8;
+        entry.set_first_cluster(cluster);
+        entry
+    }
+
+    pub fn create_dot_dot_entry(parent_cluster: u32) -> Self {
+        let mut entry = DirectoryEntry::create_empty();
+        entry.name.copy_from_slice(&PARENT_DIR_ENTRY_NAME);
+        entry.attributes = FatFileAttributes::Directory as u8;
+        entry.set_first_cluster(parent_cluster);
+        entry
+    }
+
     pub fn is_valid(&self) -> bool {
         if self.name[0] == FIRST_BYTE_IS_EMPTY_FLAG || self.name[0] == FIRST_BYTE_IS_DELETED_FLAG {
             return false;
         }
         true
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        self.name[0] == FIRST_BYTE_IS_DELETED_FLAG
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.name[0] == FIRST_BYTE_IS_EMPTY_FLAG
     }
 
     pub fn is_directory(&self) -> bool {
@@ -156,6 +204,13 @@ impl DirectoryEntry {
         self.name == THIS_DIR_ENTRY_NAME
             && self.extension == THIS_DIR_ENTRY_EXT
             && self.is_directory()
+    }
+
+    pub fn full_name(&self) -> [u8; MAX_FULL_NAME_LENGTH] {
+        let mut full_name = [0u8; MAX_FULL_NAME_LENGTH];
+        full_name[..8].copy_from_slice(&self.name);
+        full_name[8..].copy_from_slice(&self.extension);
+        full_name
     }
 
     pub fn is_parent_directory(&self) -> bool {
@@ -214,12 +269,74 @@ impl DirectoryEntry {
         }
     }
 
+    pub fn full_name_matches(&self, fullname: &[u8; MAX_FULL_NAME_LENGTH]) -> bool {
+        self.name == fullname[0..8] && self.extension == fullname[8..11]
+    }
+
+    pub fn set_filename(&mut self, filename: &str) {
+        self.name.fill(b' ');
+        self.extension.fill(b' ');
+
+        let last_dot = filename.rfind('.');
+
+        let (name_part, ext_part) = match last_dot {
+            Some(pos) => {
+                let name = &filename[..pos];
+                let ext = &filename[pos + 1..];
+                (name, Some(ext))
+            }
+            None => (filename, None),
+        };
+
+        let name_bytes = name_part.as_bytes();
+        for i in 0..core::cmp::min(name_bytes.len(), 8) {
+            let c = name_bytes[i];
+            self.name[i] = match c {
+                b'a'..=b'z' => c - 32,
+                _ => c,
+            };
+        }
+
+        if let Some(ext) = ext_part {
+            let ext_bytes = ext.as_bytes();
+            for i in 0..core::cmp::min(ext_bytes.len(), 3) {
+                let c = ext_bytes[i];
+                self.extension[i] = match c {
+                    b'a'..=b'z' => c - 32,
+                    _ => c,
+                };
+            }
+        }
+    }
+
+    pub fn mark_deleted(&mut self) {
+        self.name[0] = FIRST_BYTE_IS_DELETED_FLAG;
+    }
+
     pub fn get_creation_timestamp(&self) -> u32 {
         fat_time_to_unix_timestamp(self.creation_time, self.creation_date)
     }
 
     pub fn get_modified_timestamp(&self) -> u32 {
         fat_time_to_unix_timestamp(self.write_time, self.write_date)
+    }
+
+    pub fn as_bytes(&self) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[0..8].copy_from_slice(&self.name);
+        bytes[8..11].copy_from_slice(&self.extension);
+        bytes[11] = self.attributes;
+        bytes[12] = self.nt_reserved;
+        bytes[13] = self.creation_time_tenth;
+        bytes[14..16].copy_from_slice(&self.creation_time.to_le_bytes());
+        bytes[16..18].copy_from_slice(&self.creation_date.to_le_bytes());
+        bytes[18..20].copy_from_slice(&self.access_date.to_le_bytes());
+        bytes[20..22].copy_from_slice(&self.first_cluster_high.to_le_bytes());
+        bytes[22..24].copy_from_slice(&self.write_time.to_le_bytes());
+        bytes[24..26].copy_from_slice(&self.write_date.to_le_bytes());
+        bytes[26..28].copy_from_slice(&self.first_cluster_low.to_le_bytes());
+        bytes[28..32].copy_from_slice(&self.file_size.to_le_bytes());
+        bytes
     }
 
     // NOTE: this is a fake directory entry

@@ -1,6 +1,6 @@
 use crate::filesystem::fat32::Fat32Driver;
 use crate::filesystem::fat32::FileNodeHandle;
-use crate::io::disk::DiskOpError;
+use crate::io::disk::{DiskOpError};
 use crate::io::{MockDiskDevice, init_disk};
 use crate::serial_println;
 use alloc::boxed::Box;
@@ -76,7 +76,10 @@ pub enum FileSystemError {
     DiskOpError,
     InvalidPath,
     FileSizeExceeded,
+    InvalidFilename,
+    DirectoryNotEmpty,
     NoSpace,
+    DirectoryFull,
     IoError,
     NotSupported,
 }
@@ -198,17 +201,24 @@ impl Sirius {
         let (parent_path, name) = self.split_path(path)?;
         let parent = self.resolve_path(parent_path.as_str())?;
 
+        serial_println!("Sirius: create_file: path: {}, parent_path: {}, name: {}", path, parent_path, name);
+
         if parent.file_type != FileType::Directory {
+            serial_println!("Error: Sirius: create_file: parent is not a directory");
             return Err(FileSystemError::NotDirectory);
         }
 
         let node_id = self.driver.create_file(parent.node_id, name.as_str())?;
+        serial_println!("Sirius: create_file: created file: {:#x}", node_id);
+
         self.driver.get_node(node_id)
     }
 
     pub fn create_directory(&mut self, path: &str) -> FileSystemResult<FileNode> {
         let (parent_path, name) = self.split_path(path)?;
         let parent = self.resolve_path(parent_path.as_str())?;
+
+        serial_println!("Sirius: create_directory: path: {}, parent_path: {}, name: {}", path, parent_path, name);
 
         if parent.file_type != FileType::Directory {
             return Err(FileSystemError::NotDirectory);
@@ -217,19 +227,22 @@ impl Sirius {
         let node_id = self
             .driver
             .create_directory(parent.node_id, name.as_str())?;
+        serial_println!("Sirius: create_directory: created directory: {:#x}", node_id);
+
         self.driver.get_node(node_id)
     }
 
     pub fn delete(&mut self, path: &str) -> FileSystemResult<()> {
+        serial_println!("Sirius: delete: looking for path: {}", path);
         let node = self.resolve_path(path)?;
+
+        serial_println!("Sirius: delete: path: {}, resolved node: {}", path, node.name);
+
         self.driver.delete(node.node_id)
     }
 
     // Split path into parents part and filename
-    fn split_path(
-        &self,
-        path: &str,
-    ) -> FileSystemResult<(String, String)> {
+    fn split_path(&self, path: &str) -> FileSystemResult<(String, String)> {
         if path.is_empty() || path == "/" {
             return Err(FileSystemError::InvalidPath);
         }
@@ -251,10 +264,7 @@ impl Sirius {
                 let name = String::from(&path[pos + 1..]);
                 Ok((parent, name))
             }
-            None => Ok((
-                String::from("/"),
-                String::from(path),
-            )),
+            None => Ok((String::from("/"), String::from(path))),
         }
     }
 }

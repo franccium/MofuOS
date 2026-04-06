@@ -1,13 +1,28 @@
 use crate::filesystem::fat32::direntry::FatFileAttributes;
 use crate::serial_println;
+extern crate alloc;
+use crate::filesystem::fat32::{END_OF_CHAIN, ROOT_CLUSTER};
+use alloc::alloc::{Layout, alloc};
 use alloc::boxed::Box;
-use crate::filesystem::fat32::ROOT_CLUSTER;
+use core::ptr;
 
-const IMAGE_SIZE: usize = 38 * 1024;
+const IMAGE_SIZE: usize = 64 * 1024;
 
 #[inline(never)]
 pub fn create_fat32_image() -> Box<[u8; IMAGE_SIZE]> {
-    let mut image = Box::new([0u8; IMAGE_SIZE]); // 64KB is reasonable for a test image
+    serial_println!("Allocating FAT32 image - size: {}", IMAGE_SIZE);
+
+    let layout = Layout::new::<[u8; IMAGE_SIZE]>();
+    let ptr = unsafe { alloc(layout) as *mut [u8; IMAGE_SIZE] };
+    if ptr.is_null() {
+        panic!("Allocation failed");
+    }
+
+    unsafe {
+        ptr::write_bytes(ptr as *mut u8, 0, IMAGE_SIZE);
+    }
+
+    let mut image = unsafe { Box::from_raw(ptr) };
     serial_println!("FAT32 image allocated - size: {}", IMAGE_SIZE);
 
     const BYTES_PER_SECTOR: usize = 512;
@@ -41,6 +56,7 @@ pub fn create_fat32_image() -> Box<[u8; IMAGE_SIZE]> {
     image[26..28].copy_from_slice(&255u16.to_le_bytes());
     // Hidden sectors
     image[28..32].copy_from_slice(&2048u32.to_le_bytes());
+    serial_println!("Wrote to index 12");
 
     let total_sector_count = (IMAGE_SIZE / BYTES_PER_SECTOR) as u32;
     image[32..36].copy_from_slice(&total_sector_count.to_le_bytes());
@@ -94,13 +110,13 @@ pub fn create_fat32_image() -> Box<[u8; IMAGE_SIZE]> {
     let mut fat = [0u8; FAT_SIZE_BYTES];
 
     // Entry 0: Media descriptor
-    fat[0..4].copy_from_slice(&0xFFFFFFF8u32.to_le_bytes());
+    fat[0..4].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
 
     // Entry 1: Reserved
-    fat[4..8].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+    fat[4..8].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
 
     // Entry 2: Root directory cluster (end of chain)
-    fat[8..12].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+    fat[8..12].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
 
     // Copy FAT tables
     let fat1_offset = fat1_start * BYTES_PER_SECTOR;
@@ -124,7 +140,7 @@ pub fn create_fat32_image() -> Box<[u8; IMAGE_SIZE]> {
     let hello_msg = b"Hello from MofuOS!";
     let entry_offset = 32;
 
-    let nam2 = b"SomeFile";
+    let nam2 = b"SOMEFILE";
     let ext2 = b"bin";
     let bin_data = b"binarydatathatsprettyshortforbinarydatabutitsamockone";
     let entry2_offset = 64;
@@ -163,13 +179,13 @@ pub fn create_fat32_image() -> Box<[u8; IMAGE_SIZE]> {
     let fat1_entry_offset = fat1_offset + fat_entry_offset;
     let fat2_entry_offset = fat2_offset + fat_entry_offset;
 
-    image[fat1_entry_offset..fat1_entry_offset + 4].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
-    image[fat2_entry_offset..fat2_entry_offset + 4].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+    image[fat1_entry_offset..fat1_entry_offset + 4].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+    image[fat2_entry_offset..fat2_entry_offset + 4].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
     let cluster4_entry_offset = 4 * 4;
     image[fat1_offset + cluster4_entry_offset..fat1_offset + cluster4_entry_offset + 4]
-        .copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+        .copy_from_slice(&END_OF_CHAIN.to_le_bytes());
     image[fat2_offset + cluster4_entry_offset..fat2_offset + cluster4_entry_offset + 4]
-        .copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+        .copy_from_slice(&END_OF_CHAIN.to_le_bytes());
 
     serial_println!("FAT32 image creation complete");
     serial_println!("    Total sectors: {}", total_sector_count);

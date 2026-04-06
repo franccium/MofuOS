@@ -1,4 +1,4 @@
-use crate::{allocator::HEAP_POINTER, serial_println};
+use crate::{serial_println};
 use lazy_static::lazy_static;
 use x86_64::{
     VirtAddr,

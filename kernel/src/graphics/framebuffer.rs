@@ -3,7 +3,7 @@ use embedded_graphics::geometry::Size;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
 use limine::framebuffer::Framebuffer;
-use spin::{Mutex, MutexGuard};
+use spin::{MutexGuard};
 
 pub struct FrameBufferTarget<'a> {
     framebuffer: MutexGuard<'a, Framebuffer<'static>>,
