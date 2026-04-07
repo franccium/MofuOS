@@ -190,6 +190,16 @@ fn test_filesystem_system() {
                                 serial_println!("Failed to create directory: {:?}", e);
                             }
                         }
+
+                        serial_println!("FILE IN SUBDIR CREATION");
+                        match sirius.create_file("/somedir/nested.txt") {
+                            Ok(node) => {
+                                serial_println!("Created new file: {}", node.name);
+                            }
+                            Err(e) => {
+                                serial_println!("Failed to create file: {:?}", e);
+                            }
+                        }
                     }
                     Err(e) => serial_println!("Failed to open root: {:?}", e),
                 }
@@ -283,8 +293,9 @@ fn test_filesystem_system() {
 fn main() -> ! {
     serial_println!("Welcome to MofuOS!");
 
-    test_process_system();
-    test_filesystem_system();
+    //test_process_system();
+    //test_filesystem_system();
+
 
     use embedded_graphics::pixelcolor::Rgb888;
     use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};

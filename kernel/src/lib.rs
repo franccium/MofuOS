@@ -14,6 +14,7 @@ pub mod io;
 pub mod memory;
 pub mod process;
 pub mod programs;
+pub mod util;
 
 pub use alloc::string::String;
 

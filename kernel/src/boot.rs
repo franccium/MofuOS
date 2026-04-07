@@ -21,7 +21,7 @@ use x86_64::{
 };
 
 use crate::main;
-use kernel::{allocator, init_globals, interrupts, memory, serial_println};
+use kernel::{allocator, init_globals, interrupts, memory, serial_println, util::cpuinfo::init_cpu_info};
 
 /// Sets the base revision to the latest revision supported by the crate.
 /// See specification for further info.
@@ -81,6 +81,8 @@ unsafe extern "C" fn kmain() -> ! {
     assert!(BASE_REVISION.is_supported());
 
     serial_println!("MofuOS Booted!");
+
+    unsafe { init_cpu_info() };
 
     // memory::init_acpi_memory_map(rsdp_phys_addr);
 

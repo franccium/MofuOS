@@ -48,6 +48,9 @@ impl ProcessManager {
                 memory_used: 0,
                 cpu_time_slice: 0,
             },
+            0,
+            0,
+            0,
         );
         serial_println!("Initialized arche process with PID 0");
         self.processes.push(arche);
@@ -85,8 +88,17 @@ impl ProcessManager {
             String::from_utf8_lossy(slice).into_owned()
         };
 
-        let mut new_process =
-            Process::new(new_pid, parent_pid, priority, name_str, is_out, resources);
+        let mut new_process = Process::new(
+            new_pid,
+            parent_pid,
+            priority,
+            name_str,
+            is_out,
+            resources,
+            0, // TODO: will be set when loading program
+            0, // TODO: will be set when allocating process memory
+            0, //TODO: will be set when creating process page tables
+        );
         new_process.state = ProcessState::Ready;
 
         parent.children.push(new_pid);

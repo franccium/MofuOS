@@ -2,7 +2,7 @@
 use crate::{
     gdt, hlt_loop,
     memory::{IdendtityAcpiHandler, MemoryMapFrameAllocator},
-    serial_print, serial_println,
+    serial_print, serial_println, util::cpuinfo::{get_cpu_info, CpuFeatureFlags},
 };
 use acpi::{
     AcpiTables, PhysicalMapping,
@@ -26,8 +26,15 @@ use x86_64::{
     },
 };
 
-const TIMER_DEBUG_PRINT: bool = false;
+use core::arch::asm;
+
+const TIMER_DEBUG_PRINT: bool = true;
 const KEYBOARD_DEBUG_PRINT: bool = false;
+
+pub const TSC_MOCK_FREQUENCY: u64 = 2400000000u64;
+pub const TIMER_TICK_INTERVAL_MS: u64 = 100;
+pub const TIMER_TICK_FREQ_DIVIDER: u64 = TIMER_TICK_INTERVAL_MS * 1000;
+const MSR_IA32_TSC_DEADLINE: u32 = 0x6E0;
 
 pub struct LapicPtr {
     address: *mut u32,
@@ -127,30 +134,130 @@ unsafe fn init_local_apic(
     }
 }
 
-unsafe fn init_timer(local_apic_ptr: *mut u32) {
-    //TODO: TSC-Deadline mode
-    //TODO: actual measured time instead of random value
-    unsafe {
-        let svr = local_apic_ptr.offset(APICOffset::Svr as isize / 4);
-        let current_svr = svr.read_volatile();
-        svr.write_volatile(current_svr | (1 << 8) | 0xFF); // Enable + vector 0xFF for spurious
+/// Read the Time Stamp Counter (TSC) register
+/// Returns the current cycle count since processor reset
+unsafe fn tsc_read() -> u64 {
+    let low: u32;
+    let high: u32;
+    asm!(
+        "rdtsc",
+        out("eax") low,
+        out("edx") high,
+        options(nostack, preserves_flags)
+    );
+    ((high as u64) << 32) | (low as u64)
+}
 
-        // Set the divide configuration register
-        // 0x3 - use divider 16
-        let tdcr = local_apic_ptr.offset(APICOffset::Tdcr as isize / 4);
-        tdcr.write_volatile(0x3);
+/// Write to a Model-Specific Register (MSR)
+unsafe fn msr_write(msr: u32, value: u64) {
+    let low = value as u32;
+    let high = (value >> 32) as u32;
+    asm!(
+        "wrmsr",
+        in("ecx") msr,
+        in("eax") low,
+        in("edx") high,
+        options(nostack, preserves_flags)
+    );
+}
 
-        // Configure timer mode and vector
-        let lvt_timer = local_apic_ptr.offset(APICOffset::LvtT as isize / 4);
-        // Vector 0x20, Periodic Mode (bit 17), Unmasked (bit 16 = 0)
-        lvt_timer.write_volatile(0x20 | (1 << 17));
+// Read from a Model-Specific Register (MSR)
+unsafe fn msr_read(msr: u32) -> u64 {
+    let low: u32;
+    let high: u32;
+    asm!(
+        "rdmsr",
+        in("ecx") msr,
+        out("eax") low,
+        out("edx") high,
+        options(nostack, preserves_flags)
+    );
+    ((high as u64) << 32) | (low as u64)
+}
 
-        // Set initial count
-        let ticr = local_apic_ptr.offset(APICOffset::Ticr as isize / 4);
-        ticr.write_volatile(0x10000000);
+unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32) {
+    let tsc_freq = TSC_MOCK_FREQUENCY;
+    serial_println!("TSC Frequency: {} Hz", tsc_freq);
+
+    // determine the APIC timer's bus frequency
+    // configure APIC timer in one-shot mode to measure
+    let lvt_timer = local_apic_ptr.offset(APICOffset::LvtT as isize / 4);
+    // use one-shot mode with divider 1 for measurement
+    let tdcr = local_apic_ptr.offset(APICOffset::Tdcr as isize / 4);
+    tdcr.write_volatile(0x0);
+    lvt_timer.write_volatile(InterruptIndex::Timer as u32);
+
+    // set a large initial count
+    let ticr = local_apic_ptr.offset(APICOffset::Ticr as isize / 4);
+    let test_count = 1_000_000;
+    ticr.write_volatile(test_count);
+
+    // wait for timer to fire, poll the timer current count reg
+    let tccr = local_apic_ptr.offset(APICOffset::Tccr as isize / 4);
+    let start = tsc_read();
+    while tccr.read_volatile() != 0 {}
+    let end = tsc_read();
+    let tsc_cycles = end - start;
+
+    let apic_bus_freq = (test_count as u64 * tsc_freq) / tsc_cycles;
+
+    // configure periodic mode
+    let tick_freq = TIMER_TICK_FREQ_DIVIDER;
+    let divider = 16;
+    let apic_timer_freq = apic_bus_freq / divider;
+    let ticks_needed = (apic_timer_freq / tick_freq) as u32;
+
+    let svr = local_apic_ptr.offset(APICOffset::Svr as isize / 4);
+    let current_svr = svr.read_volatile();
+    svr.write_volatile(current_svr | (1 << 8) | 0xFF);
+
+    // Set divider to 16
+    tdcr.write_volatile(0x3);
+    // set periodic mode
+    const LVTT_TSC_PERIODIC_MODE: u32 = 1 << 17;
+    lvt_timer.write_volatile(InterruptIndex::Timer as u32 | LVTT_TSC_PERIODIC_MODE);
+    // set tick rate
+    ticr.write_volatile(ticks_needed);
+
+    serial_println!("Timer configured in periodic mode:");
+    serial_println!("  APIC Bus frequency: {} Hz", apic_bus_freq);
+    serial_println!("  APIC timer frequency: {} Hz", apic_timer_freq);
+    serial_println!(
+        "  Ticks per interrupt: {} (set tick frequency: {} Hz)",
+        ticks_needed,
+        tick_freq
+    );
+}
+
+pub unsafe fn init_timer(local_apic_ptr: *mut u32) {
+    if !get_cpu_info().features.contains(CpuFeatureFlags::TSC_DEADLINE) {
+        serial_println!("TSC-Deadline mode not supported, falling back to periodic mode");
+        init_timer_periodic_mode(local_apic_ptr);
+        return;
     }
 
-    serial_println!("Timer configured with vector 0x20, periodic mode");
+    serial_println!("TSC-Deadline mode supported, using for timer");
+
+    let svr = local_apic_ptr.offset(APICOffset::Svr as isize / 4);
+    let current_svr = svr.read_volatile();
+    svr.write_volatile(current_svr | (1 << 8) | 0xFF);
+
+    let lvt_timer = local_apic_ptr.offset(APICOffset::LvtT as isize / 4);
+    const LVTT_TSC_DEADLINE_MODE: u32 = 1 << 18;
+    lvt_timer.write_volatile(InterruptIndex::Timer as u32 | LVTT_TSC_DEADLINE_MODE);
+
+    use core::arch::x86_64::_mm_mfence;
+    _mm_mfence();
+
+    let tsc_freq = TSC_MOCK_FREQUENCY;
+    serial_println!("TSC Frequency: {}", tsc_freq);
+    let ticks_per_ms = tsc_freq / TIMER_TICK_FREQ_DIVIDER;
+    let tsc_deadline = tsc_read() + ticks_per_ms;
+
+    // write the deadline to the MSR to arm it
+    msr_write(MSR_IA32_TSC_DEADLINE, tsc_deadline);
+
+    serial_println!("Timer configured in TSC-Deadline mode");
 }
 
 unsafe fn init_keyboard(local_apic_ptr: *mut u32) {
@@ -446,7 +553,12 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     if TIMER_DEBUG_PRINT {
         serial_println!("*");
     };
+
     unsafe {
+        // re-arm the timer for the next tick
+        let next_deadline = tsc_read() + (TSC_MOCK_FREQUENCY / TIMER_TICK_FREQ_DIVIDER);
+        msr_write(MSR_IA32_TSC_DEADLINE, next_deadline);
+
         interrupt_over();
     }
 }

@@ -37,10 +37,11 @@ fat32-image: test_disk_image.fat32.img
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
 	qemu-system-$(KARCH) \
 		-M q35 \
+		-accel kvm \
+		-cpu qemu64,+tsc-deadline,+apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \
-		-drive file=test_disk_image.fat32.img,format=raw,if=none,id=drive0 \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio \
 		-no-reboot \

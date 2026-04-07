@@ -95,8 +95,7 @@ fn to_fat32_path(path: &str) -> FileSystemResult<Vec<[u8; MAX_FULL_NAME_LENGTH]>
         if part == "." || part == ".." {
             //TODO: handle user wanting to do "../some_file_in_parent_dir_relative" etc, when we get process working directories, but this is probably not the place to resolve these
             return Err(FileSystemError::InvalidPath);
-        }
-        else {
+        } else {
             fat32_parts.push(to_fat32_name(part)?);
         }
     }
@@ -326,23 +325,19 @@ impl Fat32Driver {
         assert!(count != 0);
 
         let first_cluster = self.find_free_cluster(disk_mgr)?;
-        self.write_fat_entry(first_cluster, END_OF_CHAIN, disk_mgr)?;
-
-        let mut prev_cluster = first_cluster;
-
         serial_println!("  Allocating cluster chain starting at: {}", first_cluster);
 
+        let mut prev_cluster = first_cluster;
         for i in 1..count {
             let new_cluster = self.find_free_cluster(disk_mgr)?;
             serial_println!("    Allocating new cluster: {}", new_cluster);
 
             // link the previous cluster
-            self.write_fat_entry(new_cluster, prev_cluster, disk_mgr)?;
-            //self.write_fat_entry(new_cluster, END_OF_CHAIN, disk_mgr)?;
             self.write_fat_entry(prev_cluster, new_cluster, disk_mgr)?;
 
             prev_cluster = new_cluster;
         }
+        self.write_fat_entry(prev_cluster, END_OF_CHAIN, disk_mgr)?;
 
         Ok(first_cluster)
     }
@@ -420,7 +415,7 @@ impl Fat32Driver {
     }
 
     // Read directory entries starting with a given cluster
-    // NOTE: this returns all entries, including deleted ones, volume id and . / .. entries, 
+    // NOTE: this returns all entries, including deleted ones, volume id and . / .. entries,
     // since we use index of the entry in this returned vector for some operations
     fn read_directory_entries(
         &self,
@@ -504,11 +499,20 @@ impl Fat32Driver {
 
         for (i, path_part) in path_parts.iter().enumerate() {
             let fat32_path_part = to_fat32_name(*path_part)?;
-            serial_println!("FAT32Driver: find_direntry: path part {} - {} = {:?}", i, *path_part, fat32_path_part);
+            serial_println!(
+                "FAT32Driver: find_direntry: path part {} - {} = {:?}",
+                i,
+                *path_part,
+                fat32_path_part
+            );
 
             let entries = self.read_directory_entries(curr_cluster, disk_mgr)?;
             for e in &entries {
-                serial_println!("   FAT32Driver: find_direntry: entry {}, is equal?: {}", e.get_filename(), e.full_name_matches(&fat32_path_part));
+                serial_println!(
+                    "   FAT32Driver: find_direntry: entry {}, is equal?: {}",
+                    e.get_filename(),
+                    e.full_name_matches(&fat32_path_part)
+                );
             }
 
             let entry = entries
@@ -922,7 +926,10 @@ impl FilesystemDriver for Fat32Driver {
             let mut disk_mgr = get_disk_mgr();
 
             let entries = self.read_directory_entries(parent_cluster, &mut disk_mgr)?;
-            if entries.iter().any(|e| !e.is_deleted() && e.get_filename() == name) {
+            if entries
+                .iter()
+                .any(|e| !e.is_deleted() && e.get_filename() == name)
+            {
                 serial_println!("FAT32Driver: create_file: entry already exists");
                 return Err(FileSystemError::FileExists);
             }
@@ -983,7 +990,10 @@ impl FilesystemDriver for Fat32Driver {
             let mut disk_mgr = get_disk_mgr();
 
             let entries = self.read_directory_entries(parent_cluster, &mut disk_mgr)?;
-            if entries.iter().any(|e| !e.is_deleted() && e.get_filename() == name) {
+            if entries
+                .iter()
+                .any(|e| !e.is_deleted() && e.get_filename() == name)
+            {
                 serial_println!("FAT32Driver: create_directory: entry already exists");
                 return Err(FileSystemError::FileExists);
             }
