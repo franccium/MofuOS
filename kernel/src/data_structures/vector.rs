@@ -7,9 +7,9 @@ use core::ptr::{self, NonNull};
 use core::slice;
 
 pub struct Vec<T> {
-    pub data: NonNull<T>,
     pub size: usize,
     pub capacity: usize,
+    pub data: NonNull<T>,
 }
 
 impl<T> Vec<T> {
@@ -29,9 +29,9 @@ impl<T> Vec<T> {
         let data = unsafe { NonNull::new_unchecked(ptr.cast::<T>()) };
 
         Self {
-            data: data,
             size: 0,
             capacity,
+            data: data,
         }
     }
 

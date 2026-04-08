@@ -2,7 +2,8 @@
 use crate::{
     gdt, hlt_loop,
     memory::{IdendtityAcpiHandler, MemoryMapFrameAllocator},
-    serial_print, serial_println, util::cpuinfo::{get_cpu_info, CpuFeatureFlags},
+    serial_print, serial_println,
+    util::cpuinfo::{CpuFeatureFlags, get_cpu_info},
 };
 use acpi::{
     AcpiTables, PhysicalMapping,
@@ -28,8 +29,9 @@ use x86_64::{
 
 use core::arch::asm;
 
-const TIMER_DEBUG_PRINT: bool = true;
+const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
+const TIMER_ENABLED: bool = false;
 
 pub const TSC_MOCK_FREQUENCY: u64 = 2400000000u64;
 pub const TIMER_TICK_INTERVAL_MS: u64 = 100;
@@ -230,7 +232,14 @@ unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32) {
 }
 
 pub unsafe fn init_timer(local_apic_ptr: *mut u32) {
-    if !get_cpu_info().features.contains(CpuFeatureFlags::TSC_DEADLINE) {
+    if !TIMER_ENABLED {
+        return
+    }
+    
+    if !get_cpu_info()
+        .features
+        .contains(CpuFeatureFlags::TSC_DEADLINE)
+    {
         serial_println!("TSC-Deadline mode not supported, falling back to periodic mode");
         init_timer_periodic_mode(local_apic_ptr);
         return;

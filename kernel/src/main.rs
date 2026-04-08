@@ -6,6 +6,7 @@ mod boot;
 use core::arch::asm;
 use core::fmt::Write;
 use embedded_graphics::prelude::*;
+use kernel::data_structures::dequeue::Dequeue;
 use kernel::data_structures::vector::Vec;
 use kernel::{
     allocator,
@@ -283,7 +284,6 @@ fn test_filesystem_system() {
                     }
                     Err(e) => serial_println!("Failed to open root: {:?}", e),
                 }
-
             }
         }
         Err(e) => serial_println!("Failed to initialize filesystem: {}", e),
@@ -295,7 +295,6 @@ fn main() -> ! {
 
     //test_process_system();
     //test_filesystem_system();
-
 
     use embedded_graphics::pixelcolor::Rgb888;
     use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};

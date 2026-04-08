@@ -4,8 +4,10 @@ use x86_64::VirtAddr;
 
 // Marks terminated children
 pub const INVALID_PID: usize = usize::MAX;
-pub const MAX_PRIORITY: u8 = u8::MAX;
+pub const MAX_PRIORITY: u8 = 8;
 pub const RFLAGS_DEFAULT: u64 = 0x202;
+
+pub type PID = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
@@ -49,6 +51,30 @@ pub struct ExecutionContext {
     pub page_table_base_phys: u64,
 }
 
+
+//TODO: when we have a fs/vfs
+pub struct FileDescriptor {
+    pub handle: usize,
+}
+
+pub struct Process {
+    pub pid: PID,
+    pub parent_pid: PID,
+    pub priority: u8,
+    pub state: ProcessState,
+    pub name: String,
+    pub children: Vec<PID>,
+    pub file_descriptors: Vec<FileDescriptor>,
+    
+    pub resources: ProcessResources,
+    pub exit_code: Option<i32>,
+    pub is_out: bool,
+    
+    pub execution_context: ExecutionContext,
+}
+
+unsafe impl Send for Process {}
+
 impl ExecutionContext {
     pub fn new(entry_point: u64, stack_top: u64, page_table_base_phys: u64) -> Self {
         Self {
@@ -74,29 +100,6 @@ impl ExecutionContext {
         }
     }
 }
-
-//TODO: when we have a fs/vfs
-pub struct FileDescriptor {
-    pub handle: usize,
-}
-
-pub struct Process {
-    pub pid: usize,
-    pub parent_pid: usize,
-    pub priority: u8,
-    pub state: ProcessState,
-    pub name: String,
-    pub children: Vec<usize>,
-    pub file_descriptors: Vec<FileDescriptor>,
-
-    pub resources: ProcessResources,
-    pub exit_code: Option<i32>,
-    pub is_out: bool,
-    
-    pub execution_context: ExecutionContext,
-}
-
-unsafe impl Send for Process {}
 
 impl Process {
     pub fn new(
