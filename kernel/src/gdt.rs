@@ -44,15 +44,21 @@ struct Gdt {
 lazy_static! {
     static ref GDT: Gdt = {
         let mut table = GlobalDescriptorTable::new();
-        let code_selector = table.append(Descriptor::kernel_code_segment());
-        let data_selector = table.append(Descriptor::kernel_data_segment());
+        let kernel_code_selector = table.append(Descriptor::kernel_code_segment());
+        let kernel_data_selector = table.append(Descriptor::kernel_data_segment());
+        
+        let user_code_selector = table.append(Descriptor::user_code_segment());
+        let user_data_selector = table.append(Descriptor::user_data_segment());
+        
         let tss_selector = table.append(Descriptor::tss_segment(&TSS));
 
         Gdt {
             table,
             selectors: Selectors {
-                code_selector,
-                data_selector,
+                kernel_code_selector,
+                kernel_data_selector,
+                user_code_selector,
+                user_data_selector,
                 tss_selector,
             },
         }
@@ -60,8 +66,10 @@ lazy_static! {
 }
 
 struct Selectors {
-    code_selector: SegmentSelector,
-    data_selector: SegmentSelector,
+    kernel_code_selector: SegmentSelector,
+    kernel_data_selector: SegmentSelector,
+    user_code_selector: SegmentSelector,
+    user_data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
@@ -70,10 +78,33 @@ pub fn init() {
     GDT.table.load();
     // SAFETY: We have just loaded the GDT, so the selectors are valid.
     unsafe {
-        CS::set_reg(GDT.selectors.code_selector);
-        SS::set_reg(GDT.selectors.data_selector);
-        DS::set_reg(GDT.selectors.data_selector);
-        ES::set_reg(GDT.selectors.data_selector);
+        CS::set_reg(GDT.selectors.kernel_code_selector);
+        SS::set_reg(GDT.selectors.kernel_data_selector);
+        DS::set_reg(GDT.selectors.kernel_data_selector);
+        ES::set_reg(GDT.selectors.kernel_data_selector);
         load_tss(GDT.selectors.tss_selector);
     }
+
+    serial_println!("GDT initialized:");
+    serial_println!("  Kernel code selector: {:?}", GDT.selectors.kernel_code_selector);
+    serial_println!("  Kernel data selector: {:?}", GDT.selectors.kernel_data_selector);
+    serial_println!("  User code selector: {:?}", GDT.selectors.user_code_selector);
+    serial_println!("  User data selector: {:?}", GDT.selectors.user_data_selector);
+    serial_println!("  TSS selector: {:?}", GDT.selectors.tss_selector);
+}
+
+pub fn get_user_code_selector() -> SegmentSelector {
+    GDT.selectors.user_code_selector
+}
+
+pub fn get_user_data_selector() -> SegmentSelector {
+    GDT.selectors.user_data_selector
+}
+
+pub fn get_kernel_code_selector() -> SegmentSelector {
+    GDT.selectors.kernel_code_selector
+}
+
+pub fn get_kernel_data_selector() -> SegmentSelector {
+    GDT.selectors.kernel_data_selector
 }

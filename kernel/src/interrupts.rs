@@ -1,7 +1,13 @@
 #![allow(unused)]
+use crate::process::syscall::init_syscall;
+use crate::process::{
+    process::INVALID_PID,
+    process_manager::{ARCHE_PID, PROCESS_MANAGER},
+};
+use crate::util::msr::{msr_read, msr_write};
 use crate::{
     gdt, hlt_loop,
-    memory::{IdendtityAcpiHandler, MemoryMapFrameAllocator},
+    memory::memory::{IdendtityAcpiHandler, MemoryMapFrameAllocator},
     serial_print, serial_println,
     util::cpuinfo::{CpuFeatureFlags, get_cpu_info},
 };
@@ -17,17 +23,15 @@ use acpi::{
         },
     },
 };
-use lazy_static::lazy_static;
-use spin::Mutex;
 use x86_64::{
-    PhysAddr, VirtAddr,
-    structures::{
+    PhysAddr, VirtAddr, registers::rflags::RFlags, structures::{
         idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
         paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB},
-    },
+    }
 };
-
 use core::arch::asm;
+use lazy_static::lazy_static;
+use spin::Mutex;
 
 const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
@@ -150,33 +154,6 @@ unsafe fn tsc_read() -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
-/// Write to a Model-Specific Register (MSR)
-unsafe fn msr_write(msr: u32, value: u64) {
-    let low = value as u32;
-    let high = (value >> 32) as u32;
-    asm!(
-        "wrmsr",
-        in("ecx") msr,
-        in("eax") low,
-        in("edx") high,
-        options(nostack, preserves_flags)
-    );
-}
-
-// Read from a Model-Specific Register (MSR)
-unsafe fn msr_read(msr: u32) -> u64 {
-    let low: u32;
-    let high: u32;
-    asm!(
-        "rdmsr",
-        in("ecx") msr,
-        out("eax") low,
-        out("edx") high,
-        options(nostack, preserves_flags)
-    );
-    ((high as u64) << 32) | (low as u64)
-}
-
 unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32) {
     let tsc_freq = TSC_MOCK_FREQUENCY;
     serial_println!("TSC Frequency: {} Hz", tsc_freq);
@@ -233,9 +210,9 @@ unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32) {
 
 pub unsafe fn init_timer(local_apic_ptr: *mut u32) {
     if !TIMER_ENABLED {
-        return
+        return;
     }
-    
+
     if !get_cpu_info()
         .features
         .contains(CpuFeatureFlags::TSC_DEADLINE)
@@ -411,6 +388,8 @@ pub unsafe fn init_acpi(
         serial_println!("ERROR: Cannot find IO apic");
     }
 
+    init_syscall();
+
     disable_pic();
 }
 
@@ -440,6 +419,8 @@ lazy_static! {
         // Hardware interrupts
         idt[InterruptIndex::Timer as u8].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard as u8].set_handler_fn(keyboard_interrupt_handler);
+
+        //unsafe {idt[0x80].set_handler_fn(syscall_int80_handler).set_stack_index(1)};
 
         unsafe {
             idt.double_fault

@@ -1,7 +1,6 @@
 use crate::serial_println;
 use bitflags::bitflags;
 use core::arch::asm;
-use spin::Once;
 
 static mut CPU_INFO: CpuInfo = CpuInfo {
     features: CpuFeatureFlags::empty(),

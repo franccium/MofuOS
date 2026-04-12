@@ -35,10 +35,11 @@ pub unsafe fn init_offset_page_table(hhdm_offset: u64) -> OffsetPageTable<'stati
     }
 }
 
+/// iterates through USABLE memory regions and hands out 4KB physical frames on demand
 pub struct MemoryMapFrameAllocator {
     memory_map: &'static [&'static Entry],
-    region_index: usize,
-    frame_offset: u64,
+    curr_region_index: usize,
+    frame_offset_in_region: u64,
 }
 
 fn align_up(x: u64, align: u64) -> u64 {
@@ -155,8 +156,8 @@ impl MemoryMapFrameAllocator {
 
         Self {
             memory_map,
-            region_index: 0,
-            frame_offset: 0,
+            curr_region_index: 0,
+            frame_offset_in_region: 0,
         }
     }
 
@@ -173,11 +174,11 @@ impl MemoryMapFrameAllocator {
 unsafe impl FrameAllocator<Size4KiB> for MemoryMapFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         loop {
-            let region = self.memory_map.get(self.region_index)?;
+            let region = self.memory_map.get(self.curr_region_index)?;
 
             if region.entry_type != EntryType::USABLE {
-                self.region_index += 1;
-                self.frame_offset = 0;
+                self.curr_region_index += 1;
+                self.frame_offset_in_region = 0;
                 continue;
             }
 
@@ -185,14 +186,14 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryMapFrameAllocator {
             let start = align_up(region.base, page_size);
             let end = region.base + region.length;
 
-            let addr = start + self.frame_offset;
+            let addr = start + self.frame_offset_in_region;
 
             if addr + page_size <= end {
-                self.frame_offset += page_size;
+                self.frame_offset_in_region += page_size;
                 return Some(PhysFrame::containing_address(PhysAddr::new(addr)));
             } else {
-                self.region_index += 1;
-                self.frame_offset = 0;
+                self.curr_region_index += 1;
+                self.frame_offset_in_region = 0;
             }
         }
     }

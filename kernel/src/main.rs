@@ -8,10 +8,11 @@ use core::fmt::Write;
 use embedded_graphics::prelude::*;
 use kernel::data_structures::dequeue::Dequeue;
 use kernel::data_structures::vector::Vec;
+use kernel::process::{ElfLoadError, ElfLoadInfo, elf_loader};
 use kernel::{
-    allocator,
     filesystem::sirius::{FileType, get_sirius},
     graphics::framebuffer::FrameBufferTarget,
+    memory::allocator,
     programs::theophe::Theophe,
     serial_print, serial_println,
 };
@@ -292,6 +293,30 @@ fn test_filesystem_system() {
 
 fn main() -> ! {
     serial_println!("Welcome to MofuOS!");
+
+    kernel::process::syscall::init_syscall_stack();
+
+    match ElfLoadInfo::from_elf_data(&elf_loader::TEST_ELF) {
+        Err(ElfLoadError::ParseError(e)) => {
+            serial_println!("Error loading elf: ParseError: {:?}", e)
+        }
+        Err(ElfLoadError::InvalidMagic) => {
+            serial_println!("Error loading elf: InvalidMagic")
+        }
+        Err(ElfLoadError::InvalidArch) => {
+            serial_println!("Error loading elf: InvalidArch")
+        }
+        Err(ElfLoadError::InvalidHeader) => {
+            serial_println!("Error loading elf: InvalidHeader")
+        }
+        Err(kernel::process::ElfLoadError::InvalidType) | Err(kernel::process::ElfLoadError::NoLoadableSegments) | Err(kernel::process::ElfLoadError::ReadError) => todo!(),
+        Ok(info) => {
+            serial_println!("Loaded elf info: {:?}", info.entry_point)
+        }
+    }
+
+    //kernel::process_start::create_init_process();
+    kernel::process_start::create_and_run_init_process();
 
     //test_process_system();
     //test_filesystem_system();

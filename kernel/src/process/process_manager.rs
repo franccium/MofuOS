@@ -1,7 +1,10 @@
 use crate::data_structures::vector::Vec;
+use crate::filesystem::sirius::get_sirius;
+use crate::process::elf_loader::{ElfLoadError, ElfLoadInfo};
 use crate::process::process::{INVALID_PID, MAX_PRIORITY, Process, ProcessResources, ProcessState};
 use crate::serial_println;
 use alloc::string::String;
+use alloc::vec;
 use spin::Mutex;
 
 pub const ARCHE_PID: usize = 0;
@@ -19,6 +22,7 @@ pub enum ProcessError {
     ProcessNotFound,
     ParentNotFound,
     DoubleDelete,
+    ElfLoadError(ElfLoadError),
 }
 
 pub struct ProcessManager {
@@ -37,23 +41,23 @@ impl ProcessManager {
     }
 
     pub fn init_arche(&mut self) -> usize {
-        let arche = Process::new(
-            ARCHE_PID,
-            ARCHE_PID,
-            MAX_PRIORITY,
-            String::from("arche"),
-            true,
-            ProcessResources {
-                memory_limit: usize::MAX,
-                memory_used: 0,
-                cpu_time_slice: 0,
-            },
-            0,
-            0,
-            0,
-        );
-        serial_println!("Initialized arche process with PID 0");
-        self.processes.push(arche);
+        // let arche = Process::new(
+        //     ARCHE_PID,
+        //     ARCHE_PID,
+        //     MAX_PRIORITY,
+        //     String::from("arche"),
+        //     true,
+        //     ProcessResources {
+        //         memory_limit: usize::MAX,
+        //         memory_used: 0,
+        //         cpu_time_slice: 0,
+        //     },
+        //     0,
+        //     0,
+        //     0,
+        // );
+        // serial_println!("Initialized arche process with PID 0");
+        // self.processes.push(arche);
         0
     }
 
@@ -69,7 +73,7 @@ impl ProcessManager {
             parent_pid != INVALID_PID,
             "Parent PID cannot be INVALID_PID"
         );
-        
+
         let new_pid = self.new_pid;
         self.new_pid += 1;
 
@@ -88,22 +92,17 @@ impl ProcessManager {
             String::from_utf8_lossy(slice).into_owned()
         };
 
-        let mut new_process = Process::new(
-            new_pid,
-            parent_pid,
-            priority,
-            name_str,
-            is_out,
-            resources,
-            0, // TODO: will be set when loading program
-            0, // TODO: will be set when allocating process memory
-            0, //TODO: will be set when creating process page tables
-        );
-        new_process.state = ProcessState::Ready;
+        // let mut new_process = Process::new(
+        //     new_pid, parent_pid, priority, name_str, is_out, resources,
+        //     0, // TODO: will be set when loading program
+        //     0, // TODO: will be set when allocating process memory
+        //     0, //TODO: will be set when creating process page tables
+        // );
+        // new_process.state = ProcessState::Ready;
 
-        parent.children.push(new_pid);
+        // parent.children.push(new_pid);
 
-        self.processes.push(new_process);
+        // self.processes.push(new_process);
         Ok(new_pid)
     }
 
@@ -154,10 +153,7 @@ impl ProcessManager {
     pub fn cleanup_dead(&mut self) {}
 
     pub fn get_process(&self, pid: usize) -> Result<&Process, ProcessError> {
-        assert!(
-            pid != INVALID_PID,
-            "get_process: PID cannot be INVALID_PID"
-        );
+        assert!(pid != INVALID_PID, "get_process: PID cannot be INVALID_PID");
         self.processes
             .iter()
             .find(|p| p.pid == pid)

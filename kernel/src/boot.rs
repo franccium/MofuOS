@@ -1,6 +1,6 @@
 use acpi::rsdp;
 use core::cell::UnsafeCell;
-use kernel::{io::DiskDevice, memory::MemoryMapFrameAllocator};
+use kernel::{io::DiskDevice, memory::memory::MemoryMapFrameAllocator};
 use limine::{
     BaseRevision, framebuffer,
     framebuffer::{Framebuffer, VideoMode},
@@ -21,7 +21,7 @@ use x86_64::{
 };
 
 use crate::main;
-use kernel::{allocator, init_globals, interrupts, memory, serial_println, util::cpuinfo::init_cpu_info};
+use kernel::{memory::allocator, init_globals, interrupts, memory, serial_println, util::cpuinfo::init_cpu_info};
 
 /// Sets the base revision to the latest revision supported by the crate.
 /// See specification for further info.
@@ -84,7 +84,7 @@ unsafe extern "C" fn kmain() -> ! {
 
     unsafe { init_cpu_info() };
 
-    // memory::init_acpi_memory_map(rsdp_phys_addr);
+    // memory::memory::init_acpi_memory_map(rsdp_phys_addr);
 
     let efi_memory_map_response = EFI_MEMORY_MAP_REQUEST
         .get_response()
@@ -132,14 +132,14 @@ unsafe extern "C" fn kmain() -> ! {
 
     init_globals();
 
-    let mut mapper = unsafe { memory::init_offset_page_table(hhdm_offset) };
+    let mut mapper = unsafe { memory::memory::init_offset_page_table(hhdm_offset) };
     serial_println!("Offset page table initialized");
 
     serial_println!("Creating frame_allocator");
     let mut frame_allocator =
         unsafe { MemoryMapFrameAllocator::init(memory_map_response.entries()) };
 
-    memory::map_acpi_regions(
+    memory::memory::map_acpi_regions(
         &mut mapper,
         &mut frame_allocator,
         rsdp_phys_addr,
@@ -159,6 +159,15 @@ unsafe extern "C" fn kmain() -> ! {
             &mut frame_allocator,
         )
     };
+
+    let (kernel_page_table_frame, _) = x86_64::registers::control::Cr3::read();
+    let kernel_page_table_phys = kernel_page_table_frame.start_address();
+    let user_memory_manager = memory::usermem::UserMemoryManager::new(
+        kernel_page_table_phys,
+        hhdm_offset,
+    );
+    memory::init_memory_globals(frame_allocator, user_memory_manager);
+    serial_println!("Global memory managers initialized");
 
     interrupts::enable_interrupts();
 

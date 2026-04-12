@@ -3,7 +3,7 @@
 #![feature(abi_x86_interrupt)]
 #![feature(allocator_api)]
 
-pub mod allocator;
+pub mod memory;
 extern crate alloc;
 pub mod data_structures;
 pub mod filesystem;
@@ -11,10 +11,10 @@ pub mod gdt;
 pub mod graphics;
 pub mod interrupts;
 pub mod io;
-pub mod memory;
 pub mod process;
 pub mod programs;
 pub mod util;
+pub mod process_start;
 
 pub use alloc::string::String;
 

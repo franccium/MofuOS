@@ -3,7 +3,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::MutexGuard;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::process::{Process, ProcessState, ProcessResources, ExecutionContext, PID};
 use crate::data_structures::dequeue::Dequeue;
 

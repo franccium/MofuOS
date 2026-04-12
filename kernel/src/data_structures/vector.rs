@@ -1,5 +1,5 @@
 extern crate alloc;
-use crate::allocator::ALLOCATOR;
+use crate::memory::allocator::ALLOCATOR;
 use crate::serial_println;
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::ops::{Deref, DerefMut, Index, IndexMut, Range};
