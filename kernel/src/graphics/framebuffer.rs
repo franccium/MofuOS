@@ -3,13 +3,15 @@ use embedded_graphics::geometry::Size;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
 use limine::framebuffer::Framebuffer;
+use crate::serial_println;
+use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use spin::{MutexGuard};
 
 pub struct FrameBufferTarget<'a> {
-    framebuffer: MutexGuard<'a, Framebuffer<'static>>,
+    pub framebuffer: MutexGuard<'a, Framebuffer<'static>>,
     pub width: u64,
     pub height: u64,
-    pitch: u64,
+    pub pitch: u64,
 }
 
 impl<'a> FrameBufferTarget<'a> {
@@ -50,6 +52,46 @@ impl<'a> FrameBufferTarget<'a> {
 
     pub fn height(&self) -> u64 {
         self.height
+    }
+
+    pub unsafe fn copy_row(&mut self, src: *const u32, dst_y: u64, dst_x: u64, width: u64) {
+        if dst_y >= self.height || dst_x >= self.width {
+            return;
+        }
+
+        let copy_width= width.min(self.width - dst_x);
+
+        let dst_offset = dst_y * self.pitch + dst_x * FRAMEBUFFER_BYTES_PER_PIXEL as u64;
+        let dst_ptr = unsafe {
+            self.framebuffer
+                .addr()
+                .add(dst_offset as usize)
+                .cast::<u32>()
+        };
+
+        unsafe { core::ptr::copy_nonoverlapping(src, dst_ptr, copy_width as usize) };
+    }
+
+    pub fn fill_rect(&mut self, x: u64, y: u64, width: u64, height: u64, color: Rgb888) {
+        let x = x.min(self.width);
+        let y = y.min(self.height);
+        let width = width.min(self.width - x);
+        let height = height.min(self.height - y);
+
+        let color_xrgb = ((color.r() as u32) << 16) | ((color.g() as u32) << 8) | (color.b() as u32);
+
+        unsafe {
+            let fb_addr = self.framebuffer.addr();
+
+            for row in 0..height {
+                let row_offset = (y + row) * self.pitch + x * 4;
+                let row_ptr = fb_addr.add(row_offset as usize).cast::<u32>();
+
+                for col in 0..width {
+                    row_ptr.add(col as usize).write(color_xrgb);
+                }
+            }
+        }
     }
 }
 

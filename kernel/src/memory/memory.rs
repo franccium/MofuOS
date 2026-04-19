@@ -42,11 +42,11 @@ pub struct MemoryMapFrameAllocator {
     frame_offset_in_region: u64,
 }
 
-fn align_up(x: u64, align: u64) -> u64 {
+pub const fn align_up(x: u64, align: u64) -> u64 {
     (x + align - 1) & !(align - 1)
 }
 
-fn align_down(x: u64, align: u64) -> u64 {
+pub const fn align_down(x: u64, align: u64) -> u64 {
     x & !(align - 1)
 }
 
