@@ -1,5 +1,5 @@
 use x86_64::{
-    PhysAddr, VirtAddr,
+    PhysAddr,
     registers::control::{Cr3, Cr3Flags},
     structures::paging::PhysFrame,
 };

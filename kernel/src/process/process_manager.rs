@@ -1,10 +1,7 @@
 use crate::data_structures::vector::Vec;
-use crate::filesystem::sirius::get_sirius;
-use crate::process::elf_loader::{ElfLoadError, ElfLoadInfo};
-use crate::process::process::{INVALID_PID, MAX_PRIORITY, Process, ProcessResources, ProcessState};
+use crate::process::elf_loader::{ElfLoadError};
+use crate::process::process::{INVALID_PID, Process, ProcessState};
 use crate::serial_println;
-use alloc::string::String;
-use alloc::vec;
 use spin::Mutex;
 
 pub const ARCHE_PID: usize = 0;
@@ -56,7 +53,7 @@ impl ProcessManager {
         //     0,
         //     0,
         // );
-        // serial_println!("Initialized arche process with PID 0");
+        serial_println!("Initialized arche process with PID 0");
         // self.processes.push(arche);
         0
     }
@@ -64,10 +61,10 @@ impl ProcessManager {
     pub fn create_process(
         &mut self,
         parent_pid: usize,
-        priority: u8,
-        name_ptr: *const u8,
-        name_len: u8,
-        is_out: bool,
+        _priority: u8,
+        _name_ptr: *const u8,
+        _name_len: u8,
+        _is_out: bool,
     ) -> Result<usize, ProcessError> {
         assert!(
             parent_pid != INVALID_PID,
@@ -77,20 +74,20 @@ impl ProcessManager {
         let new_pid = self.new_pid;
         self.new_pid += 1;
 
-        let parent = self.get_process_mut(parent_pid)?;
+        // let parent = self.get_process_mut(parent_pid)?;
 
-        //TODO:
-        //let child_resources = if is_out {
-        let resources = ProcessResources {
-            memory_limit: parent.resources.memory_limit / 4,
-            memory_used: 0,
-            cpu_time_slice: parent.resources.cpu_time_slice / 2,
-        };
+        // //TODO:
+        // //let child_resources = if is_out {
+        // let resources = ProcessResources {
+        //     memory_limit: parent.resources.memory_limit / 4,
+        //     memory_used: 0,
+        //     cpu_time_slice: parent.resources.cpu_time_slice / 2,
+        // };
 
-        let name_str = unsafe {
-            let slice = core::slice::from_raw_parts(name_ptr, name_len as usize);
-            String::from_utf8_lossy(slice).into_owned()
-        };
+        // let name_str = unsafe {
+        //     let slice = core::slice::from_raw_parts(name_ptr, name_len as usize);
+        //     String::from_utf8_lossy(slice).into_owned()
+        // };
 
         // let mut new_process = Process::new(
         //     new_pid, parent_pid, priority, name_str, is_out, resources,

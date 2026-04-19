@@ -1,23 +1,14 @@
-use crate::process::process::{Process, get_current_process};
 use crate::process::{
     process::INVALID_PID,
     process_manager::{ARCHE_PID, PROCESS_MANAGER},
 };
 use crate::serial_println;
-use crate::util::msr::{msr_read, msr_write};
+use crate::util::msr::{msr_write};
 use core::arch::naked_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::{
-    PhysAddr, VirtAddr,
-    registers::rflags::RFlags,
-    structures::{
-        idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
-        paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB},
-    },
-};
-use x86_64::{
-    registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star},
-    structures::gdt::SegmentSelector,
+    VirtAddr,
+    registers::model_specific::{Efer, EferFlags},
 };
 
 #[repr(u32)]
@@ -112,8 +103,8 @@ impl SystemCall {
         arg2: usize,
         arg3: usize,
         arg4: usize,
-        arg5: usize,
-        arg6: usize,
+        _arg5: usize,
+        _arg6: usize,
     ) -> Option<Self> {
         match num {
             0 => Some(SystemCall::CreateProcess {
@@ -203,12 +194,12 @@ pub fn handle_syscall(pid: usize, call: SystemCall) -> Result<(), SyscallError> 
 }
 
 //TODO: fix stacks
+const SYSCALL_STACK_SIZE: usize = 4096 * 16;
 #[repr(align(4096))]
-struct SyscallStack([u8; 4096 * 16]);
-static mut SYSCALL_STACK: SyscallStack = SyscallStack([0; 4096 * 16]);
+struct SyscallStack([u8; SYSCALL_STACK_SIZE]);
+static mut SYSCALL_STACK: SyscallStack = SyscallStack([0; SYSCALL_STACK_SIZE]);
 static STACK_TOP: AtomicU64 = AtomicU64::new(0);
 
-const SYSCALL_STACK_SIZE: usize = 4096 * 16;
 
 pub fn init_syscall_stack() {
     let top = unsafe {
@@ -299,7 +290,7 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
-    let frame = &mut *frame;
+    let frame = unsafe { &mut *frame };
     
     serial_println!(
         "Syscall: num={}, arg1={:#x}, arg2={:#x}, arg3={:#x}, arg4={:#x}, arg5={:#x}, arg6={:#x}",
@@ -360,7 +351,7 @@ pub fn init_syscall() {
 
     // set LSTAR to the syscall handler
     // the CPU will load this into RIP to arrive there
-    let handler_addr = syscall_handler as u64;
+    let handler_addr = syscall_handler as *const () as u64;
     unsafe {
         let msr = 0xC0000082u32;
         msr_write(msr, handler_addr);
@@ -370,7 +361,7 @@ pub fn init_syscall() {
     const IA32_FMASK_MSR_VALUE: u64 = 0u64;
     unsafe {
         let msr = 0xC0000084u32;
-        msr_write(msr, 0u64);
+        msr_write(msr, IA32_FMASK_MSR_VALUE);
     }
 
     serial_println!("Syscall MSRs initialized");

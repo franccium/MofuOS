@@ -1,12 +1,9 @@
-use alloc::vec::Vec;
-use crate::{memory::memory::MemoryMapFrameAllocator, process::PID, serial_println};
-use alloc::collections::BTreeMap;
+use crate::{memory::memory::MemoryMapFrameAllocator, serial_println};
 use x86_64::{
-    PhysAddr, VirtAddr, registers::control::Cr3, structures::paging::{
-        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, frame, mapper::MapToError, page_table::FrameError
+    PhysAddr, VirtAddr, structures::paging::{
+        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, Size4KiB, mapper::MapToError
     }
 };
-use spin::Mutex;
 
 const LEVEL_4_KERNEL_ENTRIES_START: usize = 256;
 const LEVEL_4_KERNEL_ENTRIES_END: usize = 512;

@@ -2,9 +2,8 @@ extern crate alloc;
 use crate::memory::allocator::ALLOCATOR;
 use crate::serial_println;
 use alloc::alloc::{GlobalAlloc, Layout};
-use core::ops::{Deref, DerefMut, Index, IndexMut, Range};
+use core::ops::{Index, IndexMut};
 use core::ptr::{self, NonNull};
-use core::slice;
 use core::fmt;
 
 pub struct Dequeue<T> {
@@ -191,14 +190,14 @@ impl<T> Dequeue<T> {
         self.size = 0;
     }
 
-    pub fn iter(&self) -> Iter<T> {
+    pub fn iter(&self) -> Iter<'_, T> {
         Iter {
             dq: self,
             index: 0,
         }
     }
 
-    pub fn iter_mut(&mut self) -> IterMut<T> {
+    pub fn iter_mut(&mut self) -> IterMut<'_, T> {
         IterMut {
             dq: self,
             index: 0,
@@ -206,7 +205,7 @@ impl<T> Dequeue<T> {
     }
 
     // iterate and consume
-    pub fn drain(&mut self) -> Drain<T> {
+    pub fn drain(&mut self) -> Drain<'_, T> {
         Drain {
             dq: self,
             index: 0,

@@ -90,23 +90,25 @@ unsafe fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
     let ecx: u32;
     let edx: u32;
 
-    asm!(
-        "push rbx",
-        "cpuid",
-        "mov {ebx:e}, ebx",
-        "pop rbx",
-        ebx = out(reg) ebx,
-        inout("eax") leaf => eax,
-        inout("ecx") 0 => ecx,
-        out("edx") edx,
-        options(nostack, preserves_flags)
-    );
+    unsafe {
+        asm!(
+            "push rbx",
+            "cpuid",
+            "mov {ebx:e}, ebx",
+            "pop rbx",
+            ebx = out(reg) ebx,
+            inout("eax") leaf => eax,
+            inout("ecx") 0 => ecx,
+            out("edx") edx,
+            options(nostack, preserves_flags)
+        );
+    }
 
     (eax, ebx, ecx, edx)
 }
 
 pub unsafe fn init_cpu_info() {
-    let (max_leaf, vendor_ebx, vendor_ecx, vendor_edx) = cpuid(0);
+    let (max_leaf, vendor_ebx, vendor_ecx, vendor_edx) = unsafe {cpuid(0)};
     serial_println!(
         "init_cpu_info: read leaf 0: eax: {:#x}, ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
         max_leaf,
@@ -116,7 +118,7 @@ pub unsafe fn init_cpu_info() {
     );
 
     assert!(max_leaf >= 1);
-    let (_, feat_ebx, feat_ecx, feat_edx) = cpuid(1);
+    let (_, feat_ebx, feat_ecx, feat_edx) = unsafe {cpuid(1)};
     serial_println!(
         "init_cpu_info: read leaf 1: ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
         feat_ebx,
@@ -177,26 +179,141 @@ pub unsafe fn init_cpu_info() {
     let cpu_family = ((feat_edx >> 8) & 0xF) as u8;
     let cpu_model = ((feat_edx >> 4) & 0xF) as u8;
     let cpu_stepping = (feat_edx & 0xF) as u8;
-    let cpu_vendor = get_vendor(vendor_ebx, vendor_ecx, vendor_edx);
+    let cpu_vendor = unsafe {get_vendor(vendor_ebx, vendor_ecx, vendor_edx)};
     serial_println!("CPU Info:");
     serial_println!("  Vendor: {}", cpu_vendor);
     serial_println!("  Cache Line Size: {}", cache_line_size);
     serial_println!("  Features {:#b}", features);
 
-    CPU_INFO = CpuInfo {
-        features,
-        cache_line_size,
-        apic_id,
-        family: cpu_family,
-        model: cpu_model,
-        stepping: cpu_stepping,
-        vendor: cpu_vendor,
-    };
+    unsafe {
+        CPU_INFO = CpuInfo {
+            features,
+            cache_line_size,
+            apic_id,
+            family: cpu_family,
+            model: cpu_model,
+            stepping: cpu_stepping,
+            vendor: cpu_vendor,
+        };
+    }
 }
 
 pub fn get_cpu_info() -> &'static CpuInfo {
     unsafe {
         let ptr = &raw const CPU_INFO;
         &*ptr
+    }
+}
+
+
+/// PRITNING
+use alloc::string::String;
+use alloc::vec::Vec;
+impl CpuFeatureFlags {
+    pub fn to_feature_names(&self) -> Vec<&'static str> {
+        let mut features = Vec::new();
+        
+        if self.contains(CpuFeatureFlags::APIC) {
+            features.push("APIC");
+        }
+        if self.contains(CpuFeatureFlags::X2APIC) {
+            features.push("X2APIC");
+        }
+        if self.contains(CpuFeatureFlags::TSC) {
+            features.push("TSC");
+        }
+        if self.contains(CpuFeatureFlags::TSC_DEADLINE) {
+            features.push("TSC Deadline");
+        }
+        if self.contains(CpuFeatureFlags::PGE) {
+            features.push("PGE");
+        }
+        if self.contains(CpuFeatureFlags::PAT) {
+            features.push("PAT");
+        }
+        if self.contains(CpuFeatureFlags::SSE) {
+            features.push("SSE");
+        }
+        if self.contains(CpuFeatureFlags::SSE2) {
+            features.push("SSE2");
+        }
+        if self.contains(CpuFeatureFlags::SSE3) {
+            features.push("SSE3");
+        }
+        if self.contains(CpuFeatureFlags::SSE4_1) {
+            features.push("SSE4.1");
+        }
+        if self.contains(CpuFeatureFlags::SSE4_2) {
+            features.push("SSE4.2");
+        }
+        if self.contains(CpuFeatureFlags::AVX) {
+            features.push("AVX");
+        }
+        if self.contains(CpuFeatureFlags::AES) {
+            features.push("AES");
+        }
+        if self.contains(CpuFeatureFlags::RDRAND) {
+            features.push("RDRAND");
+        }
+        if self.contains(CpuFeatureFlags::HYPERVISOR) {
+            features.push("Hypervisor");
+        }
+        
+        features
+    }
+}
+
+impl core::fmt::Display for CpuInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        writeln!(f, "CPU Information:")?;
+        writeln!(f, "  Vendor: {}", self.vendor)?;
+        writeln!(f, "  Family: {}, Model: {}, Stepping: {}", 
+                 self.family, self.model, self.stepping)?;
+        writeln!(f, "  APIC ID: {}", self.apic_id)?;
+        writeln!(f, "  Cache Line Size: {} bytes", self.cache_line_size)?;
+        
+        writeln!(f, "  Features:")?;
+        let feature_names = self.features.to_feature_names();
+        if feature_names.is_empty() {
+            writeln!(f, "    <none detected>")?;
+        } else {
+            // Print features in columns of 4 for readability
+            for chunk in feature_names.chunks(4) {
+                write!(f, "    ")?;
+                for (i, feature) in chunk.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{:<12}", feature)?;
+                }
+                writeln!(f)?;
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+impl CpuInfo {
+    pub fn to_pretty_string(&self) -> String {
+        use core::fmt::Write;
+        let mut s = String::new();
+        write!(&mut s, "  {}", self).unwrap();
+        s
+    }
+    
+    pub fn to_compact_string(&self) -> String {
+        use core::fmt::Write;
+        let mut s = String::new();
+        let features: Vec<&str> = self.features.to_feature_names();
+        let features_str = if features.is_empty() {
+            String::from("none")
+        } else {
+            features.join("")
+        };
+        write!(&mut s, "CPU: {} (Family {}, Model {}), APIC ID: {}, Cache: {}B, Features: [{}]",
+               self.vendor, self.family, self.model, self.apic_id, 
+               self.cache_line_size, features_str).unwrap();
+        s
     }
 }

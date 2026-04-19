@@ -1,14 +1,12 @@
 use crate::{
     data_structures::vector::Vec,
-    memory::{memory::MemoryMapFrameAllocator, usermem::UserMemoryManager},
     process::{ElfLoadInfo, process_mem::ProcessMemoryLayout},
     serial_println,
 };
 use alloc::string::String;
-use spin::MutexGuard;
 use x86_64::{
     VirtAddr,
-    structures::paging::{PageTableFlags, Size4KiB, frame, mapper::MapToError},
+    structures::paging::{PageTableFlags, Size4KiB, mapper::MapToError},
 };
 
 // Marks terminated children
@@ -246,7 +244,7 @@ impl Process {
         )?;
         memory_layout.stack_top = stack_top;
 
-        let mut context = ExecutionContext::new(elf_info.entry_point, stack_top.as_u64(), memory_layout.top_page_table_phys.as_u64());
+        let context = ExecutionContext::new(elf_info.entry_point, stack_top.as_u64(), memory_layout.top_page_table_phys.as_u64());
 
         Ok(Self {
             pid,

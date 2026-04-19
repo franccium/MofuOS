@@ -2,7 +2,6 @@ pub mod boot_sector;
 pub mod direntry;
 pub mod test_data;
 
-use crate::filesystem::fat32;
 use crate::filesystem::fat32::direntry::{FatFileAttributes, MAX_EXT_LENGTH, MAX_NAME_LENGTH};
 use crate::filesystem::sirius::{
     FileAttributes, FileNode, FileSystemError, FileSystemResult, FileType, FilesystemDriver,
@@ -31,7 +30,7 @@ fn is_valid_filename(name: &str) -> bool {
     name.len() <= MAX_FULL_NAME_LENGTH && !name.is_empty() && name.chars().nth(0).unwrap() != '.'
 }
 
-const zero_buffer: [u8; 4096] = [0u8; 4096]; // TODO: dont allocate each call, but also dont fill space with this --> write in some other way than copying from buffer
+const ZERO_BUFFER: [u8; 4096] = [0u8; 4096]; // TODO: dont allocate each call, but also dont fill space with this --> write in some other way than copying from buffer
 
 fn encode_node_id(entry: &DirectoryEntry, parent_cluster: u32) -> FileNodeHandle {
     let cluster = entry.get_first_cluster();
@@ -86,7 +85,7 @@ fn to_fat32_name(name: &str) -> FileSystemResult<[u8; 11]> {
     Ok(fat32_name)
 }
 
-fn to_fat32_path(path: &str) -> FileSystemResult<Vec<[u8; MAX_FULL_NAME_LENGTH]>> {
+fn _to_fat32_path(path: &str) -> FileSystemResult<Vec<[u8; MAX_FULL_NAME_LENGTH]>> {
     let path_parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
 
     let mut fat32_parts = Vec::<[u8; MAX_FULL_NAME_LENGTH]>::with_capacity(path_parts.len());
@@ -328,7 +327,7 @@ impl Fat32Driver {
         serial_println!("  Allocating cluster chain starting at: {}", first_cluster);
 
         let mut prev_cluster = first_cluster;
-        for i in 1..count {
+        for _ in 1..count {
             let new_cluster = self.find_free_cluster(disk_mgr)?;
             serial_println!("    Allocating new cluster: {}", new_cluster);
 
@@ -368,7 +367,7 @@ impl Fat32Driver {
 
                 for i in 0..self.sectors_per_cluster {
                     serial_println!("clear_clusters: writing sector {}", i);
-                    disk_mgr.write_sector(sector + i as u64, &zero_buffer)?;
+                    disk_mgr.write_sector(sector + i as u64, &ZERO_BUFFER)?;
                 }
                 serial_println!("clear_clusters: finished writing");
 
@@ -796,9 +795,9 @@ impl FilesystemDriver for Fat32Driver {
 
     fn write_file(
         &mut self,
-        node_id: FileNodeHandle,
-        offset: usize,
-        data: &[u8],
+        _node_id: FileNodeHandle,
+        _offset: usize,
+        _data: &[u8],
     ) -> FileSystemResult<usize> {
         Err(FileSystemError::NotSupported)
     }
@@ -831,7 +830,7 @@ impl FilesystemDriver for Fat32Driver {
             return Err(FileSystemError::NotDirectory);
         }
 
-        let mut entries = Vec::<DirectoryEntry>::new();
+        let mut entries;
         {
             let mut disk_mgr = get_disk_mgr();
             entries = self.read_directory_entries(dir_cluster, &mut disk_mgr)?;
@@ -949,7 +948,7 @@ impl FilesystemDriver for Fat32Driver {
             self.clear_clusters(new_file_cluster, 1, &mut disk_mgr)?;
             serial_println!("FAT32Driver: create_file: New file cluster cleared");
 
-            let timestamp = 0; //TODO: pass to constructor
+            let _timestamp = 0; //TODO: pass to constructor
             entry.set_filename(name);
             entry.attributes = FatFileAttributes::Archive as u8;
             entry.set_first_cluster(new_file_cluster);
@@ -1013,8 +1012,8 @@ impl FilesystemDriver for Fat32Driver {
             self.clear_clusters(new_dir_cluster, 1, &mut disk_mgr)?;
             serial_println!("FAT32Driver: create_directory: cleared new cluster");
 
-            let mut dot_entry = DirectoryEntry::create_dot_entry(new_dir_cluster);
-            let mut dotdot_entry = DirectoryEntry::create_dot_dot_entry(parent_cluster);
+            let dot_entry = DirectoryEntry::create_dot_entry(new_dir_cluster);
+            let dotdot_entry = DirectoryEntry::create_dot_dot_entry(parent_cluster);
 
             self.write_direntry(new_dir_cluster, 0, &dot_entry, &mut disk_mgr)?;
             self.write_direntry(new_dir_cluster, 1, &dotdot_entry, &mut disk_mgr)?;

@@ -85,7 +85,7 @@ pub enum FileSystemError {
 }
 
 impl From<DiskOpError> for FileSystemError {
-    fn from(value: DiskOpError) -> Self {
+    fn from(_value: DiskOpError) -> Self {
         FileSystemError::DiskOpError
     }
 }

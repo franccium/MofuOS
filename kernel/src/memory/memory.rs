@@ -161,7 +161,7 @@ impl MemoryMapFrameAllocator {
         }
     }
 
-    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
+    fn _usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
         let regions = self.memory_map.iter();
         let usable_regions = regions.filter(|r| r.entry_type == EntryType::USABLE);
         let addr_ranges = usable_regions.map(|r| r.base..r.base + r.length);

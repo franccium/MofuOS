@@ -1,25 +1,15 @@
-use acpi::rsdp;
-use core::cell::UnsafeCell;
-use kernel::{io::DiskDevice, memory::memory::MemoryMapFrameAllocator};
+use kernel::{memory::memory::MemoryMapFrameAllocator};
 use limine::{
-    BaseRevision, framebuffer,
-    framebuffer::{Framebuffer, VideoMode},
-    memory_map,
+    BaseRevision,
+    framebuffer::{Framebuffer},
     paging::Mode,
     request::{
         EfiMemoryMapRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, PagingModeRequest,
         RequestsEndMarker, RequestsStartMarker, RsdpRequest,
     },
-    response::{EfiMemoryMapResponse, HhdmResponse, MemoryMapResponse, RsdpResponse},
 };
 use spin::Mutex;
 use spin::Once;
-use x86_64::{
-    PhysAddr, VirtAddr,
-    registers::control::Cr3,
-    structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
-};
-
 use crate::main;
 use kernel::{memory::allocator, init_globals, interrupts, memory, serial_println, util::cpuinfo::init_cpu_info};
 
@@ -66,7 +56,6 @@ static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
 pub struct BootInfo {
     pub hhdm_offset: u64,
-    pub paging_mode: Mode,
     pub framebuffer: Mutex<Framebuffer<'static>>,
 }
 
@@ -86,7 +75,7 @@ unsafe extern "C" fn kmain() -> ! {
 
     // memory::memory::init_acpi_memory_map(rsdp_phys_addr);
 
-    let efi_memory_map_response = EFI_MEMORY_MAP_REQUEST
+    let _efi_memory_map_response = EFI_MEMORY_MAP_REQUEST
         .get_response()
         .expect("Failed to get UEFI memory map response");
 
@@ -97,7 +86,7 @@ unsafe extern "C" fn kmain() -> ! {
     let paging_mode_response = PAGING_MODE_REQUEST
         .get_response()
         .expect("Failed to get paging mode response");
-    let paging_mode = paging_mode_response.mode();
+    let _paging_mode = paging_mode_response.mode();
 
     let hhdm_response = HHDM_REQUEST
         .get_response()
@@ -124,11 +113,11 @@ unsafe extern "C" fn kmain() -> ! {
 
     let boot_info = BootInfo {
         hhdm_offset,
-        paging_mode,
         framebuffer: Mutex::new(framebuffer),
     };
 
     BOOT_INFO.call_once(|| boot_info);
+    serial_println!("Boot Info: hhdm_offset: {}", hhdm_offset);
 
     init_globals();
 

@@ -3,22 +3,17 @@
 
 mod boot;
 
-use core::arch::asm;
-use core::fmt::Write;
 use embedded_graphics::prelude::*;
-use kernel::data_structures::dequeue::Dequeue;
 use kernel::data_structures::vector::Vec;
 use kernel::process::{ElfLoadError, ElfLoadInfo, elf_loader};
 use kernel::{
-    filesystem::sirius::{FileType, get_sirius},
+    filesystem::sirius::{FileType},
     graphics::framebuffer::FrameBufferTarget,
-    memory::allocator,
     programs::theophe::Theophe,
-    serial_print, serial_println,
+    serial_println,
 };
-use x86_64::{instructions::hlt, structures::paging::frame};
+use x86_64::{instructions::hlt};
 extern crate alloc;
-use alloc::string::String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -49,7 +44,7 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 fn test_process_system() {
     use kernel::process::{
         process_manager::PROCESS_MANAGER,
-        syscall::{SyscallError, SystemCall, handle_syscall},
+        syscall::{SystemCall, handle_syscall},
     };
 
     // Check arche
@@ -316,7 +311,7 @@ fn main() -> ! {
     }
 
     //kernel::process_start::create_init_process();
-    kernel::process_start::create_and_run_init_process();
+    //kernel::process_start::create_and_run_init_process();
 
     //test_process_system();
     //test_filesystem_system();
@@ -363,7 +358,12 @@ fn main() -> ! {
     serial_println!("Vector capacity: {}", vec.capacity);
 
     let mut theophe = Theophe::new(framebuffer_target);
-    theophe.write_line("Welcome to Theophe");
+    theophe.write_line("");
+    theophe.write_line("  hi");
+    theophe.write_line("==========================================================");
+    let cpu_info = kernel::util::cpuinfo::get_cpu_info();
+    let cpu_info_str = cpu_info.to_pretty_string();
+    theophe.write_str(&cpu_info_str);
     // theophe.write_str("agrwinonnnononononono nononononononononononooogowniognewagiowe gagrwinonnnonononononononononon ononononononooogowniognewagiowegagrwinonnnonon ononononononononononononononooogowniognewagio");
     // write!(
     //     theophe,

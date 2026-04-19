@@ -2,7 +2,7 @@ extern crate alloc;
 use crate::memory::allocator::ALLOCATOR;
 use crate::serial_println;
 use alloc::alloc::{GlobalAlloc, Layout};
-use core::ops::{Deref, DerefMut, Index, IndexMut, Range};
+use core::ops::{Deref, DerefMut, Index, IndexMut};
 use core::ptr::{self, NonNull};
 use core::slice;
 
@@ -147,12 +147,6 @@ impl<T> Vec<T> {
         } else {
             unsafe { slice::from_raw_parts_mut(self.data.as_ptr(), self.size) }
         }
-    }
-
-    fn as_mut_ptr_range(&mut self) -> Range<*mut T> {
-        let start = self.data.as_ptr();
-        let end = unsafe { start.add(self.size) };
-        start..end
     }
 }
 

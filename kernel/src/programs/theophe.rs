@@ -13,7 +13,7 @@ const CHARACTER_WIDTH: usize = 8; // FONT_8X13 width
 const CHARACTER_HEIGHT: usize = 13;
 const MARGIN_LEFT: i32 = 20;
 const MARGIN_TOP: i32 = 30;
-const MAX_LINES: usize = 10;
+const MAX_LINES: usize = 20;
 const LINE_SPACING: i32 = 15;
 const MAX_CHARS_PER_LINE: usize = 80;
 
@@ -82,7 +82,7 @@ impl<'a> Theophe<'a> {
         self.redraw_all();
     }
 
-    pub fn get_last_line(&mut self) -> &mut Line {
+    fn get_last_line(&mut self) -> &mut Line {
         if self.lines[self.curr_line_idx].length < MAX_CHARS_PER_LINE {
             &mut self.lines[self.curr_line_idx]
         } else {

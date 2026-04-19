@@ -1,6 +1,5 @@
 use crate::filesystem::fat32::{MAX_CLUSTER, ROOT_CLUSTER};
 use crate::filesystem::sirius::FileType;
-use crate::serial_println;
 use alloc::string::String;
 
 #[repr(u8)]
