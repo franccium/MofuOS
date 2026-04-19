@@ -36,7 +36,7 @@ impl Compositor {
     }
 
     pub fn create_window(&self, width: u32, height: u32, x: i32, y: i32) -> (WindowID, Arc<WindowBuffer>) {
-        let buffer = Arc::new(WindowBuffer::new(width, height));
+        let buffer = Arc::new(WindowBuffer::new(width, height, x, y));
         let id = if let Some(free_id) = self.free_window_ids.lock().pop() {
             free_id
         } else {

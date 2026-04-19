@@ -3,7 +3,7 @@ use crate::serial_println;
 
 use core::cmp::min;
 use embedded_graphics::{
-    mono_font::{MonoTextStyle, ascii::FONT_8X13},
+    mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb888,
     prelude::*,
     text::{Alignment, LineHeight, Text, TextStyle, TextStyleBuilder},
@@ -11,8 +11,8 @@ use embedded_graphics::{
 
 const CHARACTER_WIDTH: usize = 8; // FONT_8X13 width
 const CHARACTER_HEIGHT: usize = 13;
-const MARGIN_LEFT: i32 = 20;
-const MARGIN_TOP: i32 = 30;
+const MARGIN_LEFT: i32 = 0;
+const MARGIN_TOP: i32 = 0;
 const MAX_LINES: usize = 20;
 const LINE_SPACING: i32 = 15;
 const MAX_CHARS_PER_LINE: usize = 80;
@@ -24,6 +24,42 @@ const TEXT_STYLE: TextStyle = TextStyleBuilder::new()
     .alignment(Alignment::Left)
     .line_height(LineHeight::Percent(150))
     .build();
+
+#[derive(Debug, Clone, Copy)]
+pub struct FontMetrics {
+    pub char_width: u32,
+    pub char_height: u32,
+}
+
+impl FontMetrics {
+    pub const fn from_font(font: &MonoFont) -> Self {
+        Self {
+            char_width: font.character_size.width,
+            char_height: font.character_size.height,
+        }
+    }
+
+    pub const FONT_4X6: Self = Self { char_width: 4, char_height: 6 };
+    pub const FONT_5X7: Self = Self { char_width: 5, char_height: 7 };
+    pub const FONT_5X8: Self = Self { char_width: 5, char_height: 8 };
+    pub const FONT_6X9: Self = Self { char_width: 6, char_height: 9 };
+    pub const FONT_6X10: Self = Self { char_width: 6, char_height: 10 };
+    pub const FONT_6X12: Self = Self { char_width: 6, char_height: 12 };
+    pub const FONT_6X13: Self = Self { char_width: 6, char_height: 13 };
+    pub const FONT_7X13: Self = Self { char_width: 7, char_height: 13 };
+    pub const FONT_7X14: Self = Self { char_width: 7, char_height: 14 };
+    pub const FONT_8X13: Self = Self { char_width: 8, char_height: 13 };
+    pub const FONT_9X15: Self = Self { char_width: 9, char_height: 15 };
+    pub const FONT_9X18: Self = Self { char_width: 9, char_height: 18 };
+    pub const FONT_10X20: Self = Self { char_width: 10, char_height: 20 };
+}
+
+
+pub fn get_max_chars_per_line(font_metrics: FontMetrics, available_width: u32) -> usize {
+    (available_width / font_metrics.char_width) as usize
+}
+
+
 
 //TODO: do something more efficient instead of a line buffer, for now we have this just for simplicity
 // also this may be good cause i can just render it with embedded-graphics crate
@@ -63,17 +99,23 @@ impl Line {
 
 //TODO: should add buffering, and not clear the whole screen for each render
 //TODO: <'a> for now, when we get a compositor it will have its own buffer
-pub struct Theophe<'a> {
-    framebuffer_target: FrameBufferTarget<'a>,
+pub struct Theophe<D: DrawTarget<Color = Rgb888>> {
+    draw_target: D,
     curr_line_idx: usize,
+    max_chars_per_line: usize,
     lines: [Line; MAX_LINES],
 }
 
-impl<'a> Theophe<'a> {
-    pub fn new(framebuffer_target: FrameBufferTarget<'a>) -> Self {
+impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
+    pub fn new(draw_target: D) -> Self {
+        let font_metrics = FontMetrics::from_font(&FONT_8X13);
+        let bounding_box = draw_target.bounding_box();
+        let max_chars_per_line = get_max_chars_per_line(font_metrics, bounding_box.size.width);
+
         Self {
-            framebuffer_target,
+            draw_target,
             curr_line_idx: 0,
+            max_chars_per_line,
             lines: [Line::new(); MAX_LINES],
         }
     }
@@ -83,7 +125,7 @@ impl<'a> Theophe<'a> {
     }
 
     fn get_last_line(&mut self) -> &mut Line {
-        if self.lines[self.curr_line_idx].length < MAX_CHARS_PER_LINE {
+        if self.lines[self.curr_line_idx].length < self.max_chars_per_line {
             &mut self.lines[self.curr_line_idx]
         } else {
             self.curr_line_idx = min(self.curr_line_idx + 1, MAX_LINES - 1);
@@ -94,6 +136,7 @@ impl<'a> Theophe<'a> {
     fn _write_bytes(&mut self, bytes: &[u8]) {
         let mut bytes_start = 0;
         let bytes_len = bytes.len();
+        let max_chars_per_line = self.max_chars_per_line;
 
         for i in 0..bytes_len {
             if bytes[i] == b'\n' {
@@ -103,7 +146,7 @@ impl<'a> Theophe<'a> {
                     serial_println!(
                         "Found newline, written: {}, space left now: {}",
                         written,
-                        MAX_CHARS_PER_LINE - line.length
+                        max_chars_per_line - line.length
                     );
                 }
             }
@@ -112,7 +155,7 @@ impl<'a> Theophe<'a> {
         while bytes_start < bytes_len {
             let remaining = bytes_len - bytes_start;
             let line = self.get_last_line();
-            let space_left = MAX_CHARS_PER_LINE - line.length;
+            let space_left = max_chars_per_line - line.length;
             serial_println!("Remaining bytes: {}", remaining);
 
             if remaining <= space_left {
@@ -120,7 +163,7 @@ impl<'a> Theophe<'a> {
                 serial_println!(
                     "Fit in last line, written: {}, space left now: {}",
                     written,
-                    MAX_CHARS_PER_LINE - line.length
+                    max_chars_per_line - line.length
                 );
                 assert!(written == remaining);
                 break;
@@ -128,13 +171,17 @@ impl<'a> Theophe<'a> {
                 //let line_start = line.length;
 
                 // Find a good breaking point (a space)
-                let mut split_point = MAX_CHARS_PER_LINE;
-                let search_end = min(space_left, remaining);
-                for i in (0..search_end).rev() {
+                let mut split_point = min(space_left, remaining);
+                for i in (0..split_point).rev() {
                     if bytes[bytes_start + i] == b' ' {
                         split_point = i + 1; // Include the space
                         break;
                     }
+                }
+
+                // If no space found, split at line end
+                if split_point == 0 {
+                    split_point = space_left;
                 }
 
                 let slice = &bytes[bytes_start..bytes_start + split_point];
@@ -214,7 +261,7 @@ impl<'a> Theophe<'a> {
         let clear_rect = embedded_graphics::primitives::Rectangle::new(
             Point::new(MARGIN_LEFT, MARGIN_TOP),
             Size::new(
-                (MAX_CHARS_PER_LINE * CHARACTER_WIDTH) as u32,
+                (self.max_chars_per_line * CHARACTER_WIDTH) as u32,
                 terminal_height,
             ),
         );
@@ -223,7 +270,7 @@ impl<'a> Theophe<'a> {
             .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
                 BACKGROUND_COLOR,
             ))
-            .draw(&mut self.framebuffer_target);
+            .draw(&mut self.draw_target);
     }
 
     fn redraw_all(&mut self) {
@@ -239,7 +286,7 @@ impl<'a> Theophe<'a> {
                     CHARACTER_STYLE,
                     TEXT_STYLE,
                 )
-                .draw(&mut self.framebuffer_target);
+                .draw(&mut self.draw_target);
             }
         }
     }
@@ -249,7 +296,7 @@ impl<'a> Theophe<'a> {
     }
 }
 
-impl<'a> core::fmt::Write for Theophe<'a> {
+impl<D: DrawTarget<Color = Rgb888>> core::fmt::Write for Theophe<D> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         self.write_str(s);
         Ok(())

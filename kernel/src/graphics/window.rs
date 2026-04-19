@@ -1,5 +1,9 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use embedded_graphics::Pixel;
+use embedded_graphics::pixelcolor::Rgb888;
+use embedded_graphics::prelude::{Dimensions, DrawTarget, OriginDimensions, Point, Size};
+use embedded_graphics::primitives::Rectangle;
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -86,6 +90,8 @@ impl Rect {
 pub struct WindowBuffer {
     pub width: u32,
     pub height: u32,
+    pub x: i32,
+    pub y: i32,
 
     pub back_buffer: UnsafeCell<NonNull<u32>>, // written to
     pub front_buffer: UnsafeCell<NonNull<u32>>, // read by the compositor
@@ -96,7 +102,7 @@ pub struct WindowBuffer {
 }
 
 impl WindowBuffer {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(width: u32, height: u32, x: i32, y: i32) -> Self {
         let pixel_count = (width * height) as usize;
         let buffer_size = pixel_count * FRAMEBUFFER_BYTES_PER_PIXEL as usize;
 
@@ -107,6 +113,8 @@ impl WindowBuffer {
         Self {
             width,
             height,
+            x,
+            y,
             back_buffer: UnsafeCell::new(NonNull::new(back_buffer_ptr).expect("Failed to allocate back buffer")),
             front_buffer: UnsafeCell::new(NonNull::new(front_buffer_ptr).expect("Failed to allocate front buffer")),
             needs_swap: AtomicBool::new(false),
@@ -152,6 +160,10 @@ impl WindowBuffer {
     // Helper to get front buffer pointer
     pub fn front_buffer_ptr(&self) -> *const u32 {
         unsafe { (*self.front_buffer.get()).as_ptr() }
+    }
+
+    pub fn get_bounding_rect(&self) -> Rect {
+        Rect::new(self.x as u32, self.y as u32, self.width, self.height)
     }
 }
 
@@ -235,5 +247,46 @@ impl Drop for WindowBuffer {
             alloc::alloc::dealloc(self.back_buffer_ptr() as *mut u8, layout);
             alloc::alloc::dealloc(self.front_buffer_ptr() as *mut u8, layout);
         }
+    }
+}
+
+impl<'a> DrawTarget for WindowBackBuffer<'a> {
+    type Color = Rgb888;
+    type Error = core::convert::Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        for Pixel(coord, color) in pixels {
+            let rgba_color = Rgba8888UNORM::from_rgb_emb(color);
+            self.write_pixel(coord.x as u32, coord.y as u32, rgba_color);
+        }
+        Ok(())
+    }
+
+    // fn fill_contiguous<I>(&mut self, area: &embedded_graphics::primitives::Rectangle, colors: I) -> Result<(), Self::Error>
+    // where
+    //     I: IntoIterator<Item = Self::Color>,
+    // {
+    //     self.draw_iter(
+    //         area.points()
+    //             .zip(colors)
+    //             .map(|(pos, color)| Pixel(pos, color)),
+    //     )
+    // }
+
+    // fn fill_solid(&mut self, area: &embedded_graphics::primitives::Rectangle, color: Self::Color) -> Result<(), Self::Error> {
+    //     self.fill_contiguous(area, core::iter::repeat(color))
+    // }
+
+    // fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
+    //     self.fill_solid(&self.bounding_box(), color)
+    // }
+}
+
+impl<'a> Dimensions for WindowBackBuffer<'a> {
+    fn bounding_box(&self) -> Rectangle {
+        Rectangle::new(Point::new(self.window.x, self.window.y), Size::new(self.window.width, self.window.height))
     }
 }
