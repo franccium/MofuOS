@@ -1,17 +1,17 @@
-use kernel::{memory::memory::MemoryMapFrameAllocator};
+use kernel::{interrupts::map_local_apic_for_current_core, memory::memory::MemoryMapFrameAllocator, process::{CORE_POOL, CorePool, SCHEDULER}, util::cpuinfo::{ap_core_entry_point, init_cpu_infos, init_current_core, start_ap_core}};
 use limine::{
     BaseRevision,
     framebuffer::{Framebuffer},
     paging::Mode,
     request::{
         EfiMemoryMapRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, PagingModeRequest,
-        RequestsEndMarker, RequestsStartMarker, RsdpRequest,
+        RequestsEndMarker, RequestsStartMarker, RsdpRequest, MpRequest
     },
 };
 use spin::Mutex;
 use spin::Once;
 use crate::main;
-use kernel::{memory::allocator, init_globals, interrupts, memory, serial_println, util::cpuinfo::init_cpu_info};
+use kernel::{memory::allocator, init_globals, interrupts, memory, serial_println, util::cpuinfo::{init_cpu_info}, boot_info::{BOOT_INFO, BootInfo}};
 
 /// Sets the base revision to the latest revision supported by the crate.
 /// See specification for further info.
@@ -46,6 +46,10 @@ static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
 static PAGING_MODE_REQUEST: PagingModeRequest =
     PagingModeRequest::new().with_mode(Mode::FOUR_LEVEL);
 
+#[used]
+#[unsafe(link_section = ".requests")]
+static MP_REQUEST: MpRequest = MpRequest::new();
+
 /// Define the stand and end markers for Limine requests.
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -54,16 +58,7 @@ static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 #[unsafe(link_section = ".requests_end_marker")]
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
-pub struct BootInfo {
-    pub hhdm_offset: u64,
-    pub framebuffer: Mutex<Framebuffer<'static>>,
-}
 
-pub static BOOT_INFO: Once<BootInfo> = Once::new();
-
-pub fn boot_info() -> &'static BootInfo {
-    unsafe { BOOT_INFO.get().unwrap_unchecked() }
-}
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
@@ -71,7 +66,6 @@ unsafe extern "C" fn kmain() -> ! {
 
     serial_println!("MofuOS Booted!");
 
-    unsafe { init_cpu_info() };
 
     // memory::memory::init_acpi_memory_map(rsdp_phys_addr);
 
@@ -103,13 +97,36 @@ unsafe extern "C" fn kmain() -> ! {
     serial_println!("HHDM offset: {:#x}", hhdm_offset);
     serial_println!("RSDP virtual address: {:#x}", rsdp_virt_addr);
 
-    let framebuffer_response = FRAMEBUFFER_REQUEST
+    let mp_response = MP_REQUEST
         .get_response()
-        .expect("Failed to get framebuffer response");
+        .expect("Failed to get SMP response");
+
+    let cpus= mp_response.cpus();
+    let core_count = cpus.len();
+    let bsp_lapic_id = mp_response.bsp_lapic_id();
+
+    serial_println!("MP Info:");
+    serial_println!("  Total cores: {}", core_count);
+    serial_println!("  BSP LAPIC ID: {}", bsp_lapic_id);
+
+    unsafe { init_cpu_info() };
+    for (i, cpu) in cpus.iter().enumerate() {
+    serial_println!("  CPU {}: LAPIC ID={}, Processor ID={}",
+        i, cpu.lapic_id, cpu.id);
+    }
+
+
+    let mut core_pool = CORE_POOL.lock();
+    core_pool.init_with_core_count(core_count as u8, cpus);
+    drop(core_pool);
+
+    let framebuffer_response = FRAMEBUFFER_REQUEST
+    .get_response()
+    .expect("Failed to get framebuffer response");
     let framebuffer = framebuffer_response
-        .framebuffers()
-        .next()
-        .expect("No framebuffer found");
+    .framebuffers()
+    .next()
+    .expect("No framebuffer found");
 
     let boot_info = BootInfo {
         hhdm_offset,
@@ -126,7 +143,7 @@ unsafe extern "C" fn kmain() -> ! {
 
     serial_println!("Creating frame_allocator");
     let mut frame_allocator =
-        unsafe { MemoryMapFrameAllocator::init(memory_map_response.entries()) };
+    unsafe { MemoryMapFrameAllocator::init(memory_map_response.entries()) };
 
     memory::memory::map_acpi_regions(
         &mut mapper,
@@ -139,6 +156,15 @@ unsafe extern "C" fn kmain() -> ! {
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
     serial_println!("Heap initialized");
+
+    unsafe { init_cpu_infos(&cpus) };
+    serial_println!("Mapping lapic for core 0");
+    unsafe { map_local_apic_for_current_core(&mut mapper, &mut frame_allocator) };
+    unsafe { init_current_core() };
+    let mut scheduler = SCHEDULER.lock();
+    scheduler.init_with_core_count(core_count as u8);
+    drop(scheduler);
+
 
     unsafe {
         interrupts::init_acpi(
@@ -157,6 +183,25 @@ unsafe extern "C" fn kmain() -> ! {
     );
     memory::init_memory_globals(frame_allocator, user_memory_manager);
     serial_println!("Global memory managers initialized");
+
+    /// init other cores and timers
+    for (idx, cpu) in cpus.iter().enumerate() {
+        let core_id = cpu.id as u8;
+
+
+        if core_id == 0 {
+            continue;
+        }
+
+        serial_println!("Booting AP Core {} (LAPIC ID: {})", core_id, cpu.lapic_id);
+
+        // Send INIT-SIPI-SIPI sequence to start the AP core
+        // This is architecture-specific and depends on your APIC implementation
+        let entry_phys = (ap_core_entry_point as u64) - BOOT_INFO.get().unwrap().hhdm_offset;
+
+
+        unsafe { start_ap_core(core_id, cpu.lapic_id as u8); }
+    }
 
     interrupts::enable_interrupts();
 

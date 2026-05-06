@@ -15,6 +15,7 @@ pub mod process;
 pub mod programs;
 pub mod util;
 pub mod process_start;
+pub mod boot_info;
 
 pub use alloc::string::String;
 

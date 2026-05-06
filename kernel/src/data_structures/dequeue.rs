@@ -307,6 +307,15 @@ impl<T> Drop for Dequeue<T> {
     }
 }
 
+unsafe impl<T: Send> Send for Dequeue<T> {}
+unsafe impl<T: Sync> Sync for Dequeue<T> {}
+
+impl<T> Default for Dequeue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: fmt::Display> fmt::Display for Dequeue<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "[")?;

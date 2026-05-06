@@ -292,26 +292,8 @@ fn main() -> ! {
 
     kernel::process::syscall::init_syscall_stack();
 
-    match ElfLoadInfo::from_elf_data(&elf_loader::TEST_ELF) {
-        Err(ElfLoadError::ParseError(e)) => {
-            serial_println!("Error loading elf: ParseError: {:?}", e)
-        }
-        Err(ElfLoadError::InvalidMagic) => {
-            serial_println!("Error loading elf: InvalidMagic")
-        }
-        Err(ElfLoadError::InvalidArch) => {
-            serial_println!("Error loading elf: InvalidArch")
-        }
-        Err(ElfLoadError::InvalidHeader) => {
-            serial_println!("Error loading elf: InvalidHeader")
-        }
-        Err(kernel::process::ElfLoadError::InvalidType) | Err(kernel::process::ElfLoadError::NoLoadableSegments) | Err(kernel::process::ElfLoadError::ReadError) => todo!(),
-        Ok(info) => {
-            serial_println!("Loaded elf info: {:?}", info.entry_point)
-        }
-    }
-
     //kernel::process_start::create_init_process();
+    kernel::process_start::create_userspace_processes();
     //kernel::process_start::create_and_run_init_process();
 
     //test_process_system();
@@ -320,7 +302,7 @@ fn main() -> ! {
     use embedded_graphics::pixelcolor::Rgb888;
     use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
 
-    let mut framebuffer_target = FrameBufferTarget::new(boot::boot_info().framebuffer.lock());
+    let mut framebuffer_target = FrameBufferTarget::new(kernel::boot_info::boot_info().framebuffer.lock());
 
     Rectangle::new(Point::new(0, 0), Size::new(100, 100))
         .into_styled(PrimitiveStyle::with_fill(Rgb888::RED))
@@ -455,28 +437,28 @@ fn main() -> ! {
 
     theophe.render();
 
-    {
-        let mut theophe = Theophe::new(window3_buffer.back_buffer_mut());
-        theophe.write_line("");
-        theophe.write_line("  hi");
-        theophe.write_line("==========================================================");
-        let cpu_info = kernel::util::cpuinfo::get_cpu_info();
-        let cpu_info_str = cpu_info.to_pretty_string();
-        theophe.write_str(&cpu_info_str);
+    // {
+    //     let mut theophe = Theophe::new(window3_buffer.back_buffer_mut());
+    //     theophe.write_line("");
+    //     theophe.write_line("  hi");
+    //     theophe.write_line("==========================================================");
+    //     let cpu_info = kernel::util::cpuinfo::get_cpu_info();
+    //     let cpu_info_str = cpu_info.to_pretty_string();
+    //     theophe.write_str(&cpu_info_str);
 
-        // theophe.write_str("agrwinonnnononononono nononononononononononooogowniognewagiowe gagrwinonnnonononononononononon ononononononooogowniognewagiowegagrwinonnnonon ononononononononononononononooogowniognewagio");
-        // write!(
-        //     theophe,
-        //     "The current framebuffer size is {}x{}",
-        //     fb_width, fb_height
-        // )
-        // .unwrap();
-        // write!(theophe, "aFASFASfASF {}\n", fb_width).unwrap();
-        // write!(theophe, "arewhrehrehaerhre {} ", fb_width).unwrap();
-        // write!(theophe, "ahrehearhearhaheerh {}", fb_width).unwrap();
+    //     // theophe.write_str("agrwinonnnononononono nononononononononononooogowniognewagiowe gagrwinonnnonononononononononon ononononononooogowniognewagiowegagrwinonnnonon ononononononononononononononooogowniognewagio");
+    //     // write!(
+    //     //     theophe,
+    //     //     "The current framebuffer size is {}x{}",
+    //     //     fb_width, fb_height
+    //     // )
+    //     // .unwrap();
+    //     // write!(theophe, "aFASFASfASF {}\n", fb_width).unwrap();
+    //     // write!(theophe, "arewhrehrehaerhre {} ", fb_width).unwrap();
+    //     // write!(theophe, "ahrehearhearhaheerh {}", fb_width).unwrap();
 
-        theophe.render();
-    }
+    //     theophe.render();
+    // }
 
 
     compositor.focus_window(0);

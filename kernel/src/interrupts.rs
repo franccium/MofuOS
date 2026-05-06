@@ -1,15 +1,19 @@
 #![allow(unused)]
+use crate::io::serial;
+use crate::process::{SCHEDULER, Scheduler};
 use crate::process::syscall::init_syscall;
 use crate::process::{
     process::INVALID_PID,
     process_manager::{ARCHE_PID, PROCESS_MANAGER},
 };
+use crate::util::apic::APICOffset;
+use crate::util::cpuinfo::get_current_core_id;
 use crate::util::msr::{msr_read, msr_write};
 use crate::{
     gdt, hlt_loop,
     memory::memory::{IdendtityAcpiHandler, MemoryMapFrameAllocator},
     serial_print, serial_println,
-    util::cpuinfo::{CpuFeatureFlags, get_cpu_info},
+    util::cpuinfo::{CpuFeatureFlags, get_cpu_info, get_cpu_info_for_core},
 };
 use acpi::{
     AcpiTables, PhysicalMapping,
@@ -29,16 +33,17 @@ use x86_64::{
         paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB},
     }
 };
+use core::arch::x86_64::__rdtscp;
 use core::arch::asm;
 use lazy_static::lazy_static;
 use spin::Mutex;
 
-const TIMER_DEBUG_PRINT: bool = false;
+const TIMER_DEBUG_PRINT: bool = true;
 const KEYBOARD_DEBUG_PRINT: bool = false;
-const TIMER_ENABLED: bool = false;
+const TIMER_ENABLED: bool = true;
 
 pub const TSC_MOCK_FREQUENCY: u64 = 2400000000u64;
-pub const TIMER_TICK_INTERVAL_MS: u64 = 100;
+pub const TIMER_TICK_INTERVAL_MS: u64 = 1000;
 pub const TIMER_TICK_FREQ_DIVIDER: u64 = TIMER_TICK_INTERVAL_MS * 1000;
 const MSR_IA32_TSC_DEADLINE: u32 = 0x6E0;
 
@@ -135,7 +140,7 @@ unsafe fn init_local_apic(
     LAPIC_ADDRESS.lock().address = local_apic_ptr;
 
     unsafe {
-        init_timer(local_apic_ptr);
+        //init_timer(local_apic_ptr);
         init_keyboard(local_apic_ptr);
     }
 }
@@ -213,6 +218,89 @@ unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32) {
 
 }
 
+unsafe fn init_timer_tsc_deadline_mode_per_core(local_apic: *mut u32, core_id: u8) {
+    serial_println!("Core {}: Setting up TSC-Deadline mode", core_id);
+
+
+    unsafe {
+        //set_tsc_aux(core_id);
+
+        let svr = local_apic.offset(APICOffset::Svr as isize / 4);
+        let current_svr = svr.read_volatile();
+        svr.write_volatile(current_svr | (1 << 8) | 0xFF);
+        serial_println!("Core {}: APIC enabled", core_id);
+
+        let lvt_timer = local_apic.offset(APICOffset::LvtT as isize / 4);
+        const LVTT_TSC_DEADLINE_MODE: u32 = 1 << 18;
+        const LVTT_MASKED: u32 = 1 << 16;
+
+        lvt_timer.write_volatile((InterruptIndex::Timer as u32) | LVTT_TSC_DEADLINE_MODE);
+        serial_println!("Core {}: LVT Timer configured for TSC-Deadline", core_id);
+
+        core::arch::x86_64::_mm_mfence();
+
+        let tsc_freq = TSC_MOCK_FREQUENCY;
+        serial_println!("TSC Frequency: {}", tsc_freq);
+        let ticks_per_ms = tsc_freq / TIMER_TICK_FREQ_DIVIDER;
+        let tsc_deadline = tsc_read() + ticks_per_ms;
+
+        //let mut aux: u32 = 0;
+        //let current_tsc = __rdtscp(&mut aux);
+        //serial_println!("Current TSC: {} aux: {}", current_tsc, aux);
+        let current_tsc = tsc_read();
+        serial_println!("Current TSC: {:#x}", current_tsc);
+        let first_deadline = current_tsc + ticks_per_ms;
+
+        msr_write(MSR_IA32_TSC_DEADLINE, first_deadline);
+
+        serial_println!("Core {}: Timer configured in TSC-Deadline mode:", core_id);
+        serial_println!("  TSC Frequency: {} Hz", tsc_freq);
+        serial_println!("  Timer Frequency: {} Hz", TIMER_TICK_FREQ_DIVIDER);
+        serial_println!("  First deadline: {} (current: {}, +{} ticks)",
+                    first_deadline, current_tsc, ticks_per_ms);
+    }
+}
+
+pub unsafe fn set_tsc_aux(core_id: u8) {
+    // Store core ID in low byte of TSC_AUX
+    let aux_value = core_id as u64;
+
+    // Write to IA32_TSC_AUX MSR (0xC0000103)
+    let low = aux_value as u32;
+    let high = (aux_value >> 32) as u32;
+
+    asm!(
+        "wrmsr",
+        in("ecx") 0xC0000103_u32,
+        in("eax") low,
+        in("edx") high,
+        options(nostack, preserves_flags)
+    );
+}
+
+
+pub unsafe fn init_timer_for_core(core_id: u8) {
+    if !TIMER_ENABLED {
+        return;
+    }
+
+
+    serial_println!("Initializing timer for Core {}", core_id);
+
+    let cpu_info = get_cpu_info_for_core(core_id);
+    let lapic_addr = get_lapic_base_addr();
+
+
+    if !cpu_info.features.contains(CpuFeatureFlags::TSC_DEADLINE)
+    {
+        serial_println!("TSC-Deadline mode not supported, falling back to periodic mode");
+        unsafe { init_timer_periodic_mode(lapic_addr) };
+        return;
+    }
+
+    unsafe { init_timer_tsc_deadline_mode_per_core(lapic_addr, core_id) };
+}
+
 pub unsafe fn init_timer(local_apic_ptr: *mut u32) {
     if !TIMER_ENABLED {
         return;
@@ -269,6 +357,74 @@ pub fn enable_interrupts() {
 
 pub fn disable_interrupts() {
     x86_64::instructions::interrupts::disable();
+}
+
+// Store the virtual address of the mapped Local APIC
+static LAPIC_VIRT_ADDR: spin::Mutex<Option<VirtAddr>> = spin::Mutex::new(None);
+
+/// Map the Local APIC for the current core (must be called on each core)
+pub unsafe fn map_local_apic_for_current_core(
+    mapper: &mut impl Mapper<Size4KiB>,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) -> *mut u32 {
+    // Read the physical address from MSR
+    let lapic_phys = get_lapic_base_addr_phys();
+
+    serial_println!("map_local_apic_for_current_core: {:#x}", lapic_phys);
+
+    // Create a virtual address - use a fixed offset from the HHDM or map it directly
+    // Option 1: Use HHDM offset if you have it (identity mapping with offset)
+    // let hhdm_offset = crate::boot_info::boot_info().hhdm_offset;
+    // let virt_addr = VirtAddr::new(lapic_phys + hhdm_offset);
+
+    // Option 2: Map it explicitly (safer, works without HHDM)
+    // We'll map it to a known virtual address range for APIC
+    let apic_virt_base = 0xFFFF_8000_0000_0000 + 0xfee00000; // Example: high canonical address
+    let page = Page::containing_address(VirtAddr::new(apic_virt_base));
+    let phys_frame = PhysFrame::containing_address(PhysAddr::new(lapic_phys));
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
+
+    unsafe {
+        mapper.map_to(page, phys_frame, flags, frame_allocator)
+            .expect("Failed to map Local APIC")
+            .flush();
+    }
+
+    // Store the virtual address for later use
+    *LAPIC_VIRT_ADDR.lock() = Some(page.start_address());
+
+    page.start_address().as_mut_ptr::<u32>()
+}
+
+/// Get the physical address of the Local APIC from MSR
+pub fn get_lapic_base_addr_phys() -> u64 {
+    const IA32_APIC_BASE_MSR: u32 = 0x1B;
+    unsafe {
+        let low: u32;
+        let high: u32;
+        asm!(
+            "rdmsr",
+            in("ecx") IA32_APIC_BASE_MSR,
+            out("eax") low,
+            out("edx") high,
+            options(nostack, preserves_flags)
+        );
+        let apic_base = ((high as u64) << 32) | (low as u64);
+        apic_base & 0xFFFFF000 // Page-aligned base address
+    }
+}
+
+/// Get the virtual address of the Local APIC (after mapping)
+pub fn get_lapic_base_addr() -> *mut u32 {
+    if let Some(addr) = *LAPIC_VIRT_ADDR.lock() {
+        addr.as_mut_ptr::<u32>()
+    } else {
+        panic!("Local APIC not mapped yet! Call map_local_apic_for_current_core first.");
+    }
+    // pub const LOCAL_APIC_PHYS_BASE: u64 = 0xFEE00000;
+    // let hhdm_offset = crate::boot_info::boot_info().hhdm_offset;
+    // let virt_addr = LOCAL_APIC_PHYS_BASE + hhdm_offset;
+    // virt_addr as *mut u32
 }
 
 pub unsafe fn init_acpi(
@@ -547,14 +703,24 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let core_id = get_current_core_id();
+
     if TIMER_DEBUG_PRINT {
-        serial_println!("*");
-    };
+        serial_println!("{}*", core_id);
+    }
 
     unsafe {
+
+        // let mut aux : u32 = 0;
+        // let current_tsc = __rdtscp(&mut aux);
+        // serial_println!("Core {}: Timer interrupt, TSC: {}, aux: {}", core_id, current_tsc, aux);
+
         // re-arm the timer for the next tick
         let next_deadline = tsc_read() + (TSC_MOCK_FREQUENCY / TIMER_TICK_FREQ_DIVIDER);
         msr_write(MSR_IA32_TSC_DEADLINE, next_deadline);
+
+        let mut scheduler = SCHEDULER.lock();
+        scheduler.on_timer_tick(core_id);
 
         interrupt_over();
     }
@@ -617,73 +783,4 @@ pub enum InterruptIndex {
     Keyboard,
 }
 
-#[allow(non_camel_case_types)]
-#[derive(Debug, Clone, Copy)]
-#[repr(isize)]
-#[allow(dead_code)]
-pub enum APICOffset {
-    R0x00 = 0x0,      // --reserved--
-    R0x10 = 0x10,     // --reserved--
-    Ir = 0x20,        // ID Register
-    Vr = 0x30,        // Version Register
-    R0x40 = 0x40,     // --reserved--
-    R0x50 = 0x50,     // --reserved--
-    R0x60 = 0x60,     // --reserved--
-    R0x70 = 0x70,     // --reserved--
-    Tpr = 0x80,       // Text Priority Register
-    Apr = 0x90,       // Arbitration Priority Register
-    Ppr = 0xA0,       // Processor Priority Register
-    Eoi = 0xB0,       // End of Interrupt
-    Rrd = 0xC0,       // Remote Read Register
-    Ldr = 0xD0,       // Logical Destination Register
-    Dfr = 0xE0,       // DFR
-    Svr = 0xF0,       // Spurious (Interrupt) Vector Register
-    Isr1 = 0x100,     // In-Service Register 1
-    Isr2 = 0x110,     // In-Service Register 2
-    Isr3 = 0x120,     // In-Service Register 3
-    Isr4 = 0x130,     // In-Service Register 4
-    Isr5 = 0x140,     // In-Service Register 5
-    Isr6 = 0x150,     // In-Service Register 6
-    Isr7 = 0x160,     // In-Service Register 7
-    Isr8 = 0x170,     // In-Service Register 8
-    Tmr1 = 0x180,     // Trigger Mode Register 1
-    Tmr2 = 0x190,     // Trigger Mode Register 2
-    Tmr3 = 0x1A0,     // Trigger Mode Register 3
-    Tmr4 = 0x1B0,     // Trigger Mode Register 4
-    Tmr5 = 0x1C0,     // Trigger Mode Register 5
-    Tmr6 = 0x1D0,     // Trigger Mode Register 6
-    Tmr7 = 0x1E0,     // Trigger Mode Register 7
-    Tmr8 = 0x1F0,     // Trigger Mode Register 8
-    Irr1 = 0x200,     // Interrupt Request Register 1
-    Irr2 = 0x210,     // Interrupt Request Register 2
-    Irr3 = 0x220,     // Interrupt Request Register 3
-    Irr4 = 0x230,     // Interrupt Request Register 4
-    Irr5 = 0x240,     // Interrupt Request Register 5
-    Irr6 = 0x250,     // Interrupt Request Register 6
-    Irr7 = 0x260,     // Interrupt Request Register 7
-    Irr8 = 0x270,     // Interrupt Request Register 8
-    Esr = 0x280,      // Error Status Register
-    R0x290 = 0x290,   // --reserved--
-    R0x2A0 = 0x2A0,   // --reserved--
-    R0x2B0 = 0x2B0,   // --reserved--
-    R0x2C0 = 0x2C0,   // --reserved--
-    R0x2D0 = 0x2D0,   // --reserved--
-    R0x2E0 = 0x2E0,   // --reserved--
-    LvtCmci = 0x2F0,  // LVT Corrected Machine Check Interrupt (CMCI) Register
-    Icr1 = 0x300,     // Interrupt Command Register 1
-    Icr2 = 0x310,     // Interrupt Command Register 2
-    LvtT = 0x320,     // LVT Timer Register
-    LvtTsr = 0x330,   // LVT Thermal Sensor Register
-    LvtPmcr = 0x340,  // LVT Performance Monitoring Counters Register
-    LvtLint0 = 0x350, // LVT LINT0 Register
-    LvtLint1 = 0x360, // LVT LINT1 Register
-    LvtE = 0x370,     // LVT Error Register
-    Ticr = 0x380,     // Initial Count Register (for Timer)
-    Tccr = 0x390,     // Current Count Register (for Timer)
-    R0x3A0 = 0x3A0,   // --reserved--
-    R0x3B0 = 0x3B0,   // --reserved--
-    R0x3C0 = 0x3C0,   // --reserved--
-    R0x3D0 = 0x3D0,   // --reserved--
-    Tdcr = 0x3E0,     // Divide Configuration Register (for Timer)
-    R0x3F0 = 0x3F0,   // --reserved--
-}
+
