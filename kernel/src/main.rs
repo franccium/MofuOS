@@ -310,6 +310,7 @@ fn render_shaders(window_buffer: &Arc<WindowBuffer>) {
             })
             .collect::<alloc::vec::Vec<u32>>(),
     );
+
     let mut texture = Texture::from_data(SIZE, SIZE, texture_data);
     let texture_slot = ctx.bind_texture(texture);
 
