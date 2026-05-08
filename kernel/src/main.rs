@@ -3,17 +3,25 @@
 
 mod boot;
 
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use core::fmt::Write;
 use embedded_graphics::prelude::*;
 use kernel::data_structures::vector::Vec;
+use kernel::graphics::color::Rgba8888UNORM;
+use kernel::graphics::pipeline::{
+    BlendState, PipelineState, RasterizerState, RenderMode, VertexLayout,
+};
+use kernel::graphics::renderer::RenderContext;
+use kernel::graphics::resources::Texture;
+use kernel::graphics::shaders::{PassThroughVS, TextureSamplePS};
+use kernel::graphics::window::WindowBuffer;
 use kernel::process::{ElfLoadError, ElfLoadInfo, elf_loader};
 use kernel::{
-    filesystem::sirius::{FileType},
-    graphics::framebuffer::FrameBufferTarget,
-    programs::theophe::Theophe,
-    serial_println,
+    filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
+    programs::theophe::Theophe, serial_println,
 };
-use core::fmt::Write;
-use x86_64::{instructions::hlt};
+use x86_64::instructions::hlt;
 extern crate alloc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +295,97 @@ fn test_filesystem_system() {
     }
 }
 
+fn render_shaders(window_buffer: &Arc<WindowBuffer>) {
+    let mut ctx = RenderContext::new();
+    const SIZE: u32 = 120;
+    let texture_data = alloc::vec::Vec::from(
+        (0..(SIZE * SIZE))
+            .map(|i| {
+                let y = i;
+                if y % 2 == 0 {
+                    Rgba8888UNORM::from_rgb(255, 0, 0).to_u32_rgba()
+                } else {
+                    Rgba8888UNORM::from_rgb(0, 255, 0).to_u32_rgba()
+                }
+            })
+            .collect::<alloc::vec::Vec<u32>>(),
+    );
+    let mut texture = Texture::from_data(SIZE, SIZE, texture_data);
+    let texture_slot = ctx.bind_texture(texture);
+
+    let texture_data = alloc::vec::Vec::from(
+        (0..(SIZE * SIZE))
+            .map(|i| {
+                let y = i;
+                Rgba8888UNORM::from_rgb(0, 255, 255).to_u32_rgba()
+            })
+            .collect::<alloc::vec::Vec<u32>>(),
+    );
+    let mut texture = Texture::from_data(SIZE, SIZE, texture_data);
+    let texture_slot2 = ctx.bind_texture(texture);
+
+    let pipeline = PipelineState {
+        vs: Box::new(PassThroughVS),
+        ps: Box::new(TextureSamplePS { texture_slot }),
+        vertex_layout: VertexLayout::new_2d(),
+        rasterizer_state: RasterizerState::default(),
+        blend_state: BlendState::default(),
+        render_mode: RenderMode::XY,
+    };
+
+    let mut back_buffer = window_buffer.back_buffer_mut();
+    let mut render_target = ctx.begin_frame(&mut back_buffer);
+    render_target.clear(Rgba8888UNORM::GRAY);
+
+    ctx.draw_rect_2d(
+        10.0,
+        10.0,
+        SIZE as f32,
+        SIZE as f32,
+        &mut render_target,
+        &pipeline,
+    );
+
+    let pipeline2 = PipelineState {
+        vs: Box::new(PassThroughVS),
+        ps: Box::new(TextureSamplePS {
+            texture_slot: texture_slot2,
+        }),
+        vertex_layout: VertexLayout::new_2d(),
+        rasterizer_state: RasterizerState::default(),
+        blend_state: BlendState::default(),
+        render_mode: RenderMode::XY,
+    };
+    ctx.draw_rect_2d(
+        25.0,
+        25.0,
+        SIZE as f32,
+        SIZE as f32,
+        &mut render_target,
+        &pipeline2,
+    );
+
+    ctx.draw_triangle_2d(
+        20.0 + 40.0,
+        50.0 + 40.0,
+        0.0,
+        0.0,
+        50.0 + 40.0,
+        0.0 + 40.0,
+        1.0,
+        0.0,
+        80.0 + 40.0,
+        50.0 + 40.0,
+        0.5,
+        1.0,
+        &mut render_target,
+        &pipeline,
+    );
+
+    drop(render_target);
+    window_buffer.present();
+}
+
 fn main() -> ! {
     serial_println!("Welcome to MofuOS!");
 
@@ -305,7 +404,9 @@ fn main() -> ! {
         Err(ElfLoadError::InvalidHeader) => {
             serial_println!("Error loading elf: InvalidHeader")
         }
-        Err(kernel::process::ElfLoadError::InvalidType) | Err(kernel::process::ElfLoadError::NoLoadableSegments) | Err(kernel::process::ElfLoadError::ReadError) => todo!(),
+        Err(kernel::process::ElfLoadError::InvalidType)
+        | Err(kernel::process::ElfLoadError::NoLoadableSegments)
+        | Err(kernel::process::ElfLoadError::ReadError) => todo!(),
         Ok(info) => {
             serial_println!("Loaded elf info: {:?}", info.entry_point)
         }
@@ -380,59 +481,62 @@ fn main() -> ! {
     // theophe.render();
 
     use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
-    use kernel::graphics::window::{Window, WindowBuffer};
     use kernel::graphics::compositor::Compositor;
+    use kernel::graphics::window::{Window, WindowBuffer};
     //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
     serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
-    let mut compositor = Compositor::new(fb_width as u32,  fb_height as u32);
+    let mut compositor = Compositor::new(fb_width as u32, fb_height as u32);
     let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
-    serial_println!("Created window with ID: {}", window_id);
-    {
-        let mut back_buffer = window_buffer.back_buffer_mut();
-        for y in 0..150 {
-            for x in 0..200 {
-                back_buffer.write_pixel(x, y, Rgba8888UNORM::from_rgb_emb(Rgb888::BLUE));
-            }
-        }
+    // serial_println!("Created window with ID: {}", window_id);
+    // {
+    //     let mut back_buffer = window_buffer.back_buffer_mut();
+    //     for y in 0..150 {
+    //         for x in 0..200 {
+    //             back_buffer.write_pixel(x, y, Rgba8888UNORM::from_rgb_emb(Rgb888::BLUE));
+    //         }
+    //     }
 
-        serial_println!("Presenting window 1 ");
-        window_buffer.present();
-    }
-    let (window2_id, window2_buffer) = compositor.create_window(400, 500, 100, 90);
-    compositor.set_z_index(window2_id, 5);
-    serial_println!("Created window with ID: {}", window2_id);
-    {
-        let mut back_buffer = window2_buffer.back_buffer_mut();
-        for y in 0..window2_buffer.height {
-            for x in 0..window2_buffer.width {
-                let r = (x as f32 / window2_buffer.width as f32 * 255.0) as u8;
-                let g = (y as f32 / window2_buffer.height as f32 * 255.0) as u8;
-                let b = 0;
-                back_buffer.write_pixel(x, y, Rgba8888UNORM::from_rgb(r, g, b));
-            }
-        }
+    //     serial_println!("Presenting window 1 ");
+    //     window_buffer.present();
+    // }
+    // let (window2_id, window2_buffer) = compositor.create_window(400, 500, 100, 90);
+    // compositor.set_z_index(window2_id, 5);
+    // serial_println!("Created window with ID: {}", window2_id);
+    // {
+    //     let mut back_buffer = window2_buffer.back_buffer_mut();
+    //     for y in 0..window2_buffer.height {
+    //         for x in 0..window2_buffer.width {
+    //             let r = (x as f32 / window2_buffer.width as f32 * 255.0) as u8;
+    //             let g = (y as f32 / window2_buffer.height as f32 * 255.0) as u8;
+    //             let b = 0;
+    //             back_buffer.write_pixel(x, y, Rgba8888UNORM::from_rgb(r, g, b));
+    //         }
+    //     }
 
-        serial_println!("Presenting window 2 ");
-        window2_buffer.present();
-    }
+    //     serial_println!("Presenting window 2 ");
+    //     window2_buffer.present();
+    // }
 
     let (window3_id, window3_buffer) = compositor.create_window(400, 300, 700, 200);
     compositor.set_z_index(window3_id, 5);
     serial_println!("Created window with ID: {}", window3_id);
-    {
-        let mut back_buffer = window3_buffer.back_buffer_mut();
-        for y in 0..window3_buffer.height {
-            for x in 0..window3_buffer.width {
-                let r = (x as f32 / window3_buffer.width as f32 * 255.0) as u8;
-                let g = (y as f32 / window3_buffer.height as f32 * 255.0) as u8;
-                let b = 0;
-                back_buffer.write_pixel(x, y, Rgba8888UNORM::from_rgb(r, g, b));
-            }
-        }
 
-        serial_println!("Presenting window3 ");
-        window3_buffer.present();
-    }
+    render_shaders(&window3_buffer);
+
+    // {
+    //     let mut back_buffer = window3_buffer.back_buffer_mut();
+    //     for y in 0..window3_buffer.height {
+    //         for x in 0..window3_buffer.width {
+    //             let r = (x as f32 / window3_buffer.width as f32 * 255.0) as u8;
+    //             let g = (y as f32 / window3_buffer.height as f32 * 255.0) as u8;
+    //             let b = 0;
+    //             back_buffer.write_pixel(x, y, Rgba8888UNORM::from_rgb(r, g, b));
+    //         }
+    //     }
+
+    //     serial_println!("Presenting window3 ");
+    //     window3_buffer.present();
+    // }
 
     let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
     theophe.write_line("");
@@ -455,29 +559,28 @@ fn main() -> ! {
 
     theophe.render();
 
-    {
-        let mut theophe = Theophe::new(window3_buffer.back_buffer_mut());
-        theophe.write_line("");
-        theophe.write_line("  hi");
-        theophe.write_line("==========================================================");
-        let cpu_info = kernel::util::cpuinfo::get_cpu_info();
-        let cpu_info_str = cpu_info.to_pretty_string();
-        theophe.write_str(&cpu_info_str);
+    // {
+    //     let mut theophe = Theophe::new(window3_buffer.back_buffer_mut());
+    //     theophe.write_line("");
+    //     theophe.write_line("  hi");
+    //     theophe.write_line("==========================================================");
+    //     let cpu_info = kernel::util::cpuinfo::get_cpu_info();
+    //     let cpu_info_str = cpu_info.to_pretty_string();
+    //     theophe.write_str(&cpu_info_str);
 
-        // theophe.write_str("agrwinonnnononononono nononononononononononooogowniognewagiowe gagrwinonnnonononononononononon ononononononooogowniognewagiowegagrwinonnnonon ononononononononononononononooogowniognewagio");
-        // write!(
-        //     theophe,
-        //     "The current framebuffer size is {}x{}",
-        //     fb_width, fb_height
-        // )
-        // .unwrap();
-        // write!(theophe, "aFASFASfASF {}\n", fb_width).unwrap();
-        // write!(theophe, "arewhrehrehaerhre {} ", fb_width).unwrap();
-        // write!(theophe, "ahrehearhearhaheerh {}", fb_width).unwrap();
+    //     // theophe.write_str("agrwinonnnononononono nononononononononononooogowniognewagiowe gagrwinonnnonononononononononon ononononononooogowniognewagiowegagrwinonnnonon ononononononononononononononooogowniognewagio");
+    //     // write!(
+    //     //     theophe,
+    //     //     "The current framebuffer size is {}x{}",
+    //     //     fb_width, fb_height
+    //     // )
+    //     // .unwrap();
+    //     // write!(theophe, "aFASFASfASF {}\n", fb_width).unwrap();
+    //     // write!(theophe, "arewhrehrehaerhre {} ", fb_width).unwrap();
+    //     // write!(theophe, "ahrehearhearhaheerh {}", fb_width).unwrap();
 
-        theophe.render();
-    }
-
+    //     theophe.render();
+    // }
 
     compositor.focus_window(0);
     compositor.compose(&mut framebuffer_target);

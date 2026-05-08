@@ -77,7 +77,7 @@ impl Rect {
         let y = self.y.min(other.y);
         let x2: u32 = self_right.max(other_right);
         let y2 = self_bottom.max(other_bottom);
-        
+
         Rect {
             x,
             y,
@@ -97,7 +97,7 @@ pub struct WindowBuffer {
     pub front_buffer: UnsafeCell<NonNull<u32>>, // read by the compositor
 
     pub needs_swap: AtomicBool, // if the content is not dirty, we dont have to swap //TODO:
-    
+
     pub swap_count: AtomicU32, // debug
 }
 
@@ -168,11 +168,11 @@ impl WindowBuffer {
 }
 
 pub struct WindowBackBuffer<'a> {
-    window: &'a WindowBuffer,
+    pub window: &'a WindowBuffer,
 }
 
 pub struct WindowPresentBuffer<'a> {
-    window: &'a WindowBuffer,
+    pub window: &'a WindowBuffer,
 }
 
 impl<'a> WindowBackBuffer<'a> {

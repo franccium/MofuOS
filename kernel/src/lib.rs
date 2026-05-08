@@ -2,6 +2,7 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 #![feature(allocator_api)]
+#![feature(portable_simd)]
 
 pub mod memory;
 extern crate alloc;
