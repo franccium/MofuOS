@@ -1,7 +1,6 @@
 use crate::filesystem::fat32::Fat32Driver;
 use crate::filesystem::fat32::FileNodeHandle;
-use crate::io::disk::{DiskOpError};
-use crate::io::{MockDiskDevice, init_disk};
+use crate::io::disk::{DiskOpError, MockDiskDevice, init_disk};
 use crate::serial_println;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -33,7 +32,7 @@ bitflags! {
         const EXECUTE = 0b00000100;
 
         const HIDDEN = 0b00001000;
-        // actually careful with 8th bit, modify the node_id packing code
+        //NOTE: actually careful with 8th bit, modify the node_id packing code
         const RESERVED = 0b11110000;
     }
 }

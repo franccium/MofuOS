@@ -203,7 +203,6 @@ static STACK_TOP: AtomicU64 = AtomicU64::new(0);
 
 pub fn init_syscall_stack() {
     let top = unsafe {
-        // Use raw pointers only - no references to mutable statics
         let stack_bottom = core::ptr::addr_of!(SYSCALL_STACK).cast::<u8>();
         let stack_top_ptr = stack_bottom.add(SYSCALL_STACK_SIZE);
         VirtAddr::from_ptr(stack_top_ptr).as_u64()

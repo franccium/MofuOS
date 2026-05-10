@@ -27,7 +27,7 @@ pub enum DiskOpError {
 }
 
 pub trait DiskDevice {
-    // Read n sectors into buffer
+    /// Read n sectors into buffer
     fn read_sectors(
         &mut self,
         start_sector: u64,
@@ -35,13 +35,13 @@ pub trait DiskDevice {
         out_buffer: &mut [u8],
     ) -> DiskOpResult<()>;
 
-    // Write n sectors from buffer
+    /// Write n sectors from buffer
     fn write_sectors(&mut self, start_sector: u64, count: usize, data: &[u8]) -> DiskOpResult<()>;
 
     fn sector_count(&self) -> u64;
 }
 
-// testing device using an in-memory buffer
+/// testing device using an in-memory buffer
 pub struct MockDiskDevice {
     size_bytes: usize,
     data: Vec<u8>,

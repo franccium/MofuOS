@@ -1,6 +1,6 @@
 use crate::{
     data_structures::vector::Vec,
-    process::{ElfLoadInfo, process_mem::ProcessMemoryLayout},
+    process::{elf_loader::ElfLoadInfo, process_mem::ProcessMemoryLayout},
     serial_println,
 };
 use alloc::string::String;
@@ -11,13 +11,14 @@ use x86_64::{
 
 // Marks terminated children
 pub const INVALID_PID: usize = usize::MAX;
+
 pub const MAX_PRIORITY: u8 = 8;
 pub const RFLAGS_DEFAULT: u64 = 0x202;
 pub const DEFAULT_NEW_PROCESS_STACK_SIZE: u64 = 1 * 1024 * 1024;
 
 pub type PID = usize;
 
-// Store the currently running process
+//TODO: temporary until no scheduler
 static CURRENT_PROCESS: spin::Once<spin::Mutex<Option<Process>>> = spin::Once::new();
 
 pub fn set_current_process(process: Process) {
@@ -25,7 +26,9 @@ pub fn set_current_process(process: Process) {
 }
 
 pub fn get_current_process() -> &'static spin::Mutex<Option<Process>> {
-    CURRENT_PROCESS.get().expect("Current process not initialized")
+    CURRENT_PROCESS
+        .get()
+        .expect("Current process not initialized")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -168,7 +171,8 @@ impl Process {
         let address_space_manager = &crate::memory::get_user_mem_mgr();
         let mut frame_allocator = crate::memory::get_frame_allocator();
 
-        let mut memory_layout = ProcessMemoryLayout::new(address_space_manager, &mut frame_allocator)?;
+        let mut memory_layout =
+            ProcessMemoryLayout::new(address_space_manager, &mut frame_allocator)?;
 
         for segment in &elf_info.segments {
             let vaddr = VirtAddr::new(segment.vaddr);
@@ -196,10 +200,9 @@ impl Process {
                 &mut frame_allocator,
             )?;
 
-            let phys_addr = address_space_manager.translate_user_virt_to_phys(
-                memory_layout.top_page_table_phys,
-                vaddr,
-            ).expect("Failed to translate user virtual address to physical");
+            let phys_addr = address_space_manager
+                .translate_user_virt_to_phys(memory_layout.top_page_table_phys, vaddr)
+                .expect("Failed to translate user virtual address to physical");
             let hhdm_vaddr = phys_addr.as_u64() + address_space_manager.phys_offset;
 
             // copy segment data
@@ -210,7 +213,11 @@ impl Process {
                     segment.in_file_size as usize,
                 );
             }
-            serial_println!("  Copied {} bytes to {:#x}", segment.in_file_size, vaddr.as_u64());
+            serial_println!(
+                "  Copied {} bytes to {:#x}",
+                segment.in_file_size,
+                vaddr.as_u64()
+            );
 
             // zero-fill the bss section
             if segment.in_memory_size > segment.in_file_size {
@@ -244,7 +251,11 @@ impl Process {
         )?;
         memory_layout.stack_top = stack_top;
 
-        let context = ExecutionContext::new(elf_info.entry_point, stack_top.as_u64(), memory_layout.top_page_table_phys.as_u64());
+        let context = ExecutionContext::new(
+            elf_info.entry_point,
+            stack_top.as_u64(),
+            memory_layout.top_page_table_phys.as_u64(),
+        );
 
         Ok(Self {
             pid,
