@@ -1,8 +1,9 @@
 use core::simd::f32x4;
 
 use crate::graphics::color::Rgba8888UNORM;
-use crate::graphics::pipeline::{PSIn, PixelShader, VSIn, VSOut, VertexShader};
+use crate::graphics::pipeline::{PSIn, PixelShader, VSIn, VSOut, Vertex3D, VertexShader};
 use crate::graphics::resources::ConstantBuffer;
+use crate::graphics::transform::Matrix4x4;
 use crate::serial_println;
 
 pub struct FlatColorPS {
@@ -24,9 +25,18 @@ impl PixelShader for TextureSamplePS {
         if let Some(texture) = input.textures.get(self.texture_slot) {
             let u = input.attributes[0];
             let v = input.attributes[1];
+
+            let nx = input.attributes[2];
+            let ny = input.attributes[3];
+
             let color = texture.sample_nearest(u, v);
 
             let color = Rgba8888UNORM::from_rgbf32(u, v, 0f32);
+
+            //let color = Rgba8888UNORM::from_rgbf32(nx, ny, 0f32);
+            //let color = Rgba8888UNORM::from_rgbf32(nx, ny, input.attributes[1]);
+            
+            
             // serial_println!(
             //     "PS - color: {} {} {} to uv: {}, {}",
             //     color.r,
@@ -51,5 +61,26 @@ impl VertexShader for PassThroughVS {
             0.0,
             1.0,
         ]);
+    }
+}
+
+pub struct Basic3DVS {
+    pub model_view_proj: Matrix4x4,
+}
+
+impl VertexShader for Basic3DVS {
+    fn run(&self, input: &VSIn, output: &mut VSOut, _uniforms: &[ConstantBuffer]) {
+        // SAFETY: Vertex3D is #[repr(C, align(16))] with three f32x4 fields.
+        // f32x4 has the same layout as [f32; 4]. The total size is 48 bytes.
+        // We verify that the input data is at least size_of::<Vertex3D>() bytes.
+        let vertex: &Vertex3D = unsafe { &*(input.vertex_data.as_ptr() as *const Vertex3D) };
+
+        let world_pos = self.model_view_proj.mul_vec(vertex.pos);
+
+        serial_println!("clip {:?}", world_pos);
+
+        output.position = world_pos;
+        output.attributes = vertex.uv;
+        output.extra = vertex.norm;
     }
 }

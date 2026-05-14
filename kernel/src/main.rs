@@ -78,7 +78,8 @@ fn main() -> ! {
     compositor.set_z_index(window3_id, 5);
     serial_println!("Created window with ID: {}", window3_id);
 
-    test_graphics::render_shaders(&window3_buffer);
+    //test_graphics::render_shaders(&window3_buffer);
+    test_graphics::render_shaders_3d(&window3_buffer);
 
     // {
     //     let mut back_buffer = window3_buffer.back_buffer_mut();
