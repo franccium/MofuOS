@@ -13,7 +13,7 @@ use kernel::graphics::pipeline::{
     BlendState, PipelineState, RasterizerState, RenderMode, VertexLayout,
 };
 use kernel::graphics::renderer::RenderContext;
-use kernel::graphics::resources::Texture;
+use kernel::graphics::resources::{ConstantBuffer, Texture};
 use kernel::graphics::shaders::{PassThroughVS, TextureSamplePS};
 use kernel::graphics::window::{Window, WindowBuffer};
 use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, TEST_ELF};
@@ -107,10 +107,51 @@ fn main() -> ! {
     theophe.render();
 
     compositor.focus_window(0);
-    compositor.compose(&mut framebuffer_target);
+    //compositor.compose(&mut framebuffer_target);
 
+    let mut ctx = RenderContext::new();
+
+    // Create a checkerboard texture
+    const SIZE: u32 = 64;
+    let texture_data = alloc::vec::Vec::from(
+        (0..(SIZE * SIZE))
+            .map(|i| {
+                let x = i % SIZE;
+                let y = i / SIZE;
+                let checker = ((x / 8) + (y / 8)) % 2 == 0;
+                if checker {
+                    Rgba8888UNORM::from_rgb(255, 128, 0).to_u32_rgba() // Orange
+                } else {
+                    Rgba8888UNORM::from_rgb(0, 128, 255).to_u32_rgba() // Blue
+                }
+            })
+            .collect::<alloc::vec::Vec<u32>>(),
+    );
+    let texture = Texture::from_data(SIZE, SIZE, texture_data);
+    let texture_slot = ctx.bind_texture(texture);
+
+    // Set up constant buffer with MVP matrix (update this each frame for animation)
+    let mut constant_data = alloc::vec![0u8; 64]; // 4x4 matrix = 64 bytes
+    let cbuffer = ConstantBuffer::from_data(constant_data);
+    let cbuffer_slot = ctx.bind_cbuffer(cbuffer);
+    let mut obj_x = 2f32;
+    let mut obj_y = 1f32;
+    let mut obj_z = 1f32;
+    let mut angle = 0f32;
+    // compositor.compose(&mut framebuffer_target);
     loop {
-        hlt();
+        test_graphics::render_shaders_3d_loop(
+            &window3_buffer,
+            &mut ctx,
+            obj_x,
+            obj_y,
+            obj_z,
+            angle,
+        );
+        // //obj_y += 0.1f32;
+        angle += 45f32;
+        compositor.compose(&mut framebuffer_target);
+        // hlt();
     }
 
     exit_qemu(QemuExitCode::Success);

@@ -1,16 +1,23 @@
 use core::simd::f32x4;
 
-use alloc::{boxed::Box, sync::Arc};
-use alloc::vec::Vec;
 use crate::graphics::pipeline::{CullMode, DepthFunc, Vertex3D};
 use crate::graphics::resources::{ConstantBuffer, DepthBuffer};
 use crate::graphics::shaders::{Basic3DVS, FlatColorPS};
 use crate::graphics::transform::{Matrix4x4, create_perspective_matrix};
-use crate::graphics::{color::Rgba8888UNORM, framebuffer::FrameBufferTarget, pipeline::{BlendState, PipelineState, RasterizerState, RenderMode, VertexLayout}, renderer::RenderContext, resources::Texture, shaders::{PassThroughVS, TextureSamplePS}, window::WindowBuffer};
+use crate::graphics::{
+    color::Rgba8888UNORM,
+    framebuffer::FrameBufferTarget,
+    pipeline::{BlendState, PipelineState, RasterizerState, RenderMode, VertexLayout},
+    renderer::RenderContext,
+    resources::Texture,
+    shaders::{PassThroughVS, TextureSamplePS},
+    window::WindowBuffer,
+};
+use alloc::vec::Vec;
+use alloc::{boxed::Box, sync::Arc};
 use embedded_graphics::prelude::*;
-use embedded_graphics::{geometry::Point, pixelcolor::Rgb888, primitives::Primitive};
 use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
-
+use embedded_graphics::{geometry::Point, pixelcolor::Rgb888, primitives::Primitive};
 
 pub fn draw_shapes(framebuffer_target: &mut FrameBufferTarget) {
     Rectangle::new(Point::new(0, 0), Size::new(100, 100))
@@ -138,7 +145,7 @@ pub fn render_shaders_2d(window_buffer: &Arc<WindowBuffer>) {
 
 pub fn render_shaders_3d(window_buffer: &Arc<WindowBuffer>) {
     let mut ctx = RenderContext::new();
-    
+
     // Create a checkerboard texture
     const SIZE: u32 = 64;
     let texture_data = Vec::from(
@@ -170,25 +177,27 @@ pub fn render_shaders_3d(window_buffer: &Arc<WindowBuffer>) {
     let fov = 60.0_f32.to_radians();
     let near = 0.1;
     let far = 100.0;
-    
+
     let projection = create_perspective_matrix(fov, aspect_ratio, near, far);
-    
+
     // Create view matrix (camera looking at origin)
     let view = Matrix4x4::look_at(
         f32x4::from_array([-2.0, -2.0, 5.0, 1.0]), // Camera position
-        f32x4::from_array([0.0, 0.0, 0.0, 1.0]),  // Look at target
-        f32x4::from_array([0.0, 1.0, 0.0, 0.0]),  // Up vector
+        f32x4::from_array([0.0, 0.0, 0.0, 1.0]),   // Look at target
+        f32x4::from_array([0.0, 1.0, 0.0, 0.0]),   // Up vector
     );
-    
+
     // Create model matrix
     let model = Matrix4x4::identity();
-    
+
     // Combine matrices
     let mvp = projection.mul(&view).mul(&model);
 
     // 3D pipeline with texture
     let pipeline = PipelineState {
-        vs: Box::new(Basic3DVS { model_view_proj: mvp }),
+        vs: Box::new(Basic3DVS {
+            model_view_proj: mvp,
+        }),
         ps: Box::new(TextureSamplePS { texture_slot }),
         vertex_layout: VertexLayout::new_3d(),
         rasterizer_state: RasterizerState {
@@ -203,7 +212,7 @@ pub fn render_shaders_3d(window_buffer: &Arc<WindowBuffer>) {
 
     // Create a cube (8 vertices, 36 indices for 12 triangles)
     let s = 1.0; // Half-size of cube
-    
+
     #[rustfmt::skip]
     let vertices = alloc::vec![
         // Front face (z = s)
@@ -261,20 +270,149 @@ let indices = alloc::vec![
     20, 22, 21, 20, 23, 22,
 ];
 
+    // Render loop
+    let mut back_buffer = window_buffer.back_buffer_mut();
+    let mut render_target = ctx.begin_frame(&mut back_buffer);
+
+    // Clear to dark gray
+    render_target.clear(Rgba8888UNORM::from_rgb(30, 30, 30));
+
+    // Create depth buffer (you might want to reuse this across frames)
+    let mut depth_buffer = DepthBuffer::new(window_buffer.width, window_buffer.height);
+
+    // Draw textured cube
+    ctx.draw_indexed_3d(
+        &vertices,
+        &indices,
+        &mut render_target,
+        &mut depth_buffer,
+        &pipeline,
+    );
+
+    drop(render_target);
+    window_buffer.present();
+}
+
+pub fn render_shaders_3d_loop(
+    window_buffer: &Arc<WindowBuffer>,
+    ctx: &mut RenderContext,
+    x: f32,
+    y: f32,
+    z: f32,
+    angle: f32,
+) {
+    // Create perspective projection matrix
+    let window_width = window_buffer.width as f32;
+    let window_height = window_buffer.height as f32;
+    let aspect_ratio = window_width / window_height;
+    let fov = 60.0_f32.to_radians();
+    let near = 0.1;
+    let far = 100.0;
+
+    let projection = create_perspective_matrix(fov, aspect_ratio, near, far);
+
+    // Create view matrix (camera looking at origin)
+    let view = Matrix4x4::look_at(
+        f32x4::from_array([-2.0, 5.0, 5.0, 1.0]), // Camera position
+        f32x4::from_array([0.0, 0.0, 0.0, 1.0]),   // Look at target
+        f32x4::from_array([0.0, 1.0, 0.0, 0.0]),   // Up vector
+    );
+
+    // Create model matrix
+    //let model = Matrix4x4::identity();
+    let mut model = Matrix4x4::rotation_y(angle);
+    model.translate(x, y, z);
+
+    // Combine matrices
+    let mvp = projection.mul(&view).mul(&model);
+
+    // 3D pipeline with texture
+    let pipeline = PipelineState {
+        vs: Box::new(Basic3DVS {
+            model_view_proj: mvp,
+        }),
+        ps: Box::new(TextureSamplePS { texture_slot: 0 }),
+        vertex_layout: VertexLayout::new_3d(),
+        rasterizer_state: RasterizerState {
+            cull_mode: CullMode::Back,
+        },
+        blend_state: BlendState::default(),
+        render_mode: RenderMode::XYZ,
+        depth_enabled: true,
+        depth_write: true,
+        depth_func: DepthFunc::Less,
+    };
+
+    // Create a cube (8 vertices, 36 indices for 12 triangles)
+    let s = 1.0; // Half-size of cube
+
+    #[rustfmt::skip]
+    let vertices = alloc::vec![
+        // Front face (z = s)
+        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 0.0,  0.0, 0.0, 1.0),
+        Vertex3D::new( s, -s,  s, 1.0,  1.0, 0.0,  0.0, 0.0, 1.0),
+        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  0.0, 0.0, 1.0),
+        Vertex3D::new(-s,  s,  s, 1.0,  0.0, 1.0,  0.0, 0.0, 1.0),
+        // Back face (z = -s)
+        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  0.0, 0.0, -1.0),
+        Vertex3D::new( s, -s, -s, 1.0,  1.0, 0.0,  0.0, 0.0, -1.0),
+        Vertex3D::new( s,  s, -s, 1.0,  1.0, 1.0,  0.0, 0.0, -1.0),
+        Vertex3D::new(-s,  s, -s, 1.0,  0.0, 1.0,  0.0, 0.0, -1.0),
+        // Top face (y = s)
+        Vertex3D::new(-s,  s, -s, 1.0,  0.0, 0.0,  0.0, 1.0, 0.0),
+        Vertex3D::new( s,  s, -s, 1.0,  1.0, 0.0,  0.0, 1.0, 0.0),
+        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  0.0, 1.0, 0.0),
+        Vertex3D::new(-s,  s,  s, 1.0,  0.0, 1.0,  0.0, 1.0, 0.0),
+        // Bottom face (y = -s)
+        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  0.0, -1.0, 0.0),
+        Vertex3D::new( s, -s, -s, 1.0,  1.0, 0.0,  0.0, -1.0, 0.0),
+        Vertex3D::new( s, -s,  s, 1.0,  1.0, 1.0,  0.0, -1.0, 0.0),
+        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 1.0,  0.0, -1.0, 0.0),
+        // Right face (x = s)
+        Vertex3D::new( s, -s, -s, 1.0,  0.0, 0.0,  1.0, 0.0, 0.0),
+        Vertex3D::new( s,  s, -s, 1.0,  1.0, 0.0,  1.0, 0.0, 0.0),
+        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  1.0, 0.0, 0.0),
+        Vertex3D::new( s, -s,  s, 1.0,  0.0, 1.0,  1.0, 0.0, 0.0),
+        // Left face (x = -s)
+        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  -1.0, 0.0, 0.0),
+        Vertex3D::new(-s,  s, -s, 1.0,  1.0, 0.0,  -1.0, 0.0, 0.0),
+        Vertex3D::new(-s,  s,  s, 1.0,  1.0, 1.0,  -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 1.0,  -1.0, 0.0, 0.0),
+    ];
+
+    // Indices for 12 triangles (2 per face)
+    #[rustfmt::skip]
+let indices = alloc::vec![
+    // Front (+Z)
+    0, 1, 2, 0, 2, 3,
+
+    // Back (-Z)
+    4, 6, 5, 4, 7, 6,
+
+    // Top (+Y)
+    8, 10, 9, 8, 11, 10,
+
+    // Bottom (-Y)
+    12, 13, 14, 12, 14, 15,
+
+    // Right (+X)
+
+    16, 17, 18, 16, 18, 19,
+
+    // Left (-X)
+    20, 22, 21, 20, 23, 22,
+];
 
     // Render loop
     let mut back_buffer = window_buffer.back_buffer_mut();
     let mut render_target = ctx.begin_frame(&mut back_buffer);
-    
+
     // Clear to dark gray
     render_target.clear(Rgba8888UNORM::from_rgb(30, 30, 30));
-    
+
     // Create depth buffer (you might want to reuse this across frames)
-    let mut depth_buffer = DepthBuffer::new(
-        window_buffer.width,
-        window_buffer.height,
-    );
-    
+    let mut depth_buffer = DepthBuffer::new(window_buffer.width, window_buffer.height);
+
     // Draw textured cube
     ctx.draw_indexed_3d(
         &vertices,

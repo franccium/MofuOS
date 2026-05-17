@@ -326,7 +326,7 @@ impl RenderContext {
                                 // You can access NZ through extra attribute or add more channels
                                 let pixel_attrs = f32x4::from_array([
                                     u_interp[i],
-                                    v_interp[i],
+                                    nz_interp[i],
                                     nx_interp[i],
                                     ny_interp[i],
                                 ]);

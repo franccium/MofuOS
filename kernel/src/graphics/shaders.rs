@@ -29,14 +29,17 @@ impl PixelShader for TextureSamplePS {
             let nx = input.attributes[2];
             let ny = input.attributes[3];
 
-            let color = texture.sample_nearest(u, v);
+            //let color = texture.sample_nearest(u, v);
 
-            let color = Rgba8888UNORM::from_rgbf32(u, v, 0f32);
+            // let color = Rgba8888UNORM::from_rgbf32(u, v, 0f32);
 
             //let color = Rgba8888UNORM::from_rgbf32(nx, ny, 0f32);
-            //let color = Rgba8888UNORM::from_rgbf32(nx, ny, input.attributes[1]);
-            
-            
+            let color = Rgba8888UNORM::from_rgbf32(
+                nx * 0.5f32 + 0.5f32,
+                ny * 0.5f32 + 0.5f32,
+                input.attributes[1] * 0.5f32 + 0.5f32,
+            );
+
             // serial_println!(
             //     "PS - color: {} {} {} to uv: {}, {}",
             //     color.r,
@@ -77,7 +80,7 @@ impl VertexShader for Basic3DVS {
 
         let world_pos = self.model_view_proj.mul_vec(vertex.pos);
 
-        serial_println!("clip {:?}", world_pos);
+        //serial_println!("world pos {:?}", world_pos);
 
         output.position = world_pos;
         output.attributes = vertex.uv;
