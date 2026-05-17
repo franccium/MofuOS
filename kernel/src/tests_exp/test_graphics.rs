@@ -1,10 +1,25 @@
-use alloc::{boxed::Box, sync::Arc};
-use alloc::vec::Vec;
-use crate::graphics::{color::Rgba8888UNORM, framebuffer::FrameBufferTarget, pipeline::{BlendState, PipelineState, RasterizerState, RenderMode, VertexLayout}, renderer::RenderContext, resources::Texture, shaders::{PassThroughVS, TextureSamplePS}, window::WindowBuffer};
-use embedded_graphics::prelude::*;
-use embedded_graphics::{geometry::Point, pixelcolor::Rgb888, primitives::Primitive};
-use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
+use core::simd::f32x4;
 
+use crate::graphics::color::Rgba8888F;
+use crate::graphics::pipeline::{CullMode, DepthFunc, PipelineState3D, RenderTarget, Vertex3D};
+use crate::graphics::resources::{ConstantBuffer, DepthBuffer};
+use crate::graphics::shaders::{Basic3DVS, BlinnPhongPS, BlinnPhongVS, FlatColorPS};
+use crate::graphics::transform::{Matrix4x4, create_perspective_matrix};
+use crate::graphics::{
+    color::Rgba8888UNORM,
+    framebuffer::FrameBufferTarget,
+    pipeline::{BlendState, PipelineState, RasterizerState, RenderMode, VertexLayout},
+    renderer::RenderContext,
+    resources::Texture,
+    shaders::{PassThroughVS, TextureSamplePS},
+    window::WindowBuffer,
+};
+use alloc::vec::Vec;
+use alloc::{boxed::Box, sync::Arc};
+use embedded_graphics::prelude::*;
+use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
+use embedded_graphics::{geometry::Point, pixelcolor::Rgb888, primitives::Primitive};
+use micromath::F32Ext;
 
 pub fn draw_shapes(framebuffer_target: &mut FrameBufferTarget) {
     Rectangle::new(Point::new(0, 0), Size::new(100, 100))
@@ -32,7 +47,7 @@ pub fn draw_shapes(framebuffer_target: &mut FrameBufferTarget) {
     }
 }
 
-pub fn render_shaders(window_buffer: &Arc<WindowBuffer>) {
+pub fn render_shaders_2d(window_buffer: &Arc<WindowBuffer>, render_target: &mut RenderTarget<'_>) {
     let mut ctx = RenderContext::new();
     const SIZE: u32 = 120;
     let texture_data = Vec::from(
@@ -69,18 +84,17 @@ pub fn render_shaders(window_buffer: &Arc<WindowBuffer>) {
         rasterizer_state: RasterizerState::default(),
         blend_state: BlendState::default(),
         render_mode: RenderMode::XY,
+        depth_enabled: false,
+        depth_write: false,
+        depth_func: DepthFunc::Less,
     };
-
-    let mut back_buffer = window_buffer.back_buffer_mut();
-    let mut render_target = ctx.begin_frame(&mut back_buffer);
-    render_target.clear(Rgba8888UNORM::GRAY);
 
     ctx.draw_rect_2d(
         10.0,
         10.0,
         SIZE as f32,
         SIZE as f32,
-        &mut render_target,
+        render_target,
         &pipeline,
     );
 
@@ -93,13 +107,16 @@ pub fn render_shaders(window_buffer: &Arc<WindowBuffer>) {
         rasterizer_state: RasterizerState::default(),
         blend_state: BlendState::default(),
         render_mode: RenderMode::XY,
+        depth_enabled: false,
+        depth_write: false,
+        depth_func: DepthFunc::Less,
     };
     ctx.draw_rect_2d(
         25.0,
         25.0,
         SIZE as f32,
         SIZE as f32,
-        &mut render_target,
+        render_target,
         &pipeline2,
     );
 
@@ -116,10 +133,213 @@ pub fn render_shaders(window_buffer: &Arc<WindowBuffer>) {
         50.0 + 40.0,
         0.5,
         1.0,
+        render_target,
+        &pipeline,
+    );
+
+    window_buffer.present();
+}
+
+pub fn render_shaders_3d(window_buffer: &Arc<WindowBuffer>) {
+    let mut ctx = RenderContext::new();
+
+    const SIZE: u32 = 64;
+    let texture_data = Vec::from(
+        (0..(SIZE * SIZE))
+            .map(|i| {
+                let x = i % SIZE;
+                let y = i / SIZE;
+                let checker = ((x / 8) + (y / 8)) % 2 == 0;
+                if checker {
+                    Rgba8888UNORM::from_rgb(255, 128, 0).to_u32_rgba() // Orange
+                } else {
+                    Rgba8888UNORM::from_rgb(0, 128, 255).to_u32_rgba() // Blue
+                }
+            })
+            .collect::<Vec<u32>>(),
+    );
+    let texture = Texture::from_data(SIZE, SIZE, texture_data);
+    let texture_slot = ctx.bind_texture(texture);
+
+    let mut constant_data = alloc::vec![0u8; 64];
+    let cbuffer = ConstantBuffer::from_data(constant_data);
+    let cbuffer_slot = ctx.bind_cbuffer(cbuffer);
+
+    let window_width = window_buffer.width as f32;
+    let window_height = window_buffer.height as f32;
+    let aspect_ratio = window_width / window_height;
+    let fov = 60.0_f32.to_radians();
+    let near = 0.1;
+    let far = 100.0;
+
+    let projection = create_perspective_matrix(fov, aspect_ratio, near, far);
+
+    let view = Matrix4x4::look_at(
+        f32x4::from_array([-2.0, -2.0, 5.0, 1.0]),
+        f32x4::from_array([0.0, 0.0, 0.0, 1.0]),
+        f32x4::from_array([0.0, 1.0, 0.0, 0.0]),
+    );
+
+    let model = Matrix4x4::identity();
+
+    let mvp = projection.mul(&view).mul(&model);
+
+    let pipeline = PipelineState3D {
+        vs: Box::new(BlinnPhongVS {
+            model_view_proj: mvp,
+            model_world: model,
+        }),
+        ps: Box::new(TextureSamplePS { texture_slot }),
+        vertex_layout: VertexLayout::new_3d(),
+        rasterizer_state: RasterizerState {
+            cull_mode: CullMode::Back,
+        },
+        blend_state: BlendState::default(),
+        render_mode: RenderMode::XYZ,
+        depth_enabled: true,
+        depth_write: true,
+        depth_func: DepthFunc::Less,
+    };
+
+    let s = 1.0;
+
+    let vertices = alloc::vec![
+        // Front face
+        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 0.0,  0.0, 0.0, 1.0),
+        Vertex3D::new( s, -s,  s, 1.0,  1.0, 0.0,  0.0, 0.0, 1.0),
+        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  0.0, 0.0, 1.0),
+        Vertex3D::new(-s,  s,  s, 1.0,  0.0, 1.0,  0.0, 0.0, 1.0),
+        // Back face
+        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  0.0, 0.0, -1.0),
+        Vertex3D::new( s, -s, -s, 1.0,  1.0, 0.0,  0.0, 0.0, -1.0),
+        Vertex3D::new( s,  s, -s, 1.0,  1.0, 1.0,  0.0, 0.0, -1.0),
+        Vertex3D::new(-s,  s, -s, 1.0,  0.0, 1.0,  0.0, 0.0, -1.0),
+        // Top face
+        Vertex3D::new(-s,  s, -s, 1.0,  0.0, 0.0,  0.0, 1.0, 0.0),
+        Vertex3D::new( s,  s, -s, 1.0,  1.0, 0.0,  0.0, 1.0, 0.0),
+        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  0.0, 1.0, 0.0),
+        Vertex3D::new(-s,  s,  s, 1.0,  0.0, 1.0,  0.0, 1.0, 0.0),
+        // Bottom face
+        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  0.0, -1.0, 0.0),
+        Vertex3D::new( s, -s, -s, 1.0,  1.0, 0.0,  0.0, -1.0, 0.0),
+        Vertex3D::new( s, -s,  s, 1.0,  1.0, 1.0,  0.0, -1.0, 0.0),
+        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 1.0,  0.0, -1.0, 0.0),
+        // Right face
+        Vertex3D::new( s, -s, -s, 1.0,  0.0, 0.0,  1.0, 0.0, 0.0),
+        Vertex3D::new( s,  s, -s, 1.0,  1.0, 0.0,  1.0, 0.0, 0.0),
+        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  1.0, 0.0, 0.0),
+        Vertex3D::new( s, -s,  s, 1.0,  0.0, 1.0,  1.0, 0.0, 0.0),
+        // Left face
+        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  -1.0, 0.0, 0.0),
+        Vertex3D::new(-s,  s, -s, 1.0,  1.0, 0.0,  -1.0, 0.0, 0.0),
+        Vertex3D::new(-s,  s,  s, 1.0,  1.0, 1.0,  -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 1.0,  -1.0, 0.0, 0.0),
+    ];
+
+    let indices = alloc::vec![
+        // Front (+Z)
+        0, 1, 2, 0, 2, 3,
+
+        // Back (-Z)
+        4, 6, 5, 4, 7, 6,
+
+        // Top (+Y)
+        8, 10, 9, 8, 11, 10,
+
+        // Bottom (-Y)
+        12, 13, 14, 12, 14, 15,
+
+        // Right (+X)
+        16, 17, 18, 16, 18, 19,
+
+        // Left (-X)
+        20, 22, 21, 20, 23, 22,
+    ];
+
+    let mut back_buffer = window_buffer.back_buffer_mut();
+    let mut render_target = ctx.begin_frame(&mut back_buffer);
+
+    render_target.clear(Rgba8888UNORM::GRAY);
+
+    let mut depth_buffer = DepthBuffer::new(window_buffer.width, window_buffer.height);
+
+    ctx.draw_indexed_3d(
+        &vertices,
+        &indices,
         &mut render_target,
+        &mut depth_buffer,
         &pipeline,
     );
 
     drop(render_target);
+    window_buffer.present();
+}
+
+pub fn render_shaders_3d_loop(
+    window_buffer: &Arc<WindowBuffer>, render_target: &mut RenderTarget<'_>,
+    ctx: &mut RenderContext,
+    x: f32,
+    y: f32,
+    z: f32,
+    angle: f32,
+    vertices: &[Vertex3D],
+    indices: &[u32],
+) {
+    let window_width = window_buffer.width as f32;
+    let window_height = window_buffer.height as f32;
+    let aspect_ratio = window_width / window_height;
+    let fov = 60.0f32.to_radians();
+    let near = 0.1;
+    let far = 100.0;
+
+    let projection = create_perspective_matrix(fov, aspect_ratio, near, far);
+    let camera_pos = f32x4::from_array([-2.0, 5.0, 5.0, 1.0]);
+    let view = Matrix4x4::look_at(
+        camera_pos,
+        f32x4::from_array([0.0, 0.0, 0.0, 1.0]),
+        f32x4::from_array([0.0, 1.0, 0.0, 0.0]),
+    );
+
+    let mut model = Matrix4x4::rotation_y(angle);
+    model.translate(x, y, z);
+
+    let mvp = projection.mul(&view).mul(&model);
+
+    let pipeline = PipelineState3D {
+        // vs: Box::new(Basic3DVS {
+        //     model_view_proj: mvp,
+        // }),
+        vs: Box::new(BlinnPhongVS { model_view_proj: mvp, model_world: model }),
+
+        //ps: Box::new(TextureSamplePS { texture_slot: 0 }),
+
+        //ps: Box::new(BlinnPhongPS { light_dir_intensity: f32x4::from_array([0.0, 0.5, 0.5, 1.0]), albedo: Rgba8888F::RED }),
+
+        //ps: Box::new(BlinnPhongPS { light_dir_intensity: f32x4::from_array([0.3, -0.5, -1.0, 1.0]), albedo: Rgba8888F::from_rgbf32(1.0, 0.0, 0.0), specular_color: Rgba8888F::WHITE, 
+        //    shininess: 16.0, ambient_color: Rgba8888F::from_rgbf32(0.1, 0.1, 0.1), camera_pos: camera_pos }),
+
+        ps: Box::new(FlatColorPS { color: Rgba8888UNORM::from_rgbf32(0.8, 0.2, 0.2) }),
+
+        vertex_layout: VertexLayout::new_3d(),
+        rasterizer_state: RasterizerState {
+            cull_mode: CullMode::Back,
+        },
+        blend_state: BlendState::default(),
+        render_mode: RenderMode::XYZ,
+        depth_enabled: true,
+        depth_write: true,
+        depth_func: DepthFunc::Less,
+    };
+
+    let mut depth_buffer = DepthBuffer::new(window_buffer.width, window_buffer.height);
+
+    ctx.draw_indexed_3d(
+        &vertices,
+        &indices,
+        render_target,
+        &mut depth_buffer,
+        &pipeline,
+    );
+
     window_buffer.present();
 }

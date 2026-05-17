@@ -10,12 +10,12 @@ use kernel::data_structures::vector::Vec;
 use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use kernel::graphics::compositor::Compositor;
 use kernel::graphics::pipeline::{
-    BlendState, PipelineState, RasterizerState, RenderMode, VertexLayout,
+    BlendState, PipelineState, RasterizerState, RenderMode, Vertex3D, VertexLayout
 };
 use kernel::graphics::renderer::RenderContext;
-use kernel::graphics::resources::Texture;
+use kernel::graphics::resources::{ConstantBuffer, Texture};
 use kernel::graphics::shaders::{PassThroughVS, TextureSamplePS};
-use kernel::graphics::window::{Window, WindowBuffer};
+use kernel::graphics::window::{self, Window, WindowBuffer};
 use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, TEST_ELF};
 use kernel::{
     filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
@@ -78,7 +78,8 @@ fn main() -> ! {
     compositor.set_z_index(window3_id, 5);
     serial_println!("Created window with ID: {}", window3_id);
 
-    test_graphics::render_shaders(&window3_buffer);
+    //test_graphics::render_shaders(&window3_buffer);
+    test_graphics::render_shaders_3d(&window3_buffer);
 
     // {
     //     let mut back_buffer = window3_buffer.back_buffer_mut();
@@ -106,11 +107,117 @@ fn main() -> ! {
     theophe.render();
 
     compositor.focus_window(0);
-    compositor.compose(&mut framebuffer_target);
+    //compositor.compose(&mut framebuffer_target);
+
+    let mut ctx = RenderContext::new();
+
+    // Create a checkerboard texture
+    const SIZE: u32 = 64;
+    let texture_data = alloc::vec::Vec::from(
+        (0..(SIZE * SIZE))
+            .map(|i| {
+                let x = i % SIZE;
+                let y = i / SIZE;
+                let checker = ((x / 8) + (y / 8)) % 2 == 0;
+                if checker {
+                    Rgba8888UNORM::from_rgb(255, 128, 0).to_u32_rgba() // Orange
+                } else {
+                    Rgba8888UNORM::from_rgb(0, 128, 255).to_u32_rgba() // Blue
+                }
+            })
+            .collect::<alloc::vec::Vec<u32>>(),
+    );
+    let texture = Texture::from_data(SIZE, SIZE, texture_data);
+    let texture_slot = ctx.bind_texture(texture);
+
+    // Set up constant buffer with MVP matrix (update this each frame for animation)
+    let mut constant_data = alloc::vec![0u8; 64]; // 4x4 matrix = 64 bytes
+    let cbuffer = ConstantBuffer::from_data(constant_data);
+    let cbuffer_slot = ctx.bind_cbuffer(cbuffer);
+    let mut obj_x = 2f32;
+    let mut obj_y = 1f32;
+    let mut obj_z = 1f32;
+    let mut angle = 0f32;
+    // compositor.compose(&mut framebuffer_target);
+    let mut back_buffer = window3_buffer.back_buffer_mut();
+    let mut render_target = ctx.begin_frame(&mut back_buffer);
+
+    let s = 1f32; // half-size
+    let vertices = [
+        // Front face
+        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 0.0,  0.0, 0.0, 1.0),
+        Vertex3D::new( s, -s,  s, 1.0,  1.0, 0.0,  0.0, 0.0, 1.0),
+        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  0.0, 0.0, 1.0),
+        Vertex3D::new(-s,  s,  s, 1.0,  0.0, 1.0,  0.0, 0.0, 1.0),
+        // Back face
+        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  0.0, 0.0, -1.0),
+        Vertex3D::new( s, -s, -s, 1.0,  1.0, 0.0,  0.0, 0.0, -1.0),
+        Vertex3D::new( s,  s, -s, 1.0,  1.0, 1.0,  0.0, 0.0, -1.0),
+        Vertex3D::new(-s,  s, -s, 1.0,  0.0, 1.0,  0.0, 0.0, -1.0),
+        // Top face
+        Vertex3D::new(-s,  s, -s, 1.0,  0.0, 0.0,  0.0, 1.0, 0.0),
+        Vertex3D::new( s,  s, -s, 1.0,  1.0, 0.0,  0.0, 1.0, 0.0),
+        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  0.0, 1.0, 0.0),
+        Vertex3D::new(-s,  s,  s, 1.0,  0.0, 1.0,  0.0, 1.0, 0.0),
+        // Bottom face
+        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  0.0, -1.0, 0.0),
+        Vertex3D::new( s, -s, -s, 1.0,  1.0, 0.0,  0.0, -1.0, 0.0),
+        Vertex3D::new( s, -s,  s, 1.0,  1.0, 1.0,  0.0, -1.0, 0.0),
+        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 1.0,  0.0, -1.0, 0.0),
+        // Right face
+        Vertex3D::new( s, -s, -s, 1.0,  0.0, 0.0,  1.0, 0.0, 0.0),
+        Vertex3D::new( s,  s, -s, 1.0,  1.0, 0.0,  1.0, 0.0, 0.0),
+        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  1.0, 0.0, 0.0),
+        Vertex3D::new( s, -s,  s, 1.0,  0.0, 1.0,  1.0, 0.0, 0.0),
+        // Left face
+        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  -1.0, 0.0, 0.0),
+        Vertex3D::new(-s,  s, -s, 1.0,  1.0, 0.0,  -1.0, 0.0, 0.0),
+        Vertex3D::new(-s,  s,  s, 1.0,  1.0, 1.0,  -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 1.0,  -1.0, 0.0, 0.0),
+    ];
+
+    let indices = [
+        // Front (+Z)
+        0, 1, 2, 0, 2, 3,
+
+        // Back (-Z)
+        4, 6, 5, 4, 7, 6,
+
+        // Top (+Y)
+        8, 10, 9, 8, 11, 10,
+
+        // Bottom (-Y)
+        12, 13, 14, 12, 14, 15,
+
+        // Right (+X)
+        16, 17, 18, 16, 18, 19,
+
+        // Left (-X)
+        20, 22, 21, 20, 23, 22,
+    ];
 
     loop {
-        hlt();
+        ctx.clear(&mut render_target, Rgba8888UNORM::GRAY);
+
+
+        test_graphics::render_shaders_2d(&window3_buffer, &mut render_target);
+        test_graphics::render_shaders_3d_loop(
+            &window3_buffer, &mut render_target,
+            &mut ctx,
+            obj_x,
+            obj_y,
+            obj_z,
+            angle,
+            &vertices,
+            &indices,
+        );
+        // //obj_y += 0.1f32;
+        angle += 45f32;
+        compositor.compose(&mut framebuffer_target);
+        // hlt();
     }
+
+    drop(render_target);
 
     exit_qemu(QemuExitCode::Success);
 }

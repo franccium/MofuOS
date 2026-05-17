@@ -92,3 +92,42 @@ impl RWBuffer {
         }
     }
 }
+
+
+pub struct DepthBuffer {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<f32>, //TODO: dont use Vec here and above,
+}
+
+impl DepthBuffer {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            data: alloc::vec![f32::MAX; (width * height) as usize],
+        }
+    }
+
+    #[inline(always)]
+    pub fn test(&mut self, x: u32, y: u32, val: f32) -> bool {
+        let idx = (y * self.width + x) as usize;
+        return val < self.data[idx]
+    }
+
+    #[inline(always)]
+    pub fn test_and_set(&mut self, x: u32, y: u32, val: f32) -> bool {
+        let idx = (y * self.width + x) as usize;
+        if val < self.data[idx] {
+            self.data[idx] = val;
+            true
+        }
+        else {
+            false
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.data.fill(f32::MAX)
+    }
+}
