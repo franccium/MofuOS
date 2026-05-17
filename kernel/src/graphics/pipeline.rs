@@ -174,6 +174,18 @@ pub struct PipelineState {
     pub depth_func: DepthFunc,
 }
 
+pub struct PipelineState3D {
+    pub vs: Box<dyn VertexShader3D>,
+    pub ps: Box<dyn PixelShader>,
+    pub vertex_layout: VertexLayout,
+    pub rasterizer_state: RasterizerState,
+    pub blend_state: BlendState,
+    pub render_mode: RenderMode,
+    pub depth_enabled: bool,
+    pub depth_write: bool,
+    pub depth_func: DepthFunc,
+}
+
 pub struct VSIn<'a> {
     pub vertex_data: &'a [u8],
     pub vertex_id: u32,
@@ -236,12 +248,77 @@ impl VSOut {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct VSOut3D {
+    pub position: f32x4,   // [x, y, z, w] - homogeneous position
+    pub world_position: f32x4,   // [x, y, z, w]
+    pub attributes: f32x4, // up to 4 interpolated attributes (u, v, ...)
+    pub extra: f32x4,      // up to 4 interpolated attributes
+}
+
+impl VSOut3D {
+    pub fn with_pos_uv(position: f32x4, uv: f32x2) -> Self {
+        Self {
+            position,
+            world_position: f32x4::splat(0.0),
+            attributes: f32x4::from_array([uv[0], uv[1], 0.0, 0.0]),
+            extra: f32x4::splat(0.0),
+        }
+    }
+
+    pub fn with_attributes(position: f32x4, attributes: f32x4, extra: f32x4) -> Self {
+        Self {
+            position,
+            world_position: f32x4::splat(0.0),
+            attributes,
+            extra,
+        }
+    }
+
+    pub fn uv(&self) -> f32x2 {
+        f32x2::from_array([self.attributes[0], self.attributes[1]])
+    }
+
+    pub fn from_xyuv(xyuv: &f32x4) -> Self {
+        Self {
+            position: f32x4::from_array([(*xyuv)[0], (*xyuv)[1], 0.0, 1.0]),
+            world_position: f32x4::splat(0.0),
+            attributes: f32x4::from_array([(*xyuv)[2], (*xyuv)[3], 0.0, 0.0]),
+            extra: f32x4::splat(0.0),
+        }
+    }
+
+    pub fn x(&self) -> f32 {
+        self.position[0]
+    }
+    pub fn y(&self) -> f32 {
+        self.position[1]
+    }
+    pub fn z(&self) -> f32 {
+        self.position[2]
+    }
+    pub fn w(&self) -> f32 {
+        self.position[3]
+    }
+    pub fn u(&self) -> f32 {
+        self.attributes[0]
+    }
+    pub fn v(&self) -> f32 {
+        self.attributes[1]
+    }
+}
+
 pub trait VertexShader: Send + Sync {
     fn run(&self, input: &VSIn, output: &mut VSOut, constants: &[ConstantBuffer]);
 }
 
+pub trait VertexShader3D: Send + Sync {
+    fn run(&self, input: &VSIn, output: &mut VSOut3D, constants: &[ConstantBuffer]);
+}
+
 pub struct PSIn<'a> {
     pub attributes: f32x4,
+    pub extra: f32x4,
     pub screen_x: u16,
     pub screen_y: u16,
     pub render_target: &'a mut [u32], //TODO: multiple render targets
