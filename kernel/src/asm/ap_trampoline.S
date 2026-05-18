@@ -94,55 +94,44 @@ ap_long_mode:
     # We're in 64-bit mode!
     #movl $0x6464B007, 0x8F00
 
-wait_for_entry:
-    mov $0x9010, %edi
-    mov (%rdi), %rax
-    test %rax, %rax                # Check if entry point is non-zero
-    jz wait_for_entry              # Wait for BSP to set it
-    
-    # Also verify stack is set up
-    mov $0x9008, %edi
-    mov (%rdi), %rsp
-    test %rsp, %rsp
-    jz wait_for_entry              # Wait for valid stack
-    
-    
-    # Set up stack
-    #mov $0x9008, %edi
-    #mov (%rdi), %rsp
 
-    #movq %rsp, 0x8FF0
-    # try to write into stack
-    #movq $0xBEEF, (%rsp)
-
-    # Clear RFLAGS
-    pushq $0
-    popfq
-    #jmp .
     
     # Signal we're ready to jump
     # MAGIC_OFFSET == 0x8FF0
     movl $0x41505354, 0x8FF0
-    
-    # Jump to Rust entry
-    xor %rdi, %rdi
-    mov $0x9010, %edi
-    mov (%rdi), %rax
 
-    # Signal the jump target
-    movq %rax, 0x8FF8
 
     # wait for bsp to finish
-wait_for_bsp:
-    mov $0x8FF0, %edi
-    cmpl $0x01, (%edi)                # Check if BSP cleared the magic value
-    jnz wait_for_bsp                  # Wait for BSP to clear it
+wait_for_bsp_ack:
+    mov $0x8FF4, %edi
+    cmpl $0x1, (%edi)
+    jne wait_for_bsp_ack
+    
+    # Get entry point from BSP
+    mov $0x9010, %edi
+    mov (%rdi), %rax
+    test %rax, %rax
+    jz wait_for_bsp_ack
+    
+    # Get stack from BSP
+    mov $0x9008, %edi
+    mov (%rdi), %rsp
+    test %rsp, %rsp
+    jz wait_for_bsp_ack
+    
+    # Clear RFLAGS
+    pushq $0
+    popfq
+    
+    # Signal trampoline completion
+    # Signal the jump target
 
-    movq $0x2222, 0x8FF0
-
+    movq $0x2222, 0x8FF8
+    movq %rax, 0x8F30
     #jmp .
 
     #TODO: ensure proper calling convention?
+    #jmp .
     jmp *%rax
     
     # Should never get here

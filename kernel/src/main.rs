@@ -366,7 +366,13 @@ fn main() -> ! {
     // compositor.compose(&mut framebuffer_target);
 
     loop {
-        hlt();
+        const MAGIC_OFFSET: u64 = 0x8FF0;
+        const AP_CORE_FUNCTION_ACHIEVED: u64 = 0x1234CCCC;
+        let val = unsafe {core::ptr::read_volatile(MAGIC_OFFSET as *const u64)};
+        if (val == AP_CORE_FUNCTION_ACHIEVED) {
+            serial_println!("AP core function achieved signal received in main loop");
+        }
+        //hlt();
     }
 
     exit_qemu(QemuExitCode::Success);

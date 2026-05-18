@@ -8,6 +8,7 @@ use crate::util::apic::APICOffset;
 use crate::util::msr::msr_read;
 use alloc::vec::Vec;
 use bitflags::bitflags;
+use x86_64::instructions::hlt;
 use core::arch::asm;
 use limine::mp::Cpu;
 use spin::Once;
@@ -573,7 +574,7 @@ pub fn initialize_ap_stack_memory(
     let num_pages = (total_space + 0xFFF) / 0x1000; // Round up
 
     for i in 0..num_pages {
-        let page = Page::<Size4KiB>::from_start_address(stack_base + (i * 0x1000))
+        let page = Page::<Size4KiB>::from_start_address(stack_base - (i * 0x1000))
             .expect("Invalid page address");
 
         // Allocate physical frame for this page
@@ -660,7 +661,7 @@ pub unsafe fn start_ap_core(
 
     test_lapic_ipi();
 
-    for addr in (0x8F100..0x8FFFF).step_by(2) {
+    for addr in (0x8F10..0x8FFFF).step_by(2) {
         let ptr = (addr + hhdm_offset) as *mut u16;
         core::ptr::write_volatile(ptr, 0);
     }
@@ -703,37 +704,37 @@ pub unsafe fn start_ap_core(
 
     // let stack_ptr = 0x9008 as *mut u64;  // Identity-mapped, no HHDM offset!
 
-    // // Hardcode the stack to 0x8F00 (physical, identity-mapped)
-    // let temp_stack: u64 = 0x8F00;
+    // // Hardcode the stack to 0x1200000 (physical, identity-mapped)
+    // let temp_stack: u64 = 0x1200000;
     // core::ptr::write_volatile(stack_ptr, temp_stack);
 
     // // VERIFY
     // let verify = core::ptr::read_volatile(stack_ptr);
     // serial_println!("Stack value at 0x9008: {:#x}", verify);
 
-    // if verify != 0x8F00 {
+    // if verify != 0x1200000 {
     //     serial_println!("FATAL: Cannot write stack pointer!");
     //     return Err("Stack write failed");
     // }
 
-    // Make sure 0x8F00 is accessible
-    let stack_test = 0x8F00 as *mut u64;
+    // Make sure 0x1200000 is accessible
+    let stack_test = 0x1200000 as *mut u64;
     core::ptr::write_volatile(stack_test, 0xCAFEBABE_DEADBEEFu64);
     let stack_verify = core::ptr::read_volatile(stack_test);
 
     if stack_verify != 0xCAFEBABE_DEADBEEFu64 {
-        serial_println!("FATAL: Stack at 0x8F00 not writable!");
-        serial_println!("Need to identity-map 0x8F00 first!");
+        serial_println!("FATAL: Stack at 0x1200000 not writable!");
+        serial_println!("Need to identity-map 0x1200000 first!");
         return Err("Stack not mapped");
     }
 
-    serial_println!("Stack at 0x8F00 verified writable!");
+    serial_println!("Stack at 0x1200000 verified writable!");
 
     // In start_ap_core, after writing stack_ptr:
 
     core::ptr::write_volatile(cr3_ptr, cr3_phys);
     //core::ptr::write_volatile(stack_ptr, ap_stack.top());
-    core::ptr::write_volatile(stack_ptr, 0x8F00);
+    core::ptr::write_volatile(stack_ptr, 0x1200000);
     core::ptr::write_volatile(entry_ptr, ap_core_entry_point as u64);
 
     let stack_value = core::ptr::read_volatile(stack_ptr);
@@ -751,13 +752,13 @@ pub unsafe fn start_ap_core(
     // let pml4_phys = pml4_frame.start_address().as_u64();
     // let pml4_virt_ptr = (pml4_phys + hhdm_offset) as *const x86_64::structures::paging::page_table::PageTable;
 
-    // // Read the PML4 entry for 0x8F00 (index = (0x8F00 >> 39) & 0x1FF = 0)
-    // let pml4_index = (0x8F00 >> 39) & 0x1FF;
+    // // Read the PML4 entry for 0x1200000 (index = (0x1200000 >> 39) & 0x1FF = 0)
+    // let pml4_index = (0x1200000 >> 39) & 0x1FF;
     // let pml4_entry = unsafe { &(pml4_virt_ptr)[pml4_index] };
-    // serial_println!("PML4[{}] for 0x8F00: {:#x}", pml4_index, pml4_entry.addr().as_u64());
+    // serial_println!("PML4[{}] for 0x1200000: {:#x}", pml4_index, pml4_entry.addr().as_u64());
 
     // if pml4_entry.is_unused() {
-    //     serial_println!("CRITICAL: 0x8F00 NOT in page tables! PML4 entry is empty!");
+    //     serial_println!("CRITICAL: 0x1200000 NOT in page tables! PML4 entry is empty!");
     // }
 
     let (active_pml4_frame, _) = Cr3::read();
@@ -929,19 +930,12 @@ pub unsafe fn start_ap_core(
     serial_println!("0x8FF0: 0x{:04X} (expected 0xDD0E)", values[7]);
     serial_println!("0x8FFE: 0x{:04X} (expected 0xDC0E)", values[8]);
 
-    //let rsp_value = core::ptr::read_volatile(some_address_idk as *const u64);
-    //serial_println!(" (RSP): 0x{:016X} (expected non-zero)", rsp_value);
-    let entry_point_value = core::ptr::read_volatile(0x8FF8 as *const u64);
-    serial_println!(
-        "0x8FF8 (Entry Point): 0x{:016X} (expected non-zero)",
-        entry_point_value
-    );
-    serial_println!("actual ap_entry_point: {:#x}", ap_core_entry_point as u64);
+
 
     // Check 64-bit marker
-    let diag64 = (0x8F00 + hhdm_offset) as *const u32;
+    let diag64 = (0x1200000 + hhdm_offset) as *const u32;
     let val64 = core::ptr::read_volatile(diag64);
-    serial_println!("0x8F00: 0x{:08X} (expected 0x6464B007)", val64);
+    serial_println!("0x1200000: 0x{:08X} (expected 0x6464B007)", val64);
 
     // Determine where we failed
     // if values[0] != 0xDEAD {
@@ -966,17 +960,26 @@ pub unsafe fn start_ap_core(
     }
 
     // Acknowledge the AP
-    core::ptr::write_volatile(ack_ptr, 0x1);
+    //core::ptr::write_volatile(ack_ptr, 0x1);
+    core::ptr::write_volatile(0x8FF4 as *mut u32, 0x1);
     serial_println!("Core {}: Sent acknowledgment to AP", core_id);
 
     // Wait for AP to finish with trampoline
-    for _ in 0..1000000 {
-        if core::ptr::read_volatile(done_ptr as *const u16) == 0x2222 {
+    for _ in 0..100000000 {
+        //if core::ptr::read_volatile(done_ptr as *const u16) == 0x2222 {
+        if core::ptr::read_volatile(0x8FF8 as *const u16) == 0x2222 {
             serial_println!("Core {}: AP signaled trampoline completion", core_id);
             break;
         }
         core::hint::spin_loop();
     }
+
+    let entry_point_value = core::ptr::read_volatile(0x8F30 as *const u64);
+    serial_println!(
+        "0x8F30 (Entry Point): 0x{:016X} (expected non-zero)",
+        entry_point_value
+    );
+    serial_println!("actual ap_entry_point: {:#x}", ap_core_entry_point as u64);
 
     serial_println!("Core {}: AP successfully started", core_id);
     Ok(())
@@ -1068,39 +1071,44 @@ unsafe fn send_ipi(apic_id: u8, vector: u32) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_core_entry_point() -> ! {
-    // This runs on the AP core
-    serial_println!("SOME AP CORE ACTUALLY STARTED");
-    let core_id = get_current_core_id();
-    serial_println!("AP Core {}: Started successfully", core_id);
+    const AP_CORE_FUNCTION_ACHIEVED: u64 = 0x1234CCCC;
+    core::ptr::write_volatile(MAGIC_OFFSET as *mut u64, AP_CORE_FUNCTION_ACHIEVED);
 
-    // Initialize this core (CPU info, timer, etc.)
-    unsafe {
-        init_current_core();
-    }
+    hlt();
+    panic!()
+//     // This runs on the AP core
+//     serial_println!("SOME AP CORE ACTUALLY STARTED");
+//     let core_id = get_current_core_id();
+//     serial_println!("AP Core {}: Started successfully", core_id);
 
-    // Initialize scheduler for this core
-    let core_id = get_current_core_id();
+//     // Initialize this core (CPU info, timer, etc.)
+//     unsafe {
+//         init_current_core();
+//     }
 
-    // {
-    //     let mut scheduler = SCHEDULER.lock();
-    //     if (core_id as usize) >= scheduler.per_core.len() {
-    //         let core_count = CORE_POOL.lock().total_cores();
-    //         scheduler.init_with_core_count(core_count);
-    //     }
-    // }
+//     // Initialize scheduler for this core
+//     let core_id = get_current_core_id();
 
-    // Mark core as available in the pool
-    {
-        let mut core_pool = CORE_POOL.lock();
-        core_pool.mark_available(core_id);
-    }
+//     // {
+//     //     let mut scheduler = SCHEDULER.lock();
+//     //     if (core_id as usize) >= scheduler.per_core.len() {
+//     //         let core_count = CORE_POOL.lock().total_cores();
+//     //         scheduler.init_with_core_count(core_count);
+//     //     }
+//     // }
 
-    init_timer_for_core(core_id);
+//     // Mark core as available in the pool
+//     {
+//         let mut core_pool = CORE_POOL.lock();
+//         core_pool.mark_available(core_id);
+//     }
 
-    //enable_interrupts();
+//     init_timer_for_core(core_id);
 
-    // Enter the scheduler idle loop
-    ap_core_scheduler_loop(core_id);
+//     //enable_interrupts();
+
+//     // Enter the scheduler idle loop
+//     ap_core_scheduler_loop(core_id);
 }
 
 /// Scheduler loop for AP cores
