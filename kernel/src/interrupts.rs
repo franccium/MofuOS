@@ -1,7 +1,7 @@
 #![allow(unused)]
 use crate::io::serial;
-use crate::process::{SCHEDULER, Scheduler};
 use crate::process::syscall::init_syscall;
+use crate::process::{SCHEDULER, Scheduler};
 use crate::process::{
     process::INVALID_PID,
     process_manager::{ARCHE_PID, PROCESS_MANAGER},
@@ -27,20 +27,22 @@ use acpi::{
         },
     },
 };
-use x86_64::{
-    PhysAddr, VirtAddr, registers::rflags::RFlags, structures::{
-        idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
-        paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB},
-    }
-};
-use core::arch::x86_64::__rdtscp;
 use core::arch::asm;
+use core::arch::x86_64::__rdtscp;
 use lazy_static::lazy_static;
 use spin::Mutex;
+use x86_64::{
+    PhysAddr, VirtAddr,
+    registers::rflags::RFlags,
+    structures::{
+        idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
+        paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB},
+    },
+};
 
 const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
-const TIMER_ENABLED: bool = true;
+const TIMER_ENABLED: bool = false;
 
 pub const TSC_MOCK_FREQUENCY: u64 = 2400000000u64;
 pub const TIMER_TICK_INTERVAL_MS: u64 = 1000;
@@ -215,12 +217,10 @@ unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32) {
             tick_freq
         );
     }
-
 }
 
 unsafe fn init_timer_tsc_deadline_mode_per_core(local_apic: *mut u32, core_id: u8) {
     serial_println!("Core {}: Setting up TSC-Deadline mode", core_id);
-
 
     unsafe {
         //set_tsc_aux(core_id);
@@ -256,8 +256,12 @@ unsafe fn init_timer_tsc_deadline_mode_per_core(local_apic: *mut u32, core_id: u
         serial_println!("Core {}: Timer configured in TSC-Deadline mode:", core_id);
         serial_println!("  TSC Frequency: {} Hz", tsc_freq);
         serial_println!("  Timer Frequency: {} Hz", TIMER_TICK_FREQ_DIVIDER);
-        serial_println!("  First deadline: {} (current: {}, +{} ticks)",
-                    first_deadline, current_tsc, ticks_per_ms);
+        serial_println!(
+            "  First deadline: {} (current: {}, +{} ticks)",
+            first_deadline,
+            current_tsc,
+            ticks_per_ms
+        );
     }
 }
 
@@ -278,21 +282,17 @@ pub unsafe fn set_tsc_aux(core_id: u8) {
     );
 }
 
-
 pub unsafe fn init_timer_for_core(core_id: u8) {
     if !TIMER_ENABLED {
         return;
     }
-
 
     serial_println!("Initializing timer for Core {}", core_id);
 
     let cpu_info = get_cpu_info_for_core(core_id);
     let lapic_addr = get_lapic_base_addr();
 
-
-    if !cpu_info.features.contains(CpuFeatureFlags::TSC_DEADLINE)
-    {
+    if !cpu_info.features.contains(CpuFeatureFlags::TSC_DEADLINE) {
         serial_println!("TSC-Deadline mode not supported, falling back to periodic mode");
         unsafe { init_timer_periodic_mode(lapic_addr) };
         return;
@@ -385,8 +385,9 @@ pub unsafe fn map_local_apic_for_current_core(
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
 
     unsafe {
-        mapper.map_to(page, phys_frame, flags, frame_allocator)
-            .expect("Failed to map Local APIC")
+        mapper
+            .map_to(page, phys_frame, flags, frame_allocator)
+            .unwrap()
             .flush();
     }
 
@@ -579,6 +580,8 @@ lazy_static! {
         idt.page_fault.set_handler_fn(pagefault_handler);
         idt.simd_floating_point.set_handler_fn(simd_floating_point_handler);
 
+        idt.security_exception.set_handler_fn(security_exception_handler);
+
         // Hardware interrupts
         idt[InterruptIndex::Timer as u8].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard as u8].set_handler_fn(keyboard_interrupt_handler);
@@ -695,6 +698,11 @@ extern "x86-interrupt" fn simd_floating_point_handler(stack_frame: InterruptStac
     hlt_loop();
 }
 
+extern "x86-interrupt" fn security_exception_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    serial_println!("EXCEPTION: SECURITY EXCEPTION\nError Code: {}\n{:#?}", error_code, stack_frame);
+    hlt_loop();
+}
+
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
@@ -710,7 +718,6 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     }
 
     unsafe {
-
         // let mut aux : u32 = 0;
         // let current_tsc = __rdtscp(&mut aux);
         // serial_println!("Core {}: Timer interrupt, TSC: {}, aux: {}", core_id, current_tsc, aux);
@@ -782,5 +789,3 @@ pub enum InterruptIndex {
     Timer = 32,
     Keyboard,
 }
-
-

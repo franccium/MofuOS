@@ -1,7 +1,3 @@
-# ap_real_to_long.S - Real mode entry point for AP cores
-# This code runs at physical address 0x8000
-# It is linked with ap_trampoline.ld to address 0x8000, so all symbol references are correct
-
 .section .text
 .code16
 .global ap_trampoline_start
@@ -9,90 +5,115 @@ ap_trampoline_start:
     cli
     cld
     
-    # Set up segment registers
+    # Diagnostic: we started
+    movw $0xDEAD, %ax
+    movw %ax, 0x8FF0
+    
     xor %ax, %ax
     mov %ax, %ds
     mov %ax, %es
     mov %ax, %ss
-
-    # loop here to debug
-    jmp .
+    movw $0xBEEF, 0x8FF2   # Segments set up
     
-    # Load GDT pointer - gdtr is defined at end of this file
-    lgdt (gdtr)
+    # Load GDT pointer
+    lgdtl (gdtr)
+    movw $0xCAFE, 0x8FF4   # GDT loaded
     
     # Enable protected mode
-    mov %cr0, %eax
-    or $1, %al
-    mov %eax, %cr0
+    movl %cr0, %eax
+    orl $1, %eax
+    movl %eax, %cr0
+    movw $0xC001, 0x8FF6   # Protected mode enabled
     
-    # Far jump to 32-bit code
+    # Far jump to 32-bit code using 32-bit code segment (0x08)
     ljmp $0x08, $ap_protected_mode
     
 .code32
 ap_protected_mode:
-    # Set up segment registers for protected mode
+    movw $0xD0D0, 0x8FF8   # In 32-bit mode
+    
+    # Set up data segments with 32-bit data segment (0x10)
     mov $0x10, %ax
     mov %ax, %ds
     mov %ax, %es
     mov %ax, %ss
+    movw $0xD0D1, 0x8FF9   # Segments set
     
-    # Enable PAE (Physical Address Extension)
-    mov %cr4, %eax
-    or $0x20, %eax
-    mov %eax, %cr4
+    # Enable PAE
+    movl %cr4, %eax
+    orl $0x20, %eax
+    movl %eax, %cr4
+    movw $0xDA1E, 0x8FFA   # PAE enabled
     
-    # Load CR3 - the Rust code writes the kernel's CR3 to address 0x9000
-    mov $0x9000, %edi
-    mov (%edi), %eax
-    mov %eax, %cr3
+    # Load CR3
+    movl $0x9000, %edi
+    movl (%edi), %eax
+    movl %eax, %cr3
+    movw $0xDB0E, 0x8FFC   # CR3 loaded
     
-    # Enable long mode
-    mov $0xC0000080, %ecx
+    # Enable long mode in EFER
+    movl $0xC0000080, %ecx
     rdmsr
-    or $0x100, %eax
+    orl $0x100, %eax        # Set LME (Long Mode Enable)
     wrmsr
+    movw $0xDC0E, 0x8FFE   # Long mode enabled
     
-    # Enable paging
-    mov %cr0, %eax
-    or $0x80000000, %eax
-    mov %eax, %cr0
+    # Enable paging (this activates long mode since LME is set)
+    movl %cr0, %eax
+    orl $0x80000000, %eax   # Set PG (Paging)
+    movl %eax, %cr0
+    movw $0xDD0E, 0x8FF0   # Paging enabled!
     
-    # Far jump to 64-bit code
-    ljmp $0x08, $ap_long_mode
+    # Now we're in compatibility mode (32-bit with paging)
+    # Far jump to 64-bit code using 64-bit code segment (0x18)
+    ljmp $0x18, $ap_long_mode
     
 .code64
 ap_long_mode:
-    # Set up 64-bit segment registers
-    mov $0x10, %ax
+    # Now in full 64-bit mode
+    movw $0x10, %ax         # Still using data segment 0x10
     mov %ax, %ds
     mov %ax, %es
     mov %ax, %ss
+    
+    # We're in 64-bit mode!
+    movl $0x6464B007, 0x8F00
+    
+    # Set up stack
+    mov $0x9008, %edi
+    mov (%rdi), %rsp
     
     # Clear RFLAGS
     pushq $0
     popfq
     
-    # Load the entry point address from memory
-    # The Rust code writes the kernel entry point address to 0x9010
+    # Signal we're ready to jump
+    movl $0xB007B007, 0x8F04
+    
+    # Jump to Rust entry
     mov $0x9010, %edi
     mov (%rdi), %rax
     
-    # Jump to the Rust entry point
+    # Signal the jump target
+    movq %rax, 0x8F08
+    
     jmp *%rax
+    
+    # Should never get here
+    hlt
 
-# GDT for AP startup
-# Placed at end of trampoline so it's within reach
-.align 8
+.align 16
+gdt:
+    .quad 0x0000000000000000  # Null descriptor (0x00)
+    .quad 0x00CF9A000000FFFF  # 32-bit code segment (0x08) - base=0, limit=4GB, DPL=0
+    .quad 0x00CF92000000FFFF  # Data segment (0x10) - base=0, limit=4GB, DPL=0
+    .quad 0x00AF9A000000FFFF  # 64-bit code segment (0x18) - base=0, limit=4GB, DPL=0, 64-bit
+gdt_end:
+
+.align 4
 gdtr:
     .word gdt_end - gdt - 1
-    .long gdt  # 32-bit GDT address (valid since we're at 0x8000)
-
-gdt:
-    .quad 0x0000000000000000  # Null descriptor
-    .quad 0x00AF9A000000FFFF  # 64-bit code segment
-    .quad 0x00CF92000000FFFF  # Data segment
-gdt_end:
+    .long gdt
 
 .global ap_trampoline_end
 ap_trampoline_end:

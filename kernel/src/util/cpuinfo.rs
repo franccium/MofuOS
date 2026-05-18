@@ -5,6 +5,7 @@ use crate::interrupts::{
 use crate::process::{CORE_POOL, SCHEDULER};
 use crate::serial_println;
 use crate::util::apic::APICOffset;
+use crate::util::msr::msr_read;
 use alloc::vec::Vec;
 use bitflags::bitflags;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
@@ -577,9 +578,49 @@ pub fn initialize_ap_stack_memory(
     
     Ok(())
 }
+// Test self-IPI (should just interrupt ourselves)
+unsafe fn test_lapic_ipi() {
+    let lapic = get_lapic_base_addr();
+    let icr_low = lapic.offset(0x300 / 4);
+    let icr_high = lapic.offset(0x310 / 4);
+    
+    serial_println!("Testing LAPIC IPI to self...");
+    
+    // Wait for idle
+    while (icr_low.read_volatile() & (1 << 12)) != 0 {
+        core::hint::spin_loop();
+    }
+    
+    // Send a fixed IPI to self (vector 0x30 for example)
+    // Shorthand 01 = Self
+    let self_ipi = 0x00004030; // Shorthand=self, Fixed delivery, vector=0x30
+    icr_low.write_volatile(self_ipi);
+    
+    serial_println!("Self IPI sent (should trigger interrupt vector 0x30)");
+    
+    // Wait a bit
+    for _ in 0..10000 { core::hint::spin_loop(); }
+    
+    serial_println!("Self IPI test complete");
 
-pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64) -> Result<(), &'static str> {
+    // Check if x2APIC is enabled
+let apic_base = unsafe { msr_read(0x1B) }; // IA32_APIC_BASE MSR
+let x2apic_enabled = (apic_base >> 10) & 1 == 1;  // Bit 10 is x2APIC enable
+serial_println!("x2APIC enabled: {}", x2apic_enabled);
+
+
+}
+pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64, mapper: &mut impl Mapper<Size4KiB>, frame_allocator: &mut impl FrameAllocator<Size4KiB>) -> Result<(), &'static str> {
     use x86_64::registers::control::Cr3;
+
+    serial_println!("Starting AP core {} with APIC ID {}", core_id, apic_id);
+
+    test_lapic_ipi();
+
+    for addr in (0x8FF0..0x8F10).step_by(2) {
+        let ptr = (addr + hhdm_offset) as *mut u16;
+        core::ptr::write_volatile(ptr, 0);
+    }
 
     // Allocate a stack for this AP
     let ap_stack = allocate_ap_stack(core_id);  // You need to implement this
@@ -614,16 +655,82 @@ pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64) -> Resul
     core::ptr::write_volatile(cr3_ptr, cr3_phys);
     core::ptr::write_volatile(stack_ptr, ap_stack.top());
     core::ptr::write_volatile(entry_ptr, ap_core_entry_point as u64);
+
+    // === DEBUG: Check LAPIC access ===
+    serial_println!("=== LAPIC Debug ===");
+    
+    let lapic = get_lapic_base_addr();
+    serial_println!("LAPIC base pointer: {:p}", lapic);
+
+    let lapic_id = unsafe {
+        let id_reg = lapic.offset(0x20 / 4);
+        (id_reg.read_volatile() >> 24) as u8
+    };
+    
+    
+    serial_println!("[BSP] Current LAPIC ID: {}", lapic_id); 
+
+    // Try reading LAPIC ID register (offset 0x20)
+    let lapic_id_reg = lapic.offset(0x20 / 4);
+    serial_println!("LAPIC ID reg pointer: {:p}", lapic_id_reg);
+    
+    // Read LAPIC ID - if this crashes, LAPIC isn't mapped properly
+    let lapic_id_val = lapic_id_reg.read_volatile();
+    serial_println!("LAPIC ID value: {:#x}", lapic_id_val);
+    
+    // Check ICR registers
+    let icr_low = lapic.offset(0x300 / 4);
+    let icr_high = lapic.offset(0x310 / 4);
+    serial_println!("ICR low pointer: {:p}", icr_low);
+    serial_println!("ICR high pointer: {:p}", icr_high);
+    
+    // Read ICR low to check delivery status
+    let icr_low_val = icr_low.read_volatile();
+    serial_println!("ICR low initial value: {:#x}", icr_low_val);
+    serial_println!("Delivery status: {}", (icr_low_val >> 12) & 1);
+    
+    // === Try sending INIT ===
+    serial_println!("Core {}: Sending INIT IPI to APIC ID {}", core_id, apic_id);
+    
+    // Wait for delivery status to clear
+    while (icr_low.read_volatile() & (1 << 12)) != 0 {
+        core::hint::spin_loop();
+    }
+    serial_println!("ICR ready for INIT");
+    
+    // Set destination
+    icr_high.write_volatile((apic_id as u32) << 24);
+    serial_println!("Set destination to APIC ID {}", apic_id);
     
     serial_println!("Core {}: Sending INIT IPI to APIC ID {}", core_id, apic_id);
-    send_ipi(apic_id, 0x0500);
+    // INIT IPI: Delivery Mode=101 (INIT), Physical, Level=Assert
+    // Vector = 0 (INIT ignores vector)
+    // 0x4500 = 0b0100_0101_0000_0000
+    //              ^^   ^ ^           Level=Assert (1), Trigger=Level (1) for INIT
+    //              Level
+    //                   ^^^          Delivery Mode=101 (INIT)
+    send_ipi(apic_id, 0x00004500);
     
-    // 10ms delay
+    // 10ms delay (INIT requires 10ms)
     for _ in 0..100000 { core::hint::spin_loop(); }
+
+
+    // De-assert INIT
+    // 0x4500 with Level=0: 0x00004500 & !(1<<14) = 0x00004100 doesn't work
+    // Actually for INIT de-assert, we send 0x4500 with Level=0
+    // But simpler: just wait, the LAPIC handles this
+    // Let's skip de-assert for now
     
     // Send first SIPI
     serial_println!("Core {}: Sending first SIPI", core_id);
-    send_ipi(apic_id, 0x0600 | ((TRAMPOLINE_PHYS >> 12) as u32 & 0xFF));
+    let sipi_vector = (TRAMPOLINE_PHYS >> 12) as u32 & 0xFF;
+    
+    // SIPI IPI: Delivery Mode=110 (Startup), Physical, Edge, De-assert
+    // 0x4600 = 0b0100_0110_0000_0000
+    //              ^^   ^^          Level=0 (Edge), Trigger=0 (Edge) for SIPI
+    //                   ^^^         Delivery Mode=110 (Startup)
+    // | vector: bits 0-7
+    send_ipi(apic_id, 0x00004600 | sipi_vector);
     
     // Wait for AP to start (200us timeout)
     let mut started = false;
@@ -638,9 +745,9 @@ pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64) -> Resul
     if !started {
         // Send second SIPI
         serial_println!("Core {}: Sending second SIPI", core_id);
-        send_ipi(apic_id, 0x0600 | ((TRAMPOLINE_PHYS >> 12) as u32 & 0xFF));
+        send_ipi(apic_id, 0x00004600 | sipi_vector);
         
-        // Wait longer (1 second timeout)
+        // Wait longer
         for _ in 0..1000000 {
             if core::ptr::read_volatile(magic_ptr) == 0x41505354 {
                 started = true;
@@ -650,6 +757,44 @@ pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64) -> Resul
         }
     }
     
+        serial_println!("=== AP Core {} Diagnostic Data ===", core_id);
+    
+    let diag_base = (0x8FF0 + hhdm_offset) as *const u16;
+    let values: [u16; 16] = core::ptr::read_volatile(diag_base as *const [u16; 16]);
+    
+    serial_println!("0x8FF0: 0x{:04X} (expected 0xDEAD)", values[0]);
+    serial_println!("0x8FF2: 0x{:04X} (expected 0xBEEF)", values[1]);
+    serial_println!("0x8FF4: 0x{:04X} (expected 0xCAFE)", values[2]);
+    serial_println!("0x8FF6: 0x{:04X} (expected 0xD0D0)", values[3]);
+    serial_println!("0x8FF8: 0x{:04X} (expected 0xDA1E)", values[4]);
+    serial_println!("0x8FFA: 0x{:04X} (expected 0xDB0E)", values[5]);
+    serial_println!("0x8FFC: 0x{:04X} (expected 0xDC0E)", values[6]);
+    serial_println!("0x8FFE: 0x{:04X} (expected 0xDD0E)", values[7]);
+    
+    // Check 64-bit marker
+    let diag64 = (0x8F00 + hhdm_offset) as *const u32;
+    let val64 = core::ptr::read_volatile(diag64);
+    serial_println!("0x8F00: 0x{:08X} (expected 0x6464B007)", val64);
+    
+    // Determine where we failed
+    if values[0] != 0xDEAD {
+        serial_println!("AP NEVER STARTED - SIPI not received!");
+        return Err("AP failed to start - no execution");
+    } else if values[3] == 0 {
+        serial_println!("AP crashed in 16-bit mode (GDT or CR0)");
+    } else if values[4] == 0 {
+        serial_println!("AP crashed entering 32-bit mode");
+    } else if values[5] == 0 {
+        serial_println!("AP crashed loading CR3");
+    } else if values[6] == 0 {
+        serial_println!("AP crashed enabling long mode");
+    } else if values[7] == 0 {
+        serial_println!("AP crashed enabling paging (likely missing identity mapping)");
+    } else if val64 == 0x6464B007 {
+        serial_println!("SUCCESS! AP reached 64-bit mode!");
+    }
+    
+
     if !started {
         return Err("AP failed to start");
     }
@@ -669,23 +814,83 @@ pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64) -> Resul
     Ok(())
 }
 
-/// Send IPI to a specific APIC ID
 unsafe fn send_ipi(apic_id: u8, vector: u32) {
     let lapic = get_lapic_base_addr();
-    let icr_low = lapic.offset(APICOffset::Icr1 as isize / 4);
-    let icr_high = lapic.offset(APICOffset::Icr2 as isize / 4);
+    let icr_low = lapic.offset(0x300 / 4);
+    let icr_high = lapic.offset(0x310 / 4);
 
+    serial_println!("  send_ipi: apic_id={}, vector={:#x}", apic_id, vector);
+    
     // Wait for previous IPI to complete
+    serial_println!("  send_ipi: waiting for idle...");
+    let mut timeout = 0;
     while (icr_low.read_volatile() & (1 << 12)) != 0 {
         core::hint::spin_loop();
+        timeout += 1;
+        if timeout > 1000000 {
+            serial_println!("  send_ipi: TIMEOUT waiting for idle!");
+            break;
+        }
     }
-
+    serial_println!("  send_ipi: ICR idle (timeout={})", timeout);
+    
     // Set destination APIC ID
+    serial_println!("  send_ipi: setting destination to {}", apic_id);
     icr_high.write_volatile((apic_id as u32) << 24);
+    serial_println!("  send_ipi: destination set");
 
-    // Send IPI (Delivery mode = Fixed, Destination mode = Physical, Level = Assert)
-    icr_low.write_volatile(0x00004000 | vector); // 0x4000 = Physical destination mode
+
+// Verify it was set
+let verify_high = icr_high.read_volatile();
+serial_println!("ICR high after set: {:#x} (expected {:#x})", 
+    verify_high, (apic_id as u32) << 24);
+    
+    // Send IPI
+    serial_println!("  send_ipi: writing {:#x} to ICR low at {:p}", vector, icr_low);
+    icr_low.write_volatile(vector);
+    serial_println!("  send_ipi: write complete");
 }
+/// Send IPI to a specific APIC ID
+// unsafe fn send_ipi(apic_id: u8, vector: u32) {
+//     let lapic = get_lapic_base_addr();
+//     let icr_low = lapic.offset(APICOffset::Icr1 as isize / 4);
+//     let icr_high = lapic.offset(APICOffset::Icr2 as isize / 4);
+
+//     // Wait for previous IPI to complete (Delivery Status bit 12 must be 0)
+//     while (icr_low.read_volatile() & (1 << 12)) != 0 {
+//         core::hint::spin_loop();
+//     }
+
+//     // Set destination APIC ID in bits 24-31 of ICR high
+//     icr_high.write_volatile((apic_id as u32) << 24);
+
+//     // Write ICR low - the order matters! Must write low last to trigger IPI
+//     // Bit 0-7: Vector
+//     // Bit 8-10: Delivery Mode (000=Fixed, 101=INIT, 110=Startup/SIPI)
+//     // Bit 11: Destination Mode (0=Physical, 1=Logical)
+//     // Bit 12: Delivery Status (Read only, 0=Idle)
+//     // Bit 14: Level (0=De-assert, 1=Assert) - only for INIT
+//     // Bit 15: Trigger Mode (0=Edge, 1=Level)
+    
+//     icr_low.write_volatile(vector);
+// }
+///  Send IPI to a specific APIC ID
+// unsafe fn send_ipi(apic_id: u8, vector: u32) {
+//     let lapic = get_lapic_base_addr();
+//     let icr_low = lapic.offset(APICOffset::Icr1 as isize / 4);
+//     let icr_high = lapic.offset(APICOffset::Icr2 as isize / 4);
+
+//     // Wait for previous IPI to complete
+//     while (icr_low.read_volatile() & (1 << 12)) != 0 {
+//         core::hint::spin_loop();
+//     }
+
+//     // Set destination APIC ID
+//     icr_high.write_volatile((apic_id as u32) << 24);
+
+//     // Send IPI (Delivery mode = Fixed, Destination mode = Physical, Level = Assert)
+//     icr_low.write_volatile(0x00004000 | vector); // 0x4000 = Physical destination mode
+// }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_core_entry_point() -> ! {
