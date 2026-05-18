@@ -128,6 +128,7 @@ wait_for_bsp_ack:
 
     movq $0x2222, 0x8FF8
     movq %rax, 0x8F30
+    movq %rsp, 0x8F40
     #jmp .
 
     #TODO: ensure proper calling convention?

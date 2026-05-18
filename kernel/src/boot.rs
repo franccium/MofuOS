@@ -181,7 +181,7 @@ serial_println!("1 Active PML4 frame: {:#x}", active_pml4_frame.start_address().
 
         // NOW initialize with THIS mapper:
         cpuinfo::init_ap_support(&mut active_mapper, &mut frame_allocator);
-       // cpuinfo::init_ap_support(&mut mapper, &mut frame_allocator);
+        //cpuinfo::init_ap_support(&mut mapper, &mut frame_allocator);
     }
 
     serial_println!("Initializing heap");

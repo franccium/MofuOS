@@ -3,17 +3,16 @@
 
 mod boot;
 
+use core::fmt::Write;
 use embedded_graphics::prelude::*;
 use kernel::data_structures::vector::Vec;
 use kernel::process::{ElfLoadError, ElfLoadInfo, elf_loader};
+use kernel::util::cpuinfo::SECRET_MESSAGE_OFFSET;
 use kernel::{
-    filesystem::sirius::{FileType},
-    graphics::framebuffer::FrameBufferTarget,
-    programs::theophe::Theophe,
-    serial_println,
+    filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
+    programs::theophe::Theophe, serial_println,
 };
-use core::fmt::Write;
-use x86_64::{instructions::hlt};
+use x86_64::instructions::hlt;
 extern crate alloc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,7 +301,8 @@ fn main() -> ! {
     use embedded_graphics::pixelcolor::Rgb888;
     use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
 
-    let mut framebuffer_target = FrameBufferTarget::new(kernel::boot_info::boot_info().framebuffer.lock());
+    let mut framebuffer_target =
+        FrameBufferTarget::new(kernel::boot_info::boot_info().framebuffer.lock());
 
     Rectangle::new(Point::new(0, 0), Size::new(100, 100))
         .into_styled(PrimitiveStyle::with_fill(Rgb888::RED))
@@ -341,8 +341,8 @@ fn main() -> ! {
     serial_println!("Vector capacity: {}", vec.capacity);
 
     use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
-    use kernel::graphics::window::{Window, WindowBuffer};
     use kernel::graphics::compositor::Compositor;
+    use kernel::graphics::window::{Window, WindowBuffer};
     //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
     serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
     // let mut compositor = Compositor::new(fb_width as u32,  fb_height as u32);
@@ -357,10 +357,7 @@ fn main() -> ! {
     // let cpu_info_str = cpu_info.to_pretty_string();
     // theophe.write_str(&cpu_info_str);
 
-  
     // theophe.render();
-
-  
 
     // compositor.focus_window(0);
     // compositor.compose(&mut framebuffer_target);
@@ -368,11 +365,22 @@ fn main() -> ! {
     loop {
         const MAGIC_OFFSET: u64 = 0x8FF0;
         const AP_CORE_FUNCTION_ACHIEVED: u64 = 0x1234CCCC;
-        let val = unsafe {core::ptr::read_volatile(MAGIC_OFFSET as *const u64)};
+        let val = unsafe { core::ptr::read_volatile(MAGIC_OFFSET as *const u64) };
         if (val == AP_CORE_FUNCTION_ACHIEVED) {
             serial_println!("AP core function achieved signal received in main loop");
+
+            let cr3_ap = unsafe { core::ptr::read_volatile(SECRET_MESSAGE_OFFSET as *const u64) };
+            serial_println!("Read cr3_ap: {:#x}", cr3_ap);
+
+            let (frame, _) = x86_64::registers::control::Cr3::read();
+            serial_println!("actual cr3: {:#x}", frame.start_address().as_u64());
+            break;
         }
         //hlt();
+    }
+
+    loop {
+        hlt();
     }
 
     exit_qemu(QemuExitCode::Success);

@@ -64,7 +64,7 @@ lazy_static! {
 }
 
 pub fn init_idt() {
-    serial_println!("init_idt");
+    //serial_println!("init_idt");
     IDT.load();
 }
 

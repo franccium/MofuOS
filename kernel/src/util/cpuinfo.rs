@@ -1,6 +1,6 @@
 use crate::asm::ap_trampoline;
 use crate::interrupts::{
-    get_lapic_base_addr, init_timer_for_core, map_local_apic_for_current_core,
+    self, get_lapic_base_addr, init_timer_for_core, map_local_apic_for_current_core
 };
 use crate::process::{CORE_POOL, SCHEDULER};
 use crate::serial_println;
@@ -396,6 +396,7 @@ unsafe extern "C" {
 /// Start an AP core using INIT-SIPI-SIPI sequence
 const TRAMPOLINE_PHYS: u64 = 0x8000;
 const MAGIC_OFFSET: u64 = 0x8FF0; // AP writes "APST" here
+pub const SECRET_MESSAGE_OFFSET: u64 = 0x8F30; // AP writes "APST" here
 const ACK_OFFSET: u64 = MAGIC_OFFSET; // BSP writes 1 here
 const DONE_OFFSET: u64 = MAGIC_OFFSET; // AP writes 1 when leaving trampoline
 const GDT_OFFSET: u64 = 0x8FF8; // GDT descriptor
@@ -510,12 +511,12 @@ pub fn allocate_ap_stack(core_id: u8) -> ApStack {
         .unwrap_or_else(|| panic!("Failed to allocate stack for AP core {}", core_id))
 }
 
-const AP_STACK_SIZE: u64 = 128 * 1024; // 128KB per stack
+const AP_STACK_SIZE: u64 = 16 * 1024; // 16KB per stack
 const MAX_AP_CORES: u32 = 4; // Support up to 16 AP cores
 
 // Virtual address where AP stacks will be mapped
 // Make sure this doesn't conflict with your kernel's memory layout!
-const AP_STACK_BASE: u64 = 0x80000000; // Example address
+const AP_STACK_BASE: u64 = 0xFFFF_FFFF_FF99_0000; // Example address
 
 pub fn init_ap_support(
     page_table: &mut impl Mapper<Size4KiB>,
@@ -981,7 +982,17 @@ pub unsafe fn start_ap_core(
     );
     serial_println!("actual ap_entry_point: {:#x}", ap_core_entry_point as u64);
 
+    let rsp_value = core::ptr::read_volatile(0x8F40 as *const u64);
+    serial_println!(
+        "0x8F40 (Stack Pointer): 0x{:016X} (expected non-zero)",
+        rsp_value
+    );
+    serial_println!("actual stack ptr: {:#x}", 0x1200000);
+
     serial_println!("Core {}: AP successfully started", core_id);
+
+
+
     Ok(())
 }
 
@@ -1073,6 +1084,33 @@ unsafe fn send_ipi(apic_id: u8, vector: u32) {
 pub unsafe extern "C" fn ap_core_entry_point() -> ! {
     const AP_CORE_FUNCTION_ACHIEVED: u64 = 0x1234CCCC;
     core::ptr::write_volatile(MAGIC_OFFSET as *mut u64, AP_CORE_FUNCTION_ACHIEVED);
+
+    // use x86_64::instructions::tables::lidt;
+    // use x86_64::structures::DescriptorTablePointer;
+
+    // unsafe {
+    //     lidt(&idtr);
+    // }
+
+    interrupts::init_idt();
+
+
+    // use x86_64::registers::control::Cr3;
+
+// let (frame, _) = Cr3::read();
+
+// core::ptr::write_volatile(SECRET_MESSAGE_OFFSET as *mut u64, frame.start_address().as_u64());
+
+    // {
+    //     let mut core_pool = CORE_POOL.lock();
+    //     core_pool.mark_available(1);
+    // }
+    
+    // Test 3: Try your serial macro (will crash if issue)
+    
+    loop {
+        core::arch::asm!("hlt");
+    }
 
     hlt();
     panic!()
