@@ -10,12 +10,13 @@ use kernel::data_structures::vector::Vec;
 use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use kernel::graphics::compositor::Compositor;
 use kernel::graphics::pipeline::{
-    BlendState, PipelineState, RasterizerState, RenderMode, Vertex3D, VertexLayout
+    BlendState, PipelineState, RasterizerState, RenderMode, Vertex3D, VertexLayout,
 };
 use kernel::graphics::renderer::RenderContext;
 use kernel::graphics::resources::{ConstantBuffer, Texture};
 use kernel::graphics::shaders::{PassThroughVS, TextureSamplePS};
 use kernel::graphics::window::{self, Window, WindowBuffer};
+use kernel::interrupts;
 use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, TEST_ELF};
 use kernel::{
     filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
@@ -145,75 +146,77 @@ fn main() -> ! {
     let s = 1f32; // half-size
     let vertices = [
         // Front face
-        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 0.0,  0.0, 0.0, 1.0),
-        Vertex3D::new( s, -s,  s, 1.0,  1.0, 0.0,  0.0, 0.0, 1.0),
-        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  0.0, 0.0, 1.0),
-        Vertex3D::new(-s,  s,  s, 1.0,  0.0, 1.0,  0.0, 0.0, 1.0),
+        Vertex3D::new(-s, -s, s, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        Vertex3D::new(s, -s, s, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        Vertex3D::new(s, s, s, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0),
+        Vertex3D::new(-s, s, s, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0),
         // Back face
-        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  0.0, 0.0, -1.0),
-        Vertex3D::new( s, -s, -s, 1.0,  1.0, 0.0,  0.0, 0.0, -1.0),
-        Vertex3D::new( s,  s, -s, 1.0,  1.0, 1.0,  0.0, 0.0, -1.0),
-        Vertex3D::new(-s,  s, -s, 1.0,  0.0, 1.0,  0.0, 0.0, -1.0),
+        Vertex3D::new(-s, -s, -s, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0),
+        Vertex3D::new(s, -s, -s, 1.0, 1.0, 0.0, 0.0, 0.0, -1.0),
+        Vertex3D::new(s, s, -s, 1.0, 1.0, 1.0, 0.0, 0.0, -1.0),
+        Vertex3D::new(-s, s, -s, 1.0, 0.0, 1.0, 0.0, 0.0, -1.0),
         // Top face
-        Vertex3D::new(-s,  s, -s, 1.0,  0.0, 0.0,  0.0, 1.0, 0.0),
-        Vertex3D::new( s,  s, -s, 1.0,  1.0, 0.0,  0.0, 1.0, 0.0),
-        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  0.0, 1.0, 0.0),
-        Vertex3D::new(-s,  s,  s, 1.0,  0.0, 1.0,  0.0, 1.0, 0.0),
+        Vertex3D::new(-s, s, -s, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+        Vertex3D::new(s, s, -s, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0),
+        Vertex3D::new(s, s, s, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0),
+        Vertex3D::new(-s, s, s, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0),
         // Bottom face
-        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  0.0, -1.0, 0.0),
-        Vertex3D::new( s, -s, -s, 1.0,  1.0, 0.0,  0.0, -1.0, 0.0),
-        Vertex3D::new( s, -s,  s, 1.0,  1.0, 1.0,  0.0, -1.0, 0.0),
-        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 1.0,  0.0, -1.0, 0.0),
+        Vertex3D::new(-s, -s, -s, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0),
+        Vertex3D::new(s, -s, -s, 1.0, 1.0, 0.0, 0.0, -1.0, 0.0),
+        Vertex3D::new(s, -s, s, 1.0, 1.0, 1.0, 0.0, -1.0, 0.0),
+        Vertex3D::new(-s, -s, s, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0),
         // Right face
-        Vertex3D::new( s, -s, -s, 1.0,  0.0, 0.0,  1.0, 0.0, 0.0),
-        Vertex3D::new( s,  s, -s, 1.0,  1.0, 0.0,  1.0, 0.0, 0.0),
-        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  1.0, 0.0, 0.0),
-        Vertex3D::new( s, -s,  s, 1.0,  0.0, 1.0,  1.0, 0.0, 0.0),
+        Vertex3D::new(s, -s, -s, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+        Vertex3D::new(s, s, -s, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0),
+        Vertex3D::new(s, s, s, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0),
+        Vertex3D::new(s, -s, s, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0),
         // Left face
-        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  -1.0, 0.0, 0.0),
-        Vertex3D::new(-s,  s, -s, 1.0,  1.0, 0.0,  -1.0, 0.0, 0.0),
-        Vertex3D::new(-s,  s,  s, 1.0,  1.0, 1.0,  -1.0, 0.0, 0.0),
-        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 1.0,  -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, -s, -s, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, s, -s, 1.0, 1.0, 0.0, -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, s, s, 1.0, 1.0, 1.0, -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, -s, s, 1.0, 0.0, 1.0, -1.0, 0.0, 0.0),
     ];
 
     let indices = [
         // Front (+Z)
-        0, 1, 2, 0, 2, 3,
-
-        // Back (-Z)
-        4, 6, 5, 4, 7, 6,
-
-        // Top (+Y)
-        8, 10, 9, 8, 11, 10,
-
-        // Bottom (-Y)
-        12, 13, 14, 12, 14, 15,
-
-        // Right (+X)
-        16, 17, 18, 16, 18, 19,
-
-        // Left (-X)
+        0, 1, 2, 0, 2, 3, // Back (-Z)
+        4, 6, 5, 4, 7, 6, // Top (+Y)
+        8, 10, 9, 8, 11, 10, // Bottom (-Y)
+        12, 13, 14, 12, 14, 15, // Right (+X)
+        16, 17, 18, 16, 18, 19, // Left (-X)
         20, 22, 21, 20, 23, 22,
     ];
 
+    let mut time_elapsed = 0;
+
     loop {
+        let time_start = interrupts::system_uptime_ns();
         ctx.clear(&mut render_target, Rgba8888UNORM::GRAY);
 
-
         test_graphics::render_shaders_2d(&window3_buffer, &mut render_target);
-        test_graphics::render_shaders_3d_loop(
-            &window3_buffer, &mut render_target,
-            &mut ctx,
-            obj_x,
-            obj_y,
-            obj_z,
-            angle,
-            &vertices,
-            &indices,
-        );
+        // test_graphics::render_shaders_3d_loop(
+        //     &window3_buffer,
+        //     &mut render_target,
+        //     &mut ctx,
+        //     obj_x,
+        //     obj_y,
+        //     obj_z,
+        //     angle,
+        //     &vertices,
+        //     &indices,
+        // );
         // //obj_y += 0.1f32;
         angle += 45f32;
+        window3_buffer.present();
         compositor.compose(&mut framebuffer_target);
+        let time_end = interrupts::system_uptime_ns();
+        let dt: u64 = time_end - time_start;
+        time_elapsed += dt;
+        serial_println!(
+            "Loop time: {} ns; {} ms",
+            dt,
+            dt as f32 / 1_000_000.0
+        );
         // hlt();
     }
 
