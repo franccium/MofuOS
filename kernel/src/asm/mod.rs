@@ -10,7 +10,8 @@ pub mod ap_trampoline {
 
     /// Copy the AP trampoline to physical address 0x8000
     pub unsafe fn copy_to_memory(hhdm_offset: u64) {
-        let dest = (0x8000 + hhdm_offset) as *mut u8;
+        //let dest = (0x8000 + hhdm_offset) as *mut u8;
+        let dest = (0x8000) as *mut u8;
         core::ptr::copy_nonoverlapping(TRAMPOLINE_BINARY.as_ptr(), dest, TRAMPOLINE_BINARY.len());
     }
 

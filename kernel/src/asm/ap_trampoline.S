@@ -47,6 +47,7 @@ ap_protected_mode:
     movw $0xDA1E, 0x8FFA   # PAE enabled
     
     movl $0x9000, %edi
+    movl %edi, 0x8FF4
     movl (%edi), %eax
     movl %eax, 0x8FFA    # Write CR3 value before loading
     movl %eax, %cr3
@@ -97,8 +98,9 @@ ap_long_mode:
     mov $0x9008, %edi
     mov (%rdi), %rsp
 
-    movq %rsp, 0x8FF0
-
+    #movq %rsp, 0x8FF0
+    jmp .
+    
     # Clear RFLAGS
     pushq $0
     popfq

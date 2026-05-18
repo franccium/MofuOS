@@ -668,6 +668,12 @@ pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64, mapper: 
     
     serial_println!("Core {}: Copying AP trampoline to memory", core_id);
     ap_trampoline::copy_to_memory(hhdm_offset);
+
+    let phys_byte = core::ptr::read_volatile((0x8000 + hhdm_offset) as *const u8);
+let identity_byte = core::ptr::read_volatile(0x8000 as *const u8);
+serial_println!("Physical 0x8000: {:#x}", phys_byte);
+serial_println!("Identity 0x8000: {:#x}", identity_byte);
+serial_println!("Expected (first byte of trampoline): 0xFA (CLI)");
     
     // Clear synchronization flags
     let magic_ptr = (MAGIC_OFFSET + hhdm_offset) as *mut u32;
