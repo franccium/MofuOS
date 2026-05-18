@@ -185,6 +185,7 @@ unsafe extern "C" fn kmain() -> ! {
     serial_println!("Global memory managers initialized");
 
     /// init other cores and timers
+    let hhdm_offset = BOOT_INFO.get().unwrap().hhdm_offset;
     for (idx, cpu) in cpus.iter().enumerate() {
         let core_id = cpu.id as u8;
 
@@ -197,10 +198,10 @@ unsafe extern "C" fn kmain() -> ! {
 
         // Send INIT-SIPI-SIPI sequence to start the AP core
         // This is architecture-specific and depends on your APIC implementation
-        let entry_phys = (ap_core_entry_point as u64) - BOOT_INFO.get().unwrap().hhdm_offset;
+        let entry_phys = (ap_core_entry_point as u64) - hhdm_offset;
 
 
-        unsafe { start_ap_core(core_id, cpu.lapic_id as u8); }
+        unsafe { start_ap_core(core_id, cpu.lapic_id as u8, hhdm_offset); }
     }
 
     interrupts::enable_interrupts();

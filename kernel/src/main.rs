@@ -340,27 +340,6 @@ fn main() -> ! {
     }
     serial_println!("Vector capacity: {}", vec.capacity);
 
-    // let mut theophe = Theophe::new(framebuffer_target);
-    // theophe.write_line("");
-    // theophe.write_line("  hi");
-    // theophe.write_line("==========================================================");
-    // let cpu_info = kernel::util::cpuinfo::get_cpu_info();
-    // let cpu_info_str = cpu_info.to_pretty_string();
-    // theophe.write_str(&cpu_info_str);
-
-    // theophe.write_str("agrwinonnnononononono nononononononononononooogowniognewagiowe gagrwinonnnonononononononononon ononononononooogowniognewagiowegagrwinonnnonon ononononononononononononononooogowniognewagio");
-    // write!(
-    //     theophe,
-    //     "The current framebuffer size is {}x{}",
-    //     fb_width, fb_height
-    // )
-    // .unwrap();
-    // write!(theophe, "aFASFASfASF {}\n", fb_width).unwrap();
-    // write!(theophe, "arewhrehrehaerhre {} ", fb_width).unwrap();
-    // write!(theophe, "ahrehearhearhaheerh {}", fb_width).unwrap();
-
-    // theophe.render();
-
     use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
     use kernel::graphics::window::{Window, WindowBuffer};
     use kernel::graphics::compositor::Compositor;
@@ -369,52 +348,6 @@ fn main() -> ! {
     let mut compositor = Compositor::new(fb_width as u32,  fb_height as u32);
     let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
     serial_println!("Created window with ID: {}", window_id);
-    {
-        let mut back_buffer = window_buffer.back_buffer_mut();
-        for y in 0..150 {
-            for x in 0..200 {
-                back_buffer.write_pixel(x, y, Rgba8888UNORM::from_rgb_emb(Rgb888::BLUE));
-            }
-        }
-
-        serial_println!("Presenting window 1 ");
-        window_buffer.present();
-    }
-    let (window2_id, window2_buffer) = compositor.create_window(400, 500, 100, 90);
-    compositor.set_z_index(window2_id, 5);
-    serial_println!("Created window with ID: {}", window2_id);
-    {
-        let mut back_buffer = window2_buffer.back_buffer_mut();
-        for y in 0..window2_buffer.height {
-            for x in 0..window2_buffer.width {
-                let r = (x as f32 / window2_buffer.width as f32 * 255.0) as u8;
-                let g = (y as f32 / window2_buffer.height as f32 * 255.0) as u8;
-                let b = 0;
-                back_buffer.write_pixel(x, y, Rgba8888UNORM::from_rgb(r, g, b));
-            }
-        }
-
-        serial_println!("Presenting window 2 ");
-        window2_buffer.present();
-    }
-
-    let (window3_id, window3_buffer) = compositor.create_window(400, 300, 700, 200);
-    compositor.set_z_index(window3_id, 5);
-    serial_println!("Created window with ID: {}", window3_id);
-    {
-        let mut back_buffer = window3_buffer.back_buffer_mut();
-        for y in 0..window3_buffer.height {
-            for x in 0..window3_buffer.width {
-                let r = (x as f32 / window3_buffer.width as f32 * 255.0) as u8;
-                let g = (y as f32 / window3_buffer.height as f32 * 255.0) as u8;
-                let b = 0;
-                back_buffer.write_pixel(x, y, Rgba8888UNORM::from_rgb(r, g, b));
-            }
-        }
-
-        serial_println!("Presenting window3 ");
-        window3_buffer.present();
-    }
 
     let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
     theophe.write_line("");
@@ -424,42 +357,10 @@ fn main() -> ! {
     let cpu_info_str = cpu_info.to_pretty_string();
     theophe.write_str(&cpu_info_str);
 
-    // theophe.write_str("agrwinonnnononononono nononononononononononooogowniognewagiowe gagrwinonnnonononononononononon ononononononooogowniognewagiowegagrwinonnnonon ononononononononononononononooogowniognewagio");
-    // write!(
-    //     theophe,
-    //     "The current framebuffer size is {}x{}",
-    //     fb_width, fb_height
-    // )
-    // .unwrap();
-    // write!(theophe, "aFASFASfASF {}\n", fb_width).unwrap();
-    // write!(theophe, "arewhrehrehaerhre {} ", fb_width).unwrap();
-    // write!(theophe, "ahrehearhearhaheerh {}", fb_width).unwrap();
-
+  
     theophe.render();
 
-    // {
-    //     let mut theophe = Theophe::new(window3_buffer.back_buffer_mut());
-    //     theophe.write_line("");
-    //     theophe.write_line("  hi");
-    //     theophe.write_line("==========================================================");
-    //     let cpu_info = kernel::util::cpuinfo::get_cpu_info();
-    //     let cpu_info_str = cpu_info.to_pretty_string();
-    //     theophe.write_str(&cpu_info_str);
-
-    //     // theophe.write_str("agrwinonnnononononono nononononononononononooogowniognewagiowe gagrwinonnnonononononononononon ononononononooogowniognewagiowegagrwinonnnonon ononononononononononononononooogowniognewagio");
-    //     // write!(
-    //     //     theophe,
-    //     //     "The current framebuffer size is {}x{}",
-    //     //     fb_width, fb_height
-    //     // )
-    //     // .unwrap();
-    //     // write!(theophe, "aFASFASfASF {}\n", fb_width).unwrap();
-    //     // write!(theophe, "arewhrehrehaerhre {} ", fb_width).unwrap();
-    //     // write!(theophe, "ahrehearhearhaheerh {}", fb_width).unwrap();
-
-    //     theophe.render();
-    // }
-
+  
 
     compositor.focus_window(0);
     compositor.compose(&mut framebuffer_target);

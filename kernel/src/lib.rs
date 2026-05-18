@@ -5,6 +5,7 @@
 
 pub mod memory;
 extern crate alloc;
+pub mod asm;
 pub mod data_structures;
 pub mod filesystem;
 pub mod gdt;

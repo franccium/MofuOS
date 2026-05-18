@@ -1,12 +1,15 @@
-use crate::interrupts::{get_lapic_base_addr, init_timer_for_core, map_local_apic_for_current_core};
+use crate::asm::ap_trampoline;
+use crate::interrupts::{
+    get_lapic_base_addr, init_timer_for_core, map_local_apic_for_current_core,
+};
 use crate::process::{CORE_POOL, SCHEDULER};
 use crate::serial_println;
 use crate::util::apic::APICOffset;
+use alloc::vec::Vec;
 use bitflags::bitflags;
+use core::arch::asm;
 use limine::mp::Cpu;
 use spin::Once;
-use core::arch::asm;
-use alloc::vec::{Vec};
 
 static mut CPU_INFO: CpuInfo = CpuInfo {
     features: CpuFeatureFlags::empty(),
@@ -116,7 +119,7 @@ unsafe fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
 }
 
 pub unsafe fn init_cpu_info() {
-    let (max_leaf, vendor_ebx, vendor_ecx, vendor_edx) = unsafe {cpuid(0)};
+    let (max_leaf, vendor_ebx, vendor_ecx, vendor_edx) = unsafe { cpuid(0) };
     serial_println!(
         "init_cpu_info: read leaf 0: eax: {:#x}, ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
         max_leaf,
@@ -126,7 +129,7 @@ pub unsafe fn init_cpu_info() {
     );
 
     assert!(max_leaf >= 1);
-    let (_, feat_ebx, feat_ecx, feat_edx) = unsafe {cpuid(1)};
+    let (_, feat_ebx, feat_ecx, feat_edx) = unsafe { cpuid(1) };
     serial_println!(
         "init_cpu_info: read leaf 1: ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
         feat_ebx,
@@ -187,7 +190,7 @@ pub unsafe fn init_cpu_info() {
     let cpu_family = ((feat_edx >> 8) & 0xF) as u8;
     let cpu_model = ((feat_edx >> 4) & 0xF) as u8;
     let cpu_stepping = (feat_edx & 0xF) as u8;
-    let cpu_vendor = unsafe {get_vendor(vendor_ebx, vendor_ecx, vendor_edx)};
+    let cpu_vendor = unsafe { get_vendor(vendor_ebx, vendor_ecx, vendor_edx) };
     serial_println!("CPU Info:");
     serial_println!("  Vendor: {}", cpu_vendor);
     serial_println!("  Cache Line Size: {}", cache_line_size);
@@ -239,7 +242,7 @@ pub unsafe fn init_current_core() {
 }
 
 pub unsafe fn init_cpu_info_for_core(core_id: u8) {
-    let (max_leaf, vendor_ebx, vendor_ecx, vendor_edx) = unsafe {cpuid(0)};
+    let (max_leaf, vendor_ebx, vendor_ecx, vendor_edx) = unsafe { cpuid(0) };
     serial_println!(
         "Core{}: init_cpu_info: read leaf 0: eax: {:#x}, ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
         core_id,
@@ -250,7 +253,7 @@ pub unsafe fn init_cpu_info_for_core(core_id: u8) {
     );
 
     assert!(max_leaf >= 1);
-    let (_, feat_ebx, feat_ecx, feat_edx) = unsafe {cpuid(1)};
+    let (_, feat_ebx, feat_ecx, feat_edx) = unsafe { cpuid(1) };
     serial_println!(
         "Core{}: init_cpu_info: read leaf 1: ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
         core_id,
@@ -312,7 +315,7 @@ pub unsafe fn init_cpu_info_for_core(core_id: u8) {
     let cpu_family = ((feat_edx >> 8) & 0xF) as u8;
     let cpu_model = ((feat_edx >> 4) & 0xF) as u8;
     let cpu_stepping = (feat_edx & 0xF) as u8;
-    let cpu_vendor = unsafe {get_vendor(vendor_ebx, vendor_ecx, vendor_edx)};
+    let cpu_vendor = unsafe { get_vendor(vendor_ebx, vendor_ecx, vendor_edx) };
     serial_println!("Core{}: CPU Info:", core_id);
     serial_println!("  Vendor: {}", cpu_vendor);
     serial_println!("  Cache Line Size: {}", cache_line_size);
@@ -366,9 +369,6 @@ pub fn get_cpu_info_for_core(core_id: u8) -> &'static CpuInfo {
 //     }
 // }
 
-
-
-
 //TODO: For now assume APIC ID = core index
 pub fn get_current_core_id() -> u8 {
     unsafe {
@@ -385,42 +385,82 @@ pub fn get_current_cpu_info() -> &'static CpuInfo {
     get_cpu_info_for_core(core_id)
 }
 
-
-unsafe
-extern "C" {
+unsafe extern "C" {
     static ap_trampoline_start: u8;
     static ap_trampoline_end: u8;
 }
 
-
 /// Start an AP core using INIT-SIPI-SIPI sequence
-pub unsafe fn start_ap_core(core_id: u8, apic_id: u8) {
-    // Copy trampoline to the AP startup page (0x8000)
-    let trampoline_size = &ap_trampoline_end as *const u8 as usize - &ap_trampoline_start as *const u8 as usize;
-    let dest = 0x8000 as *mut u8;
+pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64) {
+    use x86_64::registers::control::Cr3;
 
-    // Copy the trampoline code
-    core::ptr::copy_nonoverlapping(&ap_trampoline_start, dest, trampoline_size);
+    // Copy the pre-assembled trampoline binary to physical address 0x8000
+    serial_println!("Core {}: Copying AP trampoline to memory", core_id);
+    ap_trampoline::copy_to_memory(hhdm_offset);
+
+    // Get the current CR3 (page table address) from the BSP
+    serial_println!("Core {}: Reading CR3 from BSP", core_id);
+    let (l4_table_frame, _flags) = Cr3::read();
+    let cr3_phys = l4_table_frame.start_address().as_u64();
+
+    // Write CR3 to 0x9000 so the AP can read it
+    serial_println!("Core {}: Writing CR3 ({:#x}) to memory for AP", core_id, cr3_phys);
+    let cr3_location = (0x9000 + hhdm_offset) as *mut u64;
+    core::ptr::write_unaligned(cr3_location, cr3_phys);
+
+    // Write the entry point address to 0x9010 so the AP can jump to it
+    serial_println!(
+        "Core {}: Writing AP entry point ({:#x}) to memory for AP",
+        core_id,
+        ap_core_entry_point as u64
+    );
+    let entry_point = ap_core_entry_point as *const () as u64;
+    let entry_location = (0x9010 + hhdm_offset) as *mut u64;
+    serial_println!("Core {}: Writing entry point {:#x} to {:#x}", core_id, entry_point, entry_location as u64);
+    core::ptr::write_unaligned(entry_location, entry_point);
 
     // The entry point physical address is 0x8000
     let entry_phys = 0x8000;
 
     // Send INIT IPI
+    serial_println!("Core {}: Sending INIT IPI to APIC ID {}", core_id, apic_id);
     send_ipi(apic_id, 0x0500); // INIT IPI
 
     // Delay
-    for _ in 0..100000 { core::hint::spin_loop(); }
+    for _ in 0..100000 {
+        core::hint::spin_loop();
+    }
+
 
     // Send SIPI with vector (entry_phys >> 12 = 0x8)
+    serial_println!(
+        "Core {}: Sending SIPI to APIC ID {} with entry point {:#x}",
+        core_id,
+        apic_id,
+        entry_phys
+    );
     send_ipi(apic_id, 0x0600 | ((entry_phys >> 12) as u32));
 
     // Short delay
-    for _ in 0..1000 { core::hint::spin_loop(); }
+    for _ in 0..1000 {
+        core::hint::spin_loop();
+    }
 
     // Optional second SIPI
+    serial_println!(
+        "Core {}: Sending second SIPI to APIC ID {} with entry point {:#x}",
+        core_id,
+        apic_id,
+        entry_phys
+    );
     send_ipi(apic_id, 0x0600 | ((entry_phys >> 12) as u32));
 
-    serial_println!("Core {}: STARTUP IPI sent", core_id);
+    serial_println!(
+        "Core {}: STARTUP IPI sent (trampoline size: {} bytes, CR3={:#x})",
+        core_id,
+        ap_trampoline::size(),
+        cr3_phys
+    );
 }
 
 /// Send IPI to a specific APIC ID
@@ -438,7 +478,7 @@ unsafe fn send_ipi(apic_id: u8, vector: u32) {
     icr_high.write_volatile((apic_id as u32) << 24);
 
     // Send IPI (Delivery mode = Fixed, Destination mode = Physical, Level = Assert)
-    icr_low.write_volatile(0x00004000 | vector);  // 0x4000 = Physical destination mode
+    icr_low.write_volatile(0x00004000 | vector); // 0x4000 = Physical destination mode
 }
 
 #[unsafe(no_mangle)]
@@ -448,7 +488,9 @@ pub unsafe extern "C" fn ap_core_entry_point() -> ! {
     serial_println!("AP Core {}: Started successfully", core_id);
 
     // Initialize this core (CPU info, timer, etc.)
-    unsafe { init_current_core(); }
+    unsafe {
+        init_current_core();
+    }
 
     // Initialize scheduler for this core
     let core_id = get_current_core_id();
@@ -500,12 +542,13 @@ fn ap_core_scheduler_loop(core_id: u8) -> ! {
             }
             None => {
                 // No work, halt until interrupt
-                unsafe { asm!("hlt", options(nomem, nostack)); }
+                unsafe {
+                    asm!("hlt", options(nomem, nostack));
+                }
             }
         }
     }
 }
-
 
 /// PRITNING
 use alloc::string::String;
@@ -567,8 +610,11 @@ impl core::fmt::Display for CpuInfo {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         writeln!(f, "CPU Information:")?;
         writeln!(f, "  Vendor: {}", self.vendor)?;
-        writeln!(f, "  Family: {}, Model: {}, Stepping: {}",
-                 self.family, self.model, self.stepping)?;
+        writeln!(
+            f,
+            "  Family: {}, Model: {}, Stepping: {}",
+            self.family, self.model, self.stepping
+        )?;
         writeln!(f, "  APIC ID: {}", self.apic_id)?;
         writeln!(f, "  Cache Line Size: {} bytes", self.cache_line_size)?;
 
@@ -611,9 +657,12 @@ impl CpuInfo {
         } else {
             features.join("")
         };
-        write!(&mut s, "CPU: {} (Family {}, Model {}), APIC ID: {}, Cache: {}B, Features: [{}]",
-               self.vendor, self.family, self.model, self.apic_id,
-               self.cache_line_size, features_str).unwrap();
+        write!(
+            &mut s,
+            "CPU: {} (Family {}, Model {}), APIC ID: {}, Cache: {}B, Features: [{}]",
+            self.vendor, self.family, self.model, self.apic_id, self.cache_line_size, features_str
+        )
+        .unwrap();
         s
     }
 }
