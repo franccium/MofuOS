@@ -173,11 +173,11 @@ impl Scheduler {
         if let Some(scheduler) = self.get_core_scheduler_mut(core_id) {
             let curr = scheduler.current_running();
 
-            serial_println!(
-                "Core {}: Timer tick - Current PID: {:?}",
-                core_id,
-                curr,
-            );
+            // serial_println!(
+            //     "Core {}: Timer tick - Current PID: {:?}",
+            //     core_id,
+            //     curr,
+            // );
         }
     }
 

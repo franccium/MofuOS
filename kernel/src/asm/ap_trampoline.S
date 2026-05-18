@@ -14,6 +14,9 @@ ap_trampoline_start:
     mov %ax, %ds
     mov %ax, %es
     mov %ax, %ss
+
+    # loop here to debug
+    jmp .
     
     # Load GDT pointer - gdtr is defined at end of this file
     lgdt (gdtr)

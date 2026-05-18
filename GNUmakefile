@@ -38,7 +38,7 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 	qemu-system-$(KARCH) \
 		-M q35 \
 		-accel kvm \
-		-smp cores=4,threads=1 \
+		-smp cores=2,threads=1 \
 		-cpu qemu64,+tsc-deadline,+apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \

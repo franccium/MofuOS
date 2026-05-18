@@ -38,7 +38,7 @@ use core::arch::asm;
 use lazy_static::lazy_static;
 use spin::Mutex;
 
-const TIMER_DEBUG_PRINT: bool = true;
+const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
 

@@ -1,4 +1,4 @@
-use kernel::{interrupts::map_local_apic_for_current_core, memory::memory::MemoryMapFrameAllocator, process::{CORE_POOL, CorePool, SCHEDULER}, util::cpuinfo::{ap_core_entry_point, init_cpu_infos, init_current_core, start_ap_core}};
+use kernel::{interrupts::map_local_apic_for_current_core, memory::memory::MemoryMapFrameAllocator, process::{CORE_POOL, CorePool, SCHEDULER}, util::cpuinfo::{self, ap_core_entry_point, init_cpu_infos, init_current_core, start_ap_core}};
 use limine::{
     BaseRevision,
     framebuffer::{Framebuffer},
@@ -152,6 +152,9 @@ unsafe extern "C" fn kmain() -> ! {
         hhdm_offset,
     )
     .expect("Failed to map ACPI regions");
+
+    memory::memory::setup_ap_trampoline_mapping(&mut mapper, &mut frame_allocator);
+    cpuinfo::init_ap_support(&mut mapper, &mut frame_allocator);
 
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");

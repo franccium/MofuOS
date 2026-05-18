@@ -7,6 +7,7 @@ use crate::serial_println;
 use crate::util::apic::APICOffset;
 use alloc::vec::Vec;
 use bitflags::bitflags;
+use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
 use core::arch::asm;
 use limine::mp::Cpu;
 use spin::Once;
@@ -391,76 +392,281 @@ unsafe extern "C" {
 }
 
 /// Start an AP core using INIT-SIPI-SIPI sequence
-pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64) {
+const TRAMPOLINE_PHYS: u64 = 0x8000;
+const MAGIC_OFFSET: u64 = 0x8FF0;  // AP writes "APST" here
+const ACK_OFFSET: u64 = 0x8FF4;     // BSP writes 1 here
+const DONE_OFFSET: u64 = 0x8FF5;    // AP writes 1 when leaving trampoline
+const GDT_OFFSET: u64 = 0x8FF8;     // GDT descriptor
+const CR3_OFFSET: u64 = 0x9000;
+const STACK_OFFSET: u64 = 0x9008;
+const ENTRY_OFFSET: u64 = 0x9010;
+
+use core::sync::atomic::{AtomicU64, Ordering};
+use x86_64::VirtAddr;
+
+/// Manages stack allocation for AP cores
+pub struct ApStackAllocator {
+    /// Base virtual address for AP stacks
+    stack_base: VirtAddr,
+    /// Size of each AP stack (typically 64KB or 128KB)
+    stack_size: u64,
+    /// Number of stacks allocated so far
+    next_stack: AtomicU64,
+    /// Maximum number of AP cores supported
+    max_aps: u32,
+}
+
+/// Represents an allocated stack for an AP core
+#[derive(Debug)]
+pub struct ApStack {
+    /// Virtual address of the stack top (highest address, stack grows down)
+    top: VirtAddr,
+    /// Virtual address of the stack bottom (lowest address)
+    bottom: VirtAddr,
+    /// Size of the stack in bytes
+    size: u64,
+}
+
+impl ApStack {
+    /// Get the stack pointer value (top of stack for x86)
+    pub fn top(&self) -> u64 {
+        self.top.as_u64()
+    }
+    
+    /// Get the bottom of stack address
+    pub fn bottom(&self) -> u64 {
+        self.bottom.as_u64()
+    }
+    
+    /// Get the stack size
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+// Global stack allocator
+static AP_STACK_ALLOCATOR: spin::Once<ApStackAllocator> = spin::Once::new();
+
+impl ApStackAllocator {
+    /// Initialize the AP stack allocator
+    pub fn init(stack_base: VirtAddr, stack_size: u64, max_aps: u32) {
+        AP_STACK_ALLOCATOR.call_once(|| {
+            ApStackAllocator {
+                stack_base,
+                stack_size,
+                next_stack: AtomicU64::new(0),
+                max_aps,
+            }
+        });
+    }
+    
+    /// Get the global allocator instance
+    pub fn get() -> &'static ApStackAllocator {
+        AP_STACK_ALLOCATOR.get().expect("AP stack allocator not initialized")
+    }
+    
+    /// Allocate a new stack for an AP core
+    pub fn allocate_stack(&self, core_id: u8) -> Option<ApStack> {
+        let stack_index = self.next_stack.fetch_add(1, Ordering::SeqCst);
+        
+        // Check if we've exceeded maximum APs
+        if stack_index >= self.max_aps as u64 {
+            return None;
+        }
+        
+        // Calculate stack boundaries
+        // Stacks are placed sequentially: [stack0][stack1][stack2]...
+        // Each stack has a guard page between them
+        let guard_pages = 1; // One guard page between stacks
+        
+        // Total space per stack including guard pages
+        let total_space = self.stack_size + (guard_pages * 0x1000);
+        
+        // Calculate this stack's position
+        let stack_offset = stack_index * total_space;
+        let stack_bottom = self.stack_base + stack_offset;
+        let stack_top = stack_bottom + self.stack_size;
+        
+        // Stack grows downward, so the initial RSP should be at the top
+        // Align to 16 bytes for ABI compatibility
+        let aligned_top = stack_top.align_down(16u64);
+        
+        Some(ApStack {
+            top: aligned_top,
+            bottom: stack_bottom,
+            size: self.stack_size,
+        })
+    }
+}
+
+/// Allocate a stack for an AP core (convenience function)
+pub fn allocate_ap_stack(core_id: u8) -> ApStack {
+    let allocator = ApStackAllocator::get();
+    
+    allocator.allocate_stack(core_id)
+        .unwrap_or_else(|| {
+            panic!("Failed to allocate stack for AP core {}", core_id)
+        })
+}
+
+const AP_STACK_SIZE: u64 = 128 * 1024; // 128KB per stack
+const MAX_AP_CORES: u32 = 4; // Support up to 16 AP cores
+
+// Virtual address where AP stacks will be mapped
+// Make sure this doesn't conflict with your kernel's memory layout!
+const AP_STACK_BASE: u64 = 0xFFFF_BC90_1000_0000; // Example address
+
+pub fn init_ap_support(
+    page_table: &mut impl Mapper<Size4KiB>,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) {
+    // Initialize stack allocator
+    ApStackAllocator::init(
+        VirtAddr::new(AP_STACK_BASE),
+        AP_STACK_SIZE,
+        MAX_AP_CORES,
+    );
+    
+    // Map memory for AP stacks in page tables
+    initialize_ap_stack_memory(
+        page_table,
+        frame_allocator,
+        VirtAddr::new(AP_STACK_BASE),
+        AP_STACK_SIZE,
+        MAX_AP_CORES,
+    ).expect("Failed to map AP stack memory");
+    
+    serial_println!("AP stack allocator initialized:");
+    serial_println!("  Base: {:#x}", AP_STACK_BASE);
+    serial_println!("  Stack size: {} KB", AP_STACK_SIZE / 1024);
+    serial_println!("  Max APs: {}", MAX_AP_CORES);
+}
+
+/// Initialize AP stack memory region in page tables
+pub fn initialize_ap_stack_memory(
+    page_table: &mut impl x86_64::structures::paging::Mapper<Size4KiB>,
+    frame_allocator: &mut impl x86_64::structures::paging::FrameAllocator<Size4KiB>,
+    stack_base: VirtAddr,
+    stack_size: u64,
+    max_aps: u32,
+) -> Result<(), x86_64::structures::paging::mapper::MapToError<Size4KiB>> {
+    use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
+    
+    let total_space = (stack_size + 0x1000) * max_aps as u64; // + guard pages
+    let num_pages = (total_space + 0xFFF) / 0x1000; // Round up
+    
+    for i in 0..num_pages {
+        let page = Page::<Size4KiB>::from_start_address(stack_base + (i * 0x1000))
+            .expect("Invalid page address");
+        
+        // Allocate physical frame for this page
+        let frame = frame_allocator
+            .allocate_frame()
+            .expect("Failed to allocate frame for AP stack");
+        
+        unsafe {
+            page_table.map_to(
+                page,
+                frame,
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+                frame_allocator,
+            )?
+            .flush();
+        }
+    }
+    
+    Ok(())
+}
+
+pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64) -> Result<(), &'static str> {
     use x86_64::registers::control::Cr3;
 
-    // Copy the pre-assembled trampoline binary to physical address 0x8000
+    // Allocate a stack for this AP
+    let ap_stack = allocate_ap_stack(core_id);  // You need to implement this
+    
     serial_println!("Core {}: Copying AP trampoline to memory", core_id);
     ap_trampoline::copy_to_memory(hhdm_offset);
-
-    // Get the current CR3 (page table address) from the BSP
-    serial_println!("Core {}: Reading CR3 from BSP", core_id);
+    
+    // Clear synchronization flags
+    let magic_ptr = (MAGIC_OFFSET + hhdm_offset) as *mut u32;
+    let ack_ptr = (ACK_OFFSET + hhdm_offset) as *mut u8;
+    let done_ptr = (DONE_OFFSET + hhdm_offset) as *mut u8;
+    
+    core::ptr::write_volatile(magic_ptr, 0);
+    core::ptr::write_volatile(ack_ptr, 0);
+    core::ptr::write_volatile(done_ptr, 0);
+    
+    // Write GDT descriptor to trampoline
+    let gdt_addr: u32 = (GDT_OFFSET + hhdm_offset) as u32;  // Physical GDT address
+    let gdtr_ptr = (GDT_OFFSET + hhdm_offset) as *mut u64;
+    // GDT is at 0x80F0, so write descriptor: limit = 23, base = 0x80F0
+    core::ptr::write_volatile(gdtr_ptr, 0x80F0_0017_0000);  // base:16 | limit:16
+    
+    // Get CR3
     let (l4_table_frame, _flags) = Cr3::read();
     let cr3_phys = l4_table_frame.start_address().as_u64();
-
-    // Write CR3 to 0x9000 so the AP can read it
-    serial_println!("Core {}: Writing CR3 ({:#x}) to memory for AP", core_id, cr3_phys);
-    let cr3_location = (0x9000 + hhdm_offset) as *mut u64;
-    core::ptr::write_unaligned(cr3_location, cr3_phys);
-
-    // Write the entry point address to 0x9010 so the AP can jump to it
-    serial_println!(
-        "Core {}: Writing AP entry point ({:#x}) to memory for AP",
-        core_id,
-        ap_core_entry_point as u64
-    );
-    let entry_point = ap_core_entry_point as *const () as u64;
-    let entry_location = (0x9010 + hhdm_offset) as *mut u64;
-    serial_println!("Core {}: Writing entry point {:#x} to {:#x}", core_id, entry_point, entry_location as u64);
-    core::ptr::write_unaligned(entry_location, entry_point);
-
-    // The entry point physical address is 0x8000
-    let entry_phys = 0x8000;
-
-    // Send INIT IPI
+    
+    // Write CR3 and stack and entry point
+    let cr3_ptr = (CR3_OFFSET + hhdm_offset) as *mut u64;
+    let stack_ptr = (STACK_OFFSET + hhdm_offset) as *mut u64;
+    let entry_ptr = (ENTRY_OFFSET + hhdm_offset) as *mut u64;
+    
+    core::ptr::write_volatile(cr3_ptr, cr3_phys);
+    core::ptr::write_volatile(stack_ptr, ap_stack.top());
+    core::ptr::write_volatile(entry_ptr, ap_core_entry_point as u64);
+    
     serial_println!("Core {}: Sending INIT IPI to APIC ID {}", core_id, apic_id);
-    send_ipi(apic_id, 0x0500); // INIT IPI
-
-    // Delay
-    for _ in 0..100000 {
+    send_ipi(apic_id, 0x0500);
+    
+    // 10ms delay
+    for _ in 0..100000 { core::hint::spin_loop(); }
+    
+    // Send first SIPI
+    serial_println!("Core {}: Sending first SIPI", core_id);
+    send_ipi(apic_id, 0x0600 | ((TRAMPOLINE_PHYS >> 12) as u32 & 0xFF));
+    
+    // Wait for AP to start (200us timeout)
+    let mut started = false;
+    for _ in 0..10000 {
+        if core::ptr::read_volatile(magic_ptr) == 0x41505354 {
+            started = true;
+            break;
+        }
         core::hint::spin_loop();
     }
-
-
-    // Send SIPI with vector (entry_phys >> 12 = 0x8)
-    serial_println!(
-        "Core {}: Sending SIPI to APIC ID {} with entry point {:#x}",
-        core_id,
-        apic_id,
-        entry_phys
-    );
-    send_ipi(apic_id, 0x0600 | ((entry_phys >> 12) as u32));
-
-    // Short delay
-    for _ in 0..1000 {
+    
+    if !started {
+        // Send second SIPI
+        serial_println!("Core {}: Sending second SIPI", core_id);
+        send_ipi(apic_id, 0x0600 | ((TRAMPOLINE_PHYS >> 12) as u32 & 0xFF));
+        
+        // Wait longer (1 second timeout)
+        for _ in 0..1000000 {
+            if core::ptr::read_volatile(magic_ptr) == 0x41505354 {
+                started = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    
+    if !started {
+        return Err("AP failed to start");
+    }
+    
+    // Acknowledge the AP
+    core::ptr::write_volatile(ack_ptr, 1);
+    
+    // Wait for AP to finish with trampoline
+    for _ in 0..1000000 {
+        if core::ptr::read_volatile(done_ptr) == 1 {
+            break;
+        }
         core::hint::spin_loop();
     }
-
-    // Optional second SIPI
-    serial_println!(
-        "Core {}: Sending second SIPI to APIC ID {} with entry point {:#x}",
-        core_id,
-        apic_id,
-        entry_phys
-    );
-    send_ipi(apic_id, 0x0600 | ((entry_phys >> 12) as u32));
-
-    serial_println!(
-        "Core {}: STARTUP IPI sent (trampoline size: {} bytes, CR3={:#x})",
-        core_id,
-        ap_trampoline::size(),
-        cr3_phys
-    );
+    
+    serial_println!("Core {}: AP successfully started", core_id);
+    Ok(())
 }
 
 /// Send IPI to a specific APIC ID

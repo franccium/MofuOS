@@ -50,6 +50,54 @@ pub const fn align_down(x: u64, align: u64) -> u64 {
     x & !(align - 1)
 }
 
+// In your kernel's page table initialization:
+pub fn setup_ap_trampoline_mapping(
+    page_table: &mut impl Mapper<Size4KiB>,  // Your page table mapper
+    frame_allocator: &mut MemoryMapFrameAllocator,
+) {
+    use x86_64::structures::paging::{Page, PhysFrame, Size4KiB, PageTableFlags};
+    
+    // Identity map the trampoline page at 0x8000
+    let trampoline_page = Page::<Size4KiB>::from_start_address(
+        x86_64::VirtAddr::new(0x8000)
+    ).unwrap();
+    
+    let trampoline_frame = PhysFrame::from_start_address(
+        x86_64::PhysAddr::new(0x8000)
+    ).unwrap();
+    
+    unsafe {
+        page_table.map_to(
+            trampoline_page,
+            trampoline_frame,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+            frame_allocator,
+        )
+        .unwrap()
+        .flush();
+    }
+    
+    // Also identity map the data pages at 0x9000
+    let data_page = Page::<Size4KiB>::from_start_address(
+        x86_64::VirtAddr::new(0x9000)
+    ).unwrap();
+    
+    let data_frame = PhysFrame::from_start_address(
+        x86_64::PhysAddr::new(0x9000)
+    ).unwrap();
+    
+    unsafe {
+        page_table.map_to(
+            data_page,
+            data_frame,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+            frame_allocator,
+        )
+        .unwrap()
+        .flush();
+    }
+}
+
 pub fn map_acpi_regions(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut MemoryMapFrameAllocator,
