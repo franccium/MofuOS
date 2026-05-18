@@ -46,6 +46,7 @@ ap_protected_mode:
     movl %eax, %cr4
     movw $0xDA1E, 0x8FFA   # PAE enabled
     
+    #TODO: check whether CR3 is correct here
     movl $0x9000, %edi
     movl %edi, 0x8FF4
     movl (%edi), %eax
@@ -107,12 +108,12 @@ wait_for_entry:
     
     
     # Set up stack
-    mov $0x9008, %edi
-    mov (%rdi), %rsp
+    #mov $0x9008, %edi
+    #mov (%rdi), %rsp
 
     #movq %rsp, 0x8FF0
     # try to write into stack
-    movq $0xBEEF, (%rsp)
+    #movq $0xBEEF, (%rsp)
 
     # Clear RFLAGS
     pushq $0
@@ -131,8 +132,17 @@ wait_for_entry:
     # Signal the jump target
     movq %rax, 0x8FF8
 
-    jmp .
+    # wait for bsp to finish
+wait_for_bsp:
+    mov $0x8FF0, %edi
+    cmpl $0x01, (%edi)                # Check if BSP cleared the magic value
+    jnz wait_for_bsp                  # Wait for BSP to clear it
 
+    movq $0x2222, 0x8FF0
+
+    #jmp .
+
+    #TODO: ensure proper calling convention?
     jmp *%rax
     
     # Should never get here

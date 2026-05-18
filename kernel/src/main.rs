@@ -345,25 +345,25 @@ fn main() -> ! {
     use kernel::graphics::compositor::Compositor;
     //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
     serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
-    let mut compositor = Compositor::new(fb_width as u32,  fb_height as u32);
-    let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
-    serial_println!("Created window with ID: {}", window_id);
+    // let mut compositor = Compositor::new(fb_width as u32,  fb_height as u32);
+    // let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
+    // serial_println!("Created window with ID: {}", window_id);
 
-    let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
-    theophe.write_line("");
-    theophe.write_line("  hi");
-    theophe.write_line("==========================================================");
-    let cpu_info = kernel::util::cpuinfo::get_cpu_info();
-    let cpu_info_str = cpu_info.to_pretty_string();
-    theophe.write_str(&cpu_info_str);
-
-  
-    theophe.render();
+    // let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
+    // theophe.write_line("");
+    // theophe.write_line("  hi");
+    // theophe.write_line("==========================================================");
+    // let cpu_info = kernel::util::cpuinfo::get_cpu_info();
+    // let cpu_info_str = cpu_info.to_pretty_string();
+    // theophe.write_str(&cpu_info_str);
 
   
+    // theophe.render();
 
-    compositor.focus_window(0);
-    compositor.compose(&mut framebuffer_target);
+  
+
+    // compositor.focus_window(0);
+    // compositor.compose(&mut framebuffer_target);
 
     loop {
         hlt();

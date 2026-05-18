@@ -8,10 +8,10 @@ use crate::util::apic::APICOffset;
 use crate::util::msr::msr_read;
 use alloc::vec::Vec;
 use bitflags::bitflags;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
 use core::arch::asm;
 use limine::mp::Cpu;
 use spin::Once;
+use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
 
 static mut CPU_INFO: CpuInfo = CpuInfo {
     features: CpuFeatureFlags::empty(),
@@ -394,10 +394,10 @@ unsafe extern "C" {
 
 /// Start an AP core using INIT-SIPI-SIPI sequence
 const TRAMPOLINE_PHYS: u64 = 0x8000;
-const MAGIC_OFFSET: u64 = 0x8FF0;  // AP writes "APST" here
-const ACK_OFFSET: u64 = 0x8FF4;     // BSP writes 1 here
-const DONE_OFFSET: u64 = 0x8FF5;    // AP writes 1 when leaving trampoline
-const GDT_OFFSET: u64 = 0x8FF8;     // GDT descriptor
+const MAGIC_OFFSET: u64 = 0x8FF0; // AP writes "APST" here
+const ACK_OFFSET: u64 = MAGIC_OFFSET; // BSP writes 1 here
+const DONE_OFFSET: u64 = MAGIC_OFFSET; // AP writes 1 when leaving trampoline
+const GDT_OFFSET: u64 = 0x8FF8; // GDT descriptor
 const CR3_OFFSET: u64 = 0x9000;
 const STACK_OFFSET: u64 = 0x9008;
 const ENTRY_OFFSET: u64 = 0x9010;
@@ -433,12 +433,12 @@ impl ApStack {
     pub fn top(&self) -> u64 {
         self.top.as_u64()
     }
-    
+
     /// Get the bottom of stack address
     pub fn bottom(&self) -> u64 {
         self.bottom.as_u64()
     }
-    
+
     /// Get the stack size
     pub fn size(&self) -> u64 {
         self.size
@@ -451,47 +451,47 @@ static AP_STACK_ALLOCATOR: spin::Once<ApStackAllocator> = spin::Once::new();
 impl ApStackAllocator {
     /// Initialize the AP stack allocator
     pub fn init(stack_base: VirtAddr, stack_size: u64, max_aps: u32) {
-        AP_STACK_ALLOCATOR.call_once(|| {
-            ApStackAllocator {
-                stack_base,
-                stack_size,
-                next_stack: AtomicU64::new(0),
-                max_aps,
-            }
+        AP_STACK_ALLOCATOR.call_once(|| ApStackAllocator {
+            stack_base,
+            stack_size,
+            next_stack: AtomicU64::new(0),
+            max_aps,
         });
     }
-    
+
     /// Get the global allocator instance
     pub fn get() -> &'static ApStackAllocator {
-        AP_STACK_ALLOCATOR.get().expect("AP stack allocator not initialized")
+        AP_STACK_ALLOCATOR
+            .get()
+            .expect("AP stack allocator not initialized")
     }
-    
+
     /// Allocate a new stack for an AP core
     pub fn allocate_stack(&self, core_id: u8) -> Option<ApStack> {
         let stack_index = self.next_stack.fetch_add(1, Ordering::SeqCst);
-        
+
         // Check if we've exceeded maximum APs
         if stack_index >= self.max_aps as u64 {
             return None;
         }
-        
+
         // Calculate stack boundaries
         // Stacks are placed sequentially: [stack0][stack1][stack2]...
         // Each stack has a guard page between them
         let guard_pages = 1; // One guard page between stacks
-        
+
         // Total space per stack including guard pages
         let total_space = self.stack_size + (guard_pages * 0x1000);
-        
+
         // Calculate this stack's position
         let stack_offset = stack_index * total_space;
         let stack_bottom = self.stack_base + stack_offset;
         let stack_top = stack_bottom + self.stack_size;
-        
+
         // Stack grows downward, so the initial RSP should be at the top
         // Align to 16 bytes for ABI compatibility
         let aligned_top = stack_top.align_down(16u64);
-        
+
         Some(ApStack {
             top: aligned_top,
             bottom: stack_bottom,
@@ -503,11 +503,10 @@ impl ApStackAllocator {
 /// Allocate a stack for an AP core (convenience function)
 pub fn allocate_ap_stack(core_id: u8) -> ApStack {
     let allocator = ApStackAllocator::get();
-    
-    allocator.allocate_stack(core_id)
-        .unwrap_or_else(|| {
-            panic!("Failed to allocate stack for AP core {}", core_id)
-        })
+
+    allocator
+        .allocate_stack(core_id)
+        .unwrap_or_else(|| panic!("Failed to allocate stack for AP core {}", core_id))
 }
 
 const AP_STACK_SIZE: u64 = 128 * 1024; // 128KB per stack
@@ -521,34 +520,29 @@ pub fn init_ap_support(
     page_table: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) {
+    // let stack_base = VirtAddr::new(0x80000000);
 
-// let stack_base = VirtAddr::new(0x80000000);
-    
-//     // Initialize and map
-//     initialize_ap_stack_memory(
-//         page_table,
-//         frame_allocator,
-//         stack_base,
-//         128 * 1024,
-//         4,
-//     ).expect("Failed to map AP stack memory");
-    
-//     // CRITICAL: Verify the mapping works from the BSP
-//     let test_addr = 0x80020000 as *const u64;
-//     unsafe {
-//         match core::ptr::read_volatile(test_addr) {
-//             val => serial_println!("AP stack test read: {:#x}", val),
-//         }
-//     }
-//     serial_println!("AP stack mapping verified!");
+    //     // Initialize and map
+    //     initialize_ap_stack_memory(
+    //         page_table,
+    //         frame_allocator,
+    //         stack_base,
+    //         128 * 1024,
+    //         4,
+    //     ).expect("Failed to map AP stack memory");
+
+    //     // CRITICAL: Verify the mapping works from the BSP
+    //     let test_addr = 0x80020000 as *const u64;
+    //     unsafe {
+    //         match core::ptr::read_volatile(test_addr) {
+    //             val => serial_println!("AP stack test read: {:#x}", val),
+    //         }
+    //     }
+    //     serial_println!("AP stack mapping verified!");
 
     // Initialize stack allocator
-    ApStackAllocator::init(
-        VirtAddr::new(AP_STACK_BASE),
-        AP_STACK_SIZE,
-        MAX_AP_CORES,
-    );
-    
+    ApStackAllocator::init(VirtAddr::new(AP_STACK_BASE), AP_STACK_SIZE, MAX_AP_CORES);
+
     // Map memory for AP stacks in page tables
     initialize_ap_stack_memory(
         page_table,
@@ -556,8 +550,9 @@ pub fn init_ap_support(
         VirtAddr::new(AP_STACK_BASE),
         AP_STACK_SIZE,
         MAX_AP_CORES,
-    ).expect("Failed to map AP stack memory");
-    
+    )
+    .expect("Failed to map AP stack memory");
+
     serial_println!("AP stack allocator initialized:");
     serial_println!("  Base: {:#x}", AP_STACK_BASE);
     serial_println!("  Stack size: {} KB", AP_STACK_SIZE / 1024);
@@ -573,30 +568,31 @@ pub fn initialize_ap_stack_memory(
     max_aps: u32,
 ) -> Result<(), x86_64::structures::paging::mapper::MapToError<Size4KiB>> {
     use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
-    
+
     let total_space = (stack_size + 0x1000) * max_aps as u64; // + guard pages
     let num_pages = (total_space + 0xFFF) / 0x1000; // Round up
-    
+
     for i in 0..num_pages {
         let page = Page::<Size4KiB>::from_start_address(stack_base + (i * 0x1000))
             .expect("Invalid page address");
-        
+
         // Allocate physical frame for this page
         let frame = frame_allocator
             .allocate_frame()
             .expect("Failed to allocate frame for AP stack");
-        
+
         unsafe {
-            page_table.map_to(
-                page,
-                frame,
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
-                frame_allocator,
-            )?
-            .flush();
+            page_table
+                .map_to(
+                    page,
+                    frame,
+                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+                    frame_allocator,
+                )?
+                .flush();
         }
     }
-    
+
     Ok(())
 }
 // Test self-IPI (should just interrupt ourselves)
@@ -604,54 +600,60 @@ unsafe fn test_lapic_ipi() {
     let lapic = get_lapic_base_addr();
     let icr_low = lapic.offset(0x300 / 4);
     let icr_high = lapic.offset(0x310 / 4);
-    
+
     serial_println!("Testing LAPIC IPI to self...");
-    
+
     // Wait for idle
     while (icr_low.read_volatile() & (1 << 12)) != 0 {
         core::hint::spin_loop();
     }
-    
+
     // Send a fixed IPI to self (vector 0x30 for example)
     // Shorthand 01 = Self
     let self_ipi = 0x00004030; // Shorthand=self, Fixed delivery, vector=0x30
     icr_low.write_volatile(self_ipi);
-    
+
     serial_println!("Self IPI sent (should trigger interrupt vector 0x30)");
-    
+
     // Wait a bit
-    for _ in 0..10000 { core::hint::spin_loop(); }
-    
+    for _ in 0..10000 {
+        core::hint::spin_loop();
+    }
+
     serial_println!("Self IPI test complete");
 
     // Check if x2APIC is enabled
-let apic_base = unsafe { msr_read(0x1B) }; // IA32_APIC_BASE MSR
-let x2apic_enabled = (apic_base >> 10) & 1 == 1;  // Bit 10 is x2APIC enable
-serial_println!("x2APIC enabled: {}", x2apic_enabled);
+    let apic_base = unsafe { msr_read(0x1B) }; // IA32_APIC_BASE MSR
+    let x2apic_enabled = (apic_base >> 10) & 1 == 1; // Bit 10 is x2APIC enable
+    serial_println!("x2APIC enabled: {}", x2apic_enabled);
 
-// Check number of local APICs
-let lapic_id_reg = lapic.offset(0x20 / 4);
-let my_id = (lapic_id_reg.read_volatile() >> 24) as u8;
+    // Check number of local APICs
+    let lapic_id_reg = lapic.offset(0x20 / 4);
+    let my_id = (lapic_id_reg.read_volatile() >> 24) as u8;
 
-// Check LAPIC version register to see max LAPIC ID
-let version_reg = lapic.offset(0x30 / 4);
-let version = version_reg.read_volatile();
-let max_lvt = (version >> 16) & 0xFF;
-serial_println!("LAPIC version: {:#x}", version);
-serial_println!("Max LVT entry: {}", max_lvt);
+    // Check LAPIC version register to see max LAPIC ID
+    let version_reg = lapic.offset(0x30 / 4);
+    let version = version_reg.read_volatile();
+    let max_lvt = (version >> 16) & 0xFF;
+    serial_println!("LAPIC version: {:#x}", version);
+    serial_println!("Max LVT entry: {}", max_lvt);
 
-// Try sending SIPI to APIC ID 255 (should not exist)
-serial_println!("Testing SIPI to non-existent APIC 255...");
-while (icr_low.read_volatile() & (1 << 12)) != 0 {
-    core::hint::spin_loop();
+    // Try sending SIPI to APIC ID 255 (should not exist)
+    serial_println!("Testing SIPI to non-existent APIC 255...");
+    while (icr_low.read_volatile() & (1 << 12)) != 0 {
+        core::hint::spin_loop();
+    }
+    icr_high.write_volatile((255u32) << 24);
+    icr_low.write_volatile(0x00004608);
+    serial_println!("SIPI to APIC 255 sent! (if we get here, sending itself works)");
 }
-icr_high.write_volatile((255u32) << 24);
-icr_low.write_volatile(0x00004608);
-serial_println!("SIPI to APIC 255 sent! (if we get here, sending itself works)");
-
-
-}
-pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64, mapper: &mut impl Mapper<Size4KiB>, frame_allocator: &mut impl FrameAllocator<Size4KiB>) -> Result<(), &'static str> {
+pub unsafe fn start_ap_core(
+    core_id: u8,
+    apic_id: u8,
+    hhdm_offset: u64,
+    mapper: &mut impl Mapper<Size4KiB>,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) -> Result<(), &'static str> {
     use x86_64::registers::control::Cr3;
 
     serial_println!("Starting AP core {} with APIC ID {}", core_id, apic_id);
@@ -664,80 +666,79 @@ pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64, mapper: 
     }
 
     // Allocate a stack for this AP
-    let ap_stack = allocate_ap_stack(core_id);  // You need to implement this
-    
+    let ap_stack = allocate_ap_stack(core_id); // You need to implement this
+
     serial_println!("Core {}: Copying AP trampoline to memory", core_id);
     ap_trampoline::copy_to_memory(hhdm_offset);
 
     let phys_byte = core::ptr::read_volatile((0x8000 + hhdm_offset) as *const u8);
-let identity_byte = core::ptr::read_volatile(0x8000 as *const u8);
-serial_println!("Physical 0x8000: {:#x}", phys_byte);
-serial_println!("Identity 0x8000: {:#x}", identity_byte);
-serial_println!("Expected (first byte of trampoline): 0xFA (CLI)");
-    
+    let identity_byte = core::ptr::read_volatile(0x8000 as *const u8);
+    serial_println!("Physical 0x8000: {:#x}", phys_byte);
+    serial_println!("Identity 0x8000: {:#x}", identity_byte);
+    serial_println!("Expected (first byte of trampoline): 0xFA (CLI)");
+
     // Clear synchronization flags
     let magic_ptr = (MAGIC_OFFSET + hhdm_offset) as *mut u32;
     let ack_ptr = (ACK_OFFSET + hhdm_offset) as *mut u8;
     let done_ptr = (DONE_OFFSET + hhdm_offset) as *mut u8;
-    
+
     core::ptr::write_volatile(magic_ptr, 0);
     core::ptr::write_volatile(ack_ptr, 0);
     core::ptr::write_volatile(done_ptr, 0);
-    
+
     // Write GDT descriptor to trampoline
-    let gdt_addr: u32 = (GDT_OFFSET + hhdm_offset) as u32;  // Physical GDT address
+    let gdt_addr: u32 = (GDT_OFFSET + hhdm_offset) as u32; // Physical GDT address
     let gdtr_ptr = (GDT_OFFSET + hhdm_offset) as *mut u64;
     // GDT is at 0x80F0, so write descriptor: limit = 23, base = 0x80F0
-    core::ptr::write_volatile(gdtr_ptr, 0x80F0_0017_0000);  // base:16 | limit:16
-    
+    core::ptr::write_volatile(gdtr_ptr, 0x80F0_0017_0000); // base:16 | limit:16
+
     // Get CR3
     let (l4_table_frame, _flags) = Cr3::read();
     let cr3_phys = l4_table_frame.start_address().as_u64();
-    
+
     // Write CR3 and stack and entry point
     let cr3_ptr = (CR3_OFFSET + hhdm_offset) as *mut u64;
     let stack_ptr = (STACK_OFFSET + hhdm_offset) as *mut u64;
     let entry_ptr = (ENTRY_OFFSET + hhdm_offset) as *mut u64;
 
-
     // let stack_ptr = 0x9008 as *mut u64;  // Identity-mapped, no HHDM offset!
-    
+
     // // Hardcode the stack to 0x8F00 (physical, identity-mapped)
     // let temp_stack: u64 = 0x8F00;
     // core::ptr::write_volatile(stack_ptr, temp_stack);
-    
+
     // // VERIFY
     // let verify = core::ptr::read_volatile(stack_ptr);
     // serial_println!("Stack value at 0x9008: {:#x}", verify);
-    
+
     // if verify != 0x8F00 {
     //     serial_println!("FATAL: Cannot write stack pointer!");
     //     return Err("Stack write failed");
     // }
-    
+
     // Make sure 0x8F00 is accessible
     let stack_test = 0x8F00 as *mut u64;
     core::ptr::write_volatile(stack_test, 0xCAFEBABE_DEADBEEFu64);
     let stack_verify = core::ptr::read_volatile(stack_test);
-    
+
     if stack_verify != 0xCAFEBABE_DEADBEEFu64 {
         serial_println!("FATAL: Stack at 0x8F00 not writable!");
         serial_println!("Need to identity-map 0x8F00 first!");
         return Err("Stack not mapped");
     }
-    
+
     serial_println!("Stack at 0x8F00 verified writable!");
 
     // In start_ap_core, after writing stack_ptr:
-    
+
     core::ptr::write_volatile(cr3_ptr, cr3_phys);
     //core::ptr::write_volatile(stack_ptr, ap_stack.top());
     core::ptr::write_volatile(stack_ptr, 0x8F00);
     core::ptr::write_volatile(entry_ptr, ap_core_entry_point as u64);
-    
+
     let stack_value = core::ptr::read_volatile(stack_ptr);
     serial_println!("Stack pointer value at 0x9008: {:#x}", stack_value);
-    
+
     // Try to read from that stack address on the BSP
     let test_stack_ptr = stack_value as *const u64;
     serial_println!("Attempting to read from stack address...");
@@ -745,26 +746,28 @@ serial_println!("Expected (first byte of trampoline): 0xFA (CLI)");
     let test_read = core::ptr::read_volatile(test_stack_ptr);
     serial_println!("Successfully read from stack: {:#x}", test_read);
 
+    // // After setting up identity mapping, check if it's in the PML4 you're sharing:
+    // let (pml4_frame, _) = Cr3::read();
+    // let pml4_phys = pml4_frame.start_address().as_u64();
+    // let pml4_virt_ptr = (pml4_phys + hhdm_offset) as *const x86_64::structures::paging::page_table::PageTable;
 
-// // After setting up identity mapping, check if it's in the PML4 you're sharing:
-// let (pml4_frame, _) = Cr3::read();
-// let pml4_phys = pml4_frame.start_address().as_u64();
-// let pml4_virt_ptr = (pml4_phys + hhdm_offset) as *const x86_64::structures::paging::page_table::PageTable;
+    // // Read the PML4 entry for 0x8F00 (index = (0x8F00 >> 39) & 0x1FF = 0)
+    // let pml4_index = (0x8F00 >> 39) & 0x1FF;
+    // let pml4_entry = unsafe { &(pml4_virt_ptr)[pml4_index] };
+    // serial_println!("PML4[{}] for 0x8F00: {:#x}", pml4_index, pml4_entry.addr().as_u64());
 
-// // Read the PML4 entry for 0x8F00 (index = (0x8F00 >> 39) & 0x1FF = 0)
-// let pml4_index = (0x8F00 >> 39) & 0x1FF;
-// let pml4_entry = unsafe { &(pml4_virt_ptr)[pml4_index] };
-// serial_println!("PML4[{}] for 0x8F00: {:#x}", pml4_index, pml4_entry.addr().as_u64());
+    // if pml4_entry.is_unused() {
+    //     serial_println!("CRITICAL: 0x8F00 NOT in page tables! PML4 entry is empty!");
+    // }
 
-// if pml4_entry.is_unused() {
-//     serial_println!("CRITICAL: 0x8F00 NOT in page tables! PML4 entry is empty!");
-// }
-
-let (active_pml4_frame, _) = Cr3::read();
-serial_println!("3 Active PML4 frame: {:#x}", active_pml4_frame.start_address().as_u64());
+    let (active_pml4_frame, _) = Cr3::read();
+    serial_println!(
+        "3 Active PML4 frame: {:#x}",
+        active_pml4_frame.start_address().as_u64()
+    );
     // === DEBUG: Check LAPIC access ===
     serial_println!("=== LAPIC Debug ===");
-    
+
     let lapic = get_lapic_base_addr();
     serial_println!("LAPIC base pointer: {:p}", lapic);
 
@@ -773,74 +776,72 @@ serial_println!("3 Active PML4 frame: {:#x}", active_pml4_frame.start_address().
         (id_reg.read_volatile() >> 24) as u8
     };
 
-
-    
     serial_println!("=== APIC MSR Debug ===");
-let apic_base = unsafe { msr_read(0x1B) };
-serial_println!("IA32_APIC_BASE MSR: {:#018x}", apic_base);
-serial_println!("  Physical base: {:#x}", apic_base & 0xFFFFF000);
-serial_println!("  BSP (bit 8): {}", (apic_base >> 8) & 1);
-serial_println!("  x2APIC (bit 10): {}", (apic_base >> 10) & 1);
-serial_println!("  APIC Enable (bit 11): {}", (apic_base >> 11) & 1);
+    let apic_base = unsafe { msr_read(0x1B) };
+    serial_println!("IA32_APIC_BASE MSR: {:#018x}", apic_base);
+    serial_println!("  Physical base: {:#x}", apic_base & 0xFFFFF000);
+    serial_println!("  BSP (bit 8): {}", (apic_base >> 8) & 1);
+    serial_println!("  x2APIC (bit 10): {}", (apic_base >> 10) & 1);
+    serial_println!("  APIC Enable (bit 11): {}", (apic_base >> 11) & 1);
 
-if (apic_base >> 11) & 1 == 0 {
-    serial_println!("CRITICAL: APIC is DISABLED in MSR!");
-    serial_println!("Enabling it now...");
-    
-    // Enable APIC by setting bit 11
-    let new_base = apic_base | (1 << 11);
-    unsafe {
-        let low = new_base as u32;
-        let high = (new_base >> 32) as u32;
-        asm!(
-            "wrmsr",
-            in("ecx") 0x1Bu32,
-            in("eax") low,
-            in("edx") high,
-            options(nostack, preserves_flags)
-        );
+    if (apic_base >> 11) & 1 == 0 {
+        serial_println!("CRITICAL: APIC is DISABLED in MSR!");
+        serial_println!("Enabling it now...");
+
+        // Enable APIC by setting bit 11
+        let new_base = apic_base | (1 << 11);
+        unsafe {
+            let low = new_base as u32;
+            let high = (new_base >> 32) as u32;
+            asm!(
+                "wrmsr",
+                in("ecx") 0x1Bu32,
+                in("eax") low,
+                in("edx") high,
+                options(nostack, preserves_flags)
+            );
+        }
+
+        // Re-read to verify
+        let verify = unsafe { msr_read(0x1B) };
+        serial_println!("After enable: {:#018x}", verify);
+        serial_println!("APIC enabled: {}", (verify >> 11) & 1 == 1);
     }
-    
-    // Re-read to verify
-    let verify = unsafe { msr_read(0x1B) };
-    serial_println!("After enable: {:#018x}", verify);
-    serial_println!("APIC enabled: {}", (verify >> 11) & 1 == 1);
-}
-    
-    serial_println!("[BSP] Current LAPIC ID: {}", lapic_id); 
+
+    serial_println!("[BSP] Current LAPIC ID: {}", lapic_id);
 
     // Try reading LAPIC ID register (offset 0x20)
     let lapic_id_reg = lapic.offset(0x20 / 4);
     serial_println!("LAPIC ID reg pointer: {:p}", lapic_id_reg);
-    
+
     // Read LAPIC ID - if this crashes, LAPIC isn't mapped properly
     let lapic_id_val = lapic_id_reg.read_volatile();
     serial_println!("LAPIC ID value: {:#x}", lapic_id_val);
-    
+
     // Check ICR registers
     let icr_low = lapic.offset(0x300 / 4);
     let icr_high = lapic.offset(0x310 / 4);
     serial_println!("ICR low pointer: {:p}", icr_low);
     serial_println!("ICR high pointer: {:p}", icr_high);
-    
+
     // Read ICR low to check delivery status
     let icr_low_val = icr_low.read_volatile();
     serial_println!("ICR low initial value: {:#x}", icr_low_val);
     serial_println!("Delivery status: {}", (icr_low_val >> 12) & 1);
-    
+
     // === Try sending INIT ===
     serial_println!("Core {}: Sending INIT IPI to APIC ID {}", core_id, apic_id);
-    
+
     // Wait for delivery status to clear
     while (icr_low.read_volatile() & (1 << 12)) != 0 {
         core::hint::spin_loop();
     }
     serial_println!("ICR ready for INIT");
-    
+
     // Set destination
     icr_high.write_volatile((apic_id as u32) << 24);
     serial_println!("Set destination to APIC ID {}", apic_id);
-    
+
     serial_println!("Core {}: Sending INIT IPI to APIC ID {}", core_id, apic_id);
     // INIT IPI: Delivery Mode=101 (INIT), Physical, Level=Assert
     // Vector = 0 (INIT ignores vector)
@@ -849,40 +850,45 @@ if (apic_base >> 11) & 1 == 0 {
     //              Level
     //                   ^^^          Delivery Mode=101 (INIT)
     send_ipi(apic_id, 0x00004500);
-    
-    // 10ms delay (INIT requires 10ms)
-    for _ in 0..100000 { core::hint::spin_loop(); }
 
+    // 10ms delay (INIT requires 10ms)
+    for _ in 0..100000 {
+        core::hint::spin_loop();
+    }
 
     // De-assert INIT
     // 0x4500 with Level=0: 0x00004500 & !(1<<14) = 0x00004100 doesn't work
     // Actually for INIT de-assert, we send 0x4500 with Level=0
     // But simpler: just wait, the LAPIC handles this
     // Let's skip de-assert for now
-    
-    let phys_access = (0x8000 + hhdm_offset) as *const u8;
-let phys_byte = unsafe { core::ptr::read_volatile(phys_access) };
 
-// Virtual access (identity mapping should exist)
-let virt_access = 0x8000 as *const u8;
-// WARNING: This will page fault if not identity mapped!
-// But we can catch that...
-serial_println!("Attempting to read from virtual 0x8000 (tests identity mapping)...");
-// Try reading - if this crashes, identity mapping is missing
-let virt_byte = unsafe { core::ptr::read_volatile(virt_access) };
-serial_println!("Virtual 0x8000: {:#04x} (physical: {:#04x})", virt_byte, phys_byte);
+    let phys_access = (0x8000 + hhdm_offset) as *const u8;
+    let phys_byte = unsafe { core::ptr::read_volatile(phys_access) };
+
+    // Virtual access (identity mapping should exist)
+    let virt_access = 0x8000 as *const u8;
+    // WARNING: This will page fault if not identity mapped!
+    // But we can catch that...
+    serial_println!("Attempting to read from virtual 0x8000 (tests identity mapping)...");
+    // Try reading - if this crashes, identity mapping is missing
+    let virt_byte = unsafe { core::ptr::read_volatile(virt_access) };
+    serial_println!(
+        "Virtual 0x8000: {:#04x} (physical: {:#04x})",
+        virt_byte,
+        phys_byte
+    );
 
     // Send first SIPI
     serial_println!("Core {}: Sending first SIPI", core_id);
     let sipi_vector = (TRAMPOLINE_PHYS >> 12) as u32 & 0xFF;
-    
+
     // SIPI IPI: Delivery Mode=110 (Startup), Physical, Edge, De-assert
     // 0x4600 = 0b0100_0110_0000_0000
     //              ^^   ^^          Level=0 (Edge), Trigger=0 (Edge) for SIPI
     //                   ^^^         Delivery Mode=110 (Startup)
     // | vector: bits 0-7
     send_ipi(apic_id, 0x00004600 | sipi_vector);
-    
+
     // Wait for AP to start (200us timeout)
     let mut started = false;
     for _ in 0..10000 {
@@ -892,12 +898,12 @@ serial_println!("Virtual 0x8000: {:#04x} (physical: {:#04x})", virt_byte, phys_b
         }
         core::hint::spin_loop();
     }
-    
+
     if !started {
         // Send second SIPI
         serial_println!("Core {}: Sending second SIPI", core_id);
         send_ipi(apic_id, 0x00004600 | sipi_vector);
-        
+
         // Wait longer
         for _ in 0..100000000 {
             if core::ptr::read_volatile(magic_ptr) == 0x41505354 {
@@ -907,12 +913,12 @@ serial_println!("Virtual 0x8000: {:#04x} (physical: {:#04x})", virt_byte, phys_b
             core::hint::spin_loop();
         }
     }
-    
-        serial_println!("=== AP Core {} Diagnostic Data ===", core_id);
-    
+
+    serial_println!("=== AP Core {} Diagnostic Data ===", core_id);
+
     let diag_base = (0x8FF0 + hhdm_offset) as *const u16;
     let values: [u16; 16] = core::ptr::read_volatile(diag_base as *const [u16; 16]);
-    
+
     serial_println!("0x8FF0: 0x{:04X} (expected 0xDEAD)", values[0]);
     serial_println!("0x8FF2: 0x{:04X} (expected 0xBEEF)", values[1]);
     serial_println!("0x8FF4: 0x{:04X} (expected 0xCAFE)", values[2]);
@@ -926,14 +932,17 @@ serial_println!("Virtual 0x8000: {:#04x} (physical: {:#04x})", virt_byte, phys_b
     //let rsp_value = core::ptr::read_volatile(some_address_idk as *const u64);
     //serial_println!(" (RSP): 0x{:016X} (expected non-zero)", rsp_value);
     let entry_point_value = core::ptr::read_volatile(0x8FF8 as *const u64);
-    serial_println!("0x8FF8 (Entry Point): 0x{:016X} (expected non-zero)", entry_point_value);
+    serial_println!(
+        "0x8FF8 (Entry Point): 0x{:016X} (expected non-zero)",
+        entry_point_value
+    );
     serial_println!("actual ap_entry_point: {:#x}", ap_core_entry_point as u64);
-    
+
     // Check 64-bit marker
     let diag64 = (0x8F00 + hhdm_offset) as *const u32;
     let val64 = core::ptr::read_volatile(diag64);
     serial_println!("0x8F00: 0x{:08X} (expected 0x6464B007)", val64);
-    
+
     // Determine where we failed
     // if values[0] != 0xDEAD {
     //     serial_println!("AP NEVER STARTED - SIPI not received!");
@@ -950,25 +959,25 @@ serial_println!("Virtual 0x8000: {:#04x} (physical: {:#04x})", virt_byte, phys_b
     // } else if val64 == 0x6464B007 {
     //     serial_println!("SUCCESS! AP reached 64-bit mode!");
     // }
-    
 
     if !started {
         serial_println!("Core {}: AP failed to start after SIPIs", core_id);
         return Err("AP failed to start");
     }
-    
+
     // Acknowledge the AP
-    core::ptr::write_volatile(ack_ptr, 1);
+    core::ptr::write_volatile(ack_ptr, 0x1);
     serial_println!("Core {}: Sent acknowledgment to AP", core_id);
-    
+
     // Wait for AP to finish with trampoline
     for _ in 0..1000000 {
-        if core::ptr::read_volatile(done_ptr) == 1 {
+        if core::ptr::read_volatile(done_ptr as *const u16) == 0x2222 {
+            serial_println!("Core {}: AP signaled trampoline completion", core_id);
             break;
         }
         core::hint::spin_loop();
     }
-    
+
     serial_println!("Core {}: AP successfully started", core_id);
     Ok(())
 }
@@ -979,7 +988,7 @@ unsafe fn send_ipi(apic_id: u8, vector: u32) {
     let icr_high = lapic.offset(0x310 / 4);
 
     serial_println!("  send_ipi: apic_id={}, vector={:#x}", apic_id, vector);
-    
+
     // Wait for previous IPI to complete
     serial_println!("  send_ipi: waiting for idle...");
     let mut timeout = 0;
@@ -992,20 +1001,26 @@ unsafe fn send_ipi(apic_id: u8, vector: u32) {
         }
     }
     serial_println!("  send_ipi: ICR idle (timeout={})", timeout);
-    
+
     // Set destination APIC ID
     serial_println!("  send_ipi: setting destination to {}", apic_id);
     icr_high.write_volatile((apic_id as u32) << 24);
     serial_println!("  send_ipi: destination set");
 
+    // Verify it was set
+    let verify_high = icr_high.read_volatile();
+    serial_println!(
+        "ICR high after set: {:#x} (expected {:#x})",
+        verify_high,
+        (apic_id as u32) << 24
+    );
 
-// Verify it was set
-let verify_high = icr_high.read_volatile();
-serial_println!("ICR high after set: {:#x} (expected {:#x})", 
-    verify_high, (apic_id as u32) << 24);
-    
     // Send IPI
-    serial_println!("  send_ipi: writing {:#x} to ICR low at {:p}", vector, icr_low);
+    serial_println!(
+        "  send_ipi: writing {:#x} to ICR low at {:p}",
+        vector,
+        icr_low
+    );
     icr_low.write_volatile(vector);
     serial_println!("  send_ipi: write complete");
 }
@@ -1030,7 +1045,7 @@ serial_println!("ICR high after set: {:#x} (expected {:#x})",
 //     // Bit 12: Delivery Status (Read only, 0=Idle)
 //     // Bit 14: Level (0=De-assert, 1=Assert) - only for INIT
 //     // Bit 15: Trigger Mode (0=Edge, 1=Level)
-    
+
 //     icr_low.write_volatile(vector);
 // }
 ///  Send IPI to a specific APIC ID
