@@ -20,6 +20,17 @@ impl PixelShader for FlatColorPS {
     }
 }
 
+pub struct UVDebugPS;
+
+impl PixelShader for UVDebugPS {
+    fn run(&self, input: &mut PSIn) {
+        let u = input.attributes[0];
+        let v = input.attributes[1];
+        let color = Rgba8888UNORM::from_rgbf32(u, v, 0f32);
+        input.render_target[0] = color.to_u32_xrgb();
+    }
+}
+
 pub struct TextureSamplePS {
     pub texture_slot: usize,
 }
@@ -124,8 +135,8 @@ pub struct Basic3DVS {
     pub model_view_proj: Matrix4x4,
 }
 
-impl VertexShader for Basic3DVS {
-    fn run(&self, input: &VSIn, output: &mut VSOut, _uniforms: &[ConstantBuffer]) {
+impl VertexShader3D for Basic3DVS {
+    fn run(&self, input: &VSIn, output: &mut VSOut3D, _uniforms: &[ConstantBuffer]) {
         let vertex: &Vertex3D = unsafe { &*(input.vertex_data.as_ptr() as *const Vertex3D) };
 
         let pos = self.model_view_proj.mul_vec(vertex.pos);

@@ -1,6 +1,7 @@
 use crate::graphics::color::Rgba8888UNORM;
 use crate::graphics::pipeline::{
-    CullMode, PSIn, PipelineState, PipelineState3D, RenderMode, RenderTarget, VSIn, VSOut, VSOut3D, Vertex2D, Vertex3D
+    CullMode, PSIn, PipelineState, PipelineState3D, RenderMode, RenderTarget, VSIn, VSOut, VSOut3D,
+    Vertex2D, Vertex3D,
 };
 use crate::graphics::resources::{ConstantBuffer, DepthBuffer, RWBuffer, Texture};
 use crate::graphics::window::{WindowBackBuffer, WindowBuffer};
@@ -14,6 +15,8 @@ use core::simd::{Simd, cmp::SimdPartialOrd, f32x4, num::SimdFloat};
 
 const MIN_TRIANGLE_AREA: f32 = 0.0001;
 const IS_2D_Y_FLIPPED: bool = true;
+
+const LIGHT_3D_PIPE: bool = true;
 
 pub struct RenderContext {
     vertex_outputs: Vec<VSOut>,
@@ -70,6 +73,7 @@ impl RenderContext {
     }
 
     pub fn process_vertex_3d(&self, vertex: &Vertex3D, pipeline: &PipelineState3D) -> VSOut3D {
+        //TODO: optimize
         // SAFETY: Vertex3D is #[repr(C, align(16))] with no padding.
         // We're creating a byte slice view into the vertex's memory.
         let vertex_bytes = unsafe {
@@ -254,47 +258,47 @@ impl RenderContext {
                 let denom = a + b + g;
                 let inv_denom = f32x4::splat(1.0) / denom;
 
-                let u0 = f32x4::splat(v0.attributes[0]);
-                let u1 = f32x4::splat(v1.attributes[0]);
-                let u2 = f32x4::splat(v2.attributes[0]);
-                let u_interp = (a * u0 + b * u1 + g * u2) * inv_denom;
+                // let u0 = f32x4::splat(v0.attributes[0]);
+                // let u1 = f32x4::splat(v1.attributes[0]);
+                // let u2 = f32x4::splat(v2.attributes[0]);
+                // let u_interp = (a * u0 + b * u1 + g * u2) * inv_denom;
 
-                let v0_val = f32x4::splat(v0.attributes[1]);
-                let v1_val = f32x4::splat(v1.attributes[1]);
-                let v2_val = f32x4::splat(v2.attributes[1]);
-                let v_interp = (a * v0_val + b * v1_val + g * v2_val) * inv_denom;
+                // let v0_val = f32x4::splat(v0.attributes[1]);
+                // let v1_val = f32x4::splat(v1.attributes[1]);
+                // let v2_val = f32x4::splat(v2.attributes[1]);
+                // let v_interp = (a * v0_val + b * v1_val + g * v2_val) * inv_denom;
 
-                let nx0 = f32x4::splat(v0.extra[0]);
-                let nx1 = f32x4::splat(v1.extra[0]);
-                let nx2 = f32x4::splat(v2.extra[0]);
-                let nx_interp = (a * nx0 + b * nx1 + g * nx2) * inv_denom;
+                // let nx0 = f32x4::splat(v0.extra[0]);
+                // let nx1 = f32x4::splat(v1.extra[0]);
+                // let nx2 = f32x4::splat(v2.extra[0]);
+                // let nx_interp = (a * nx0 + b * nx1 + g * nx2) * inv_denom;
 
-                let ny0 = f32x4::splat(v0.extra[1]);
-                let ny1 = f32x4::splat(v1.extra[1]);
-                let ny2 = f32x4::splat(v2.extra[1]);
-                let ny_interp = (a * ny0 + b * ny1 + g * ny2) * inv_denom;
+                // let ny0 = f32x4::splat(v0.extra[1]);
+                // let ny1 = f32x4::splat(v1.extra[1]);
+                // let ny2 = f32x4::splat(v2.extra[1]);
+                // let ny_interp = (a * ny0 + b * ny1 + g * ny2) * inv_denom;
 
-                let nz0 = f32x4::splat(v0.extra[2]);
-                let nz1 = f32x4::splat(v1.extra[2]);
-                let nz2 = f32x4::splat(v2.extra[2]);
-                let nz_interp = (a * nz0 + b * nz1 + g * nz2) * inv_denom;
+                // let nz0 = f32x4::splat(v0.extra[2]);
+                // let nz1 = f32x4::splat(v1.extra[2]);
+                // let nz2 = f32x4::splat(v2.extra[2]);
+                // let nz_interp = (a * nz0 + b * nz1 + g * nz2) * inv_denom;
 
-                
-                let world_x0 = f32x4::splat(v0.world_position[0]);
-                let world_x1 = f32x4::splat(v1.world_position[0]);
-                let world_x2 = f32x4::splat(v2.world_position[0]);
-                let world_x_interp = (a * world_x0 + b * world_x1 + g * world_x2) * inv_denom;
+                // let world_x0 = f32x4::splat(v0.world_position[0]);
+                // let world_x1 = f32x4::splat(v1.world_position[0]);
+                // let world_x2 = f32x4::splat(v2.world_position[0]);
+                // let world_x_interp = (a * world_x0 + b * world_x1 + g * world_x2) * inv_denom;
 
-                let world_y0 = f32x4::splat(v0.world_position[1]);
-                let world_y1 = f32x4::splat(v1.world_position[1]);
-                let world_y2 = f32x4::splat(v2.world_position[1]);
-                let world_y_interp = (a * world_y0 + b * world_y1 + g * world_y2) * inv_denom;
+                // let world_y0 = f32x4::splat(v0.world_position[1]);
+                // let world_y1 = f32x4::splat(v1.world_position[1]);
+                // let world_y2 = f32x4::splat(v2.world_position[1]);
+                // let world_y_interp = (a * world_y0 + b * world_y1 + g * world_y2) * inv_denom;
 
-                let world_z0 = f32x4::splat(v0.world_position[2]);
-                let world_z1 = f32x4::splat(v1.world_position[2]);
-                let world_z2 = f32x4::splat(v2.world_position[2]);
-                let world_z_interp = (a * world_z0 + b * world_z1 + g * world_z2) * inv_denom;
+                // let world_z0 = f32x4::splat(v0.world_position[2]);
+                // let world_z1 = f32x4::splat(v1.world_position[2]);
+                // let world_z2 = f32x4::splat(v2.world_position[2]);
+                // let world_z_interp = (a * world_z0 + b * world_z1 + g * world_z2) * inv_denom;
 
+                //TODO: may be wrong
                 let z_interp = (f32x4::splat(z0) * a + f32x4::splat(z1) * b + f32x4::splat(z2) * g)
                     * inv_denom;
 
@@ -308,14 +312,20 @@ impl RenderContext {
                                 let idx = (screen_y * rt_width + screen_x) as usize;
 
                                 let pixel_attrs = f32x4::from_array([
-                                    u_interp[i],
-                                    v_interp[i],
-                                    nx_interp[i],
-                                    ny_interp[i],
+                                    //u_interp[i],
+                                    //v_interp[i],
+                                    //nx_interp[i],
+                                    //ny_interp[i],
+                                    0.0, 0.0, 0.0, 0.0,
                                 ]);
 
-                                let pixel_attrs_extra =
-                                    f32x4::from_array([nz_interp[i], world_x_interp[i], world_y_interp[i], world_z_interp[i]]);
+                                let pixel_attrs_extra = f32x4::from_array([
+                                    //nz_interp[i],
+                                    //world_x_interp[i],
+                                    //world_y_interp[i],
+                                    //world_z_interp[i],
+                                    0.0, 0.0, 0.0, 0.0,
+                                ]);
 
                                 let mut pixel_input = unsafe {
                                     PSIn {

@@ -3,7 +3,7 @@ use core::simd::f32x4;
 use crate::graphics::color::Rgba8888F;
 use crate::graphics::pipeline::{CullMode, DepthFunc, PipelineState3D, RenderTarget, Vertex3D};
 use crate::graphics::resources::{ConstantBuffer, DepthBuffer};
-use crate::graphics::shaders::{Basic3DVS, BlinnPhongPS, BlinnPhongVS, FlatColorPS};
+use crate::graphics::shaders::{Basic3DVS, BlinnPhongPS, BlinnPhongVS, FlatColorPS, UVDebugPS};
 use crate::graphics::transform::{Matrix4x4, create_perspective_matrix};
 use crate::graphics::{
     color::Rgba8888UNORM,
@@ -47,7 +47,7 @@ pub fn draw_shapes(framebuffer_target: &mut FrameBufferTarget) {
     }
 }
 
-pub fn render_shaders_2d(window_buffer: &Arc<WindowBuffer>, render_target: &mut RenderTarget<'_>) {
+pub fn render_shaders_2d_textured(window_buffer: &Arc<WindowBuffer>, render_target: &mut RenderTarget<'_>) {
     let mut ctx = RenderContext::new();
     const SIZE: u32 = 120;
     let texture_data = Vec::from(
@@ -138,6 +138,58 @@ pub fn render_shaders_2d(window_buffer: &Arc<WindowBuffer>, render_target: &mut 
     );
 
     window_buffer.present();
+}
+
+pub fn render_shaders_2d(window_buffer: &Arc<WindowBuffer>, render_target: &mut RenderTarget<'_>) {
+    let mut ctx = RenderContext::new();
+    const SIZE: u32 = 120;
+    
+    let pipeline = PipelineState {
+        vs: Box::new(PassThroughVS),
+        ps: Box::new(UVDebugPS),
+        vertex_layout: VertexLayout::new_2d(),
+        rasterizer_state: RasterizerState::default(),
+        blend_state: BlendState::default(),
+        render_mode: RenderMode::XY,
+        depth_enabled: false,
+        depth_write: false,
+        depth_func: DepthFunc::Less,
+    };
+
+    ctx.draw_rect_2d(
+        10.0,
+        10.0,
+        SIZE as f32,
+        SIZE as f32,
+        render_target,
+        &pipeline,
+    );
+
+    // ctx.draw_rect_2d(
+    //     25.0,
+    //     25.0,
+    //     SIZE as f32,
+    //     SIZE as f32,
+    //     render_target,
+    //     &pipeline,
+    // );
+
+    // ctx.draw_triangle_2d(
+    //     20.0 + 40.0,
+    //     50.0 + 40.0,
+    //     0.0,
+    //     0.0,
+    //     50.0 + 40.0,
+    //     0.0 + 40.0,
+    //     1.0,
+    //     0.0,
+    //     80.0 + 40.0,
+    //     50.0 + 40.0,
+    //     0.5,
+    //     1.0,
+    //     render_target,
+    //     &pipeline,
+    // );
 }
 
 pub fn render_shaders_3d(window_buffer: &Arc<WindowBuffer>) {
@@ -315,7 +367,7 @@ pub fn render_shaders_3d_loop(
 
         //ps: Box::new(BlinnPhongPS { light_dir_intensity: f32x4::from_array([0.0, 0.5, 0.5, 1.0]), albedo: Rgba8888F::RED }),
 
-        //ps: Box::new(BlinnPhongPS { light_dir_intensity: f32x4::from_array([0.3, -0.5, -1.0, 1.0]), albedo: Rgba8888F::from_rgbf32(1.0, 0.0, 0.0), specular_color: Rgba8888F::WHITE, 
+        // ps: Box::new(BlinnPhongPS { light_dir_intensity: f32x4::from_array([0.3, -0.5, -1.0, 1.0]), albedo: Rgba8888F::from_rgbf32(1.0, 0.0, 0.0), specular_color: Rgba8888F::WHITE, 
         //    shininess: 16.0, ambient_color: Rgba8888F::from_rgbf32(0.1, 0.1, 0.1), camera_pos: camera_pos }),
 
         ps: Box::new(FlatColorPS { color: Rgba8888UNORM::from_rgbf32(0.8, 0.2, 0.2) }),
@@ -340,6 +392,4 @@ pub fn render_shaders_3d_loop(
         &mut depth_buffer,
         &pipeline,
     );
-
-    window_buffer.present();
 }

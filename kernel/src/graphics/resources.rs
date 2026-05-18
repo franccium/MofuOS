@@ -93,7 +93,6 @@ impl RWBuffer {
     }
 }
 
-
 pub struct DepthBuffer {
     pub width: u32,
     pub height: u32,
@@ -112,7 +111,7 @@ impl DepthBuffer {
     #[inline(always)]
     pub fn test(&mut self, x: u32, y: u32, val: f32) -> bool {
         let idx = (y * self.width + x) as usize;
-        return val < self.data[idx]
+        return val < self.data[idx];
     }
 
     #[inline(always)]
@@ -121,8 +120,7 @@ impl DepthBuffer {
         if val < self.data[idx] {
             self.data[idx] = val;
             true
-        }
-        else {
+        } else {
             false
         }
     }
