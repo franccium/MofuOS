@@ -658,7 +658,7 @@ pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64, mapper: 
 
     test_lapic_ipi();
 
-    for addr in (0x8FF0..0x8F10).step_by(2) {
+    for addr in (0x8F100..0x8FFFF).step_by(2) {
         let ptr = (addr + hhdm_offset) as *mut u16;
         core::ptr::write_volatile(ptr, 0);
     }
@@ -702,37 +702,37 @@ serial_println!("Expected (first byte of trampoline): 0xFA (CLI)");
 
     // let stack_ptr = 0x9008 as *mut u64;  // Identity-mapped, no HHDM offset!
     
-    // // Hardcode the stack to 0x7000 (physical, identity-mapped)
-    // let temp_stack: u64 = 0x7000;
+    // // Hardcode the stack to 0x8F00 (physical, identity-mapped)
+    // let temp_stack: u64 = 0x8F00;
     // core::ptr::write_volatile(stack_ptr, temp_stack);
     
     // // VERIFY
     // let verify = core::ptr::read_volatile(stack_ptr);
     // serial_println!("Stack value at 0x9008: {:#x}", verify);
     
-    // if verify != 0x7000 {
+    // if verify != 0x8F00 {
     //     serial_println!("FATAL: Cannot write stack pointer!");
     //     return Err("Stack write failed");
     // }
     
-    // Make sure 0x7000 is accessible
-    let stack_test = 0x7000 as *mut u64;
+    // Make sure 0x8F00 is accessible
+    let stack_test = 0x8F00 as *mut u64;
     core::ptr::write_volatile(stack_test, 0xCAFEBABE_DEADBEEFu64);
     let stack_verify = core::ptr::read_volatile(stack_test);
     
     if stack_verify != 0xCAFEBABE_DEADBEEFu64 {
-        serial_println!("FATAL: Stack at 0x7000 not writable!");
-        serial_println!("Need to identity-map 0x7000 first!");
+        serial_println!("FATAL: Stack at 0x8F00 not writable!");
+        serial_println!("Need to identity-map 0x8F00 first!");
         return Err("Stack not mapped");
     }
     
-    serial_println!("Stack at 0x7000 verified writable!");
+    serial_println!("Stack at 0x8F00 verified writable!");
 
     // In start_ap_core, after writing stack_ptr:
     
     core::ptr::write_volatile(cr3_ptr, cr3_phys);
     //core::ptr::write_volatile(stack_ptr, ap_stack.top());
-    core::ptr::write_volatile(stack_ptr, 0x7000);
+    core::ptr::write_volatile(stack_ptr, 0x8F00);
     core::ptr::write_volatile(entry_ptr, ap_core_entry_point as u64);
     
     let stack_value = core::ptr::read_volatile(stack_ptr);
@@ -751,13 +751,13 @@ serial_println!("Expected (first byte of trampoline): 0xFA (CLI)");
 // let pml4_phys = pml4_frame.start_address().as_u64();
 // let pml4_virt_ptr = (pml4_phys + hhdm_offset) as *const x86_64::structures::paging::page_table::PageTable;
 
-// // Read the PML4 entry for 0x7000 (index = (0x7000 >> 39) & 0x1FF = 0)
-// let pml4_index = (0x7000 >> 39) & 0x1FF;
+// // Read the PML4 entry for 0x8F00 (index = (0x8F00 >> 39) & 0x1FF = 0)
+// let pml4_index = (0x8F00 >> 39) & 0x1FF;
 // let pml4_entry = unsafe { &(pml4_virt_ptr)[pml4_index] };
-// serial_println!("PML4[{}] for 0x7000: {:#x}", pml4_index, pml4_entry.addr().as_u64());
+// serial_println!("PML4[{}] for 0x8F00: {:#x}", pml4_index, pml4_entry.addr().as_u64());
 
 // if pml4_entry.is_unused() {
-//     serial_println!("CRITICAL: 0x7000 NOT in page tables! PML4 entry is empty!");
+//     serial_println!("CRITICAL: 0x8F00 NOT in page tables! PML4 entry is empty!");
 // }
 
 let (active_pml4_frame, _) = Cr3::read();
@@ -899,7 +899,7 @@ serial_println!("Virtual 0x8000: {:#04x} (physical: {:#04x})", virt_byte, phys_b
         send_ipi(apic_id, 0x00004600 | sipi_vector);
         
         // Wait longer
-        for _ in 0..1000000 {
+        for _ in 0..100000000 {
             if core::ptr::read_volatile(magic_ptr) == 0x41505354 {
                 started = true;
                 break;
@@ -923,8 +923,11 @@ serial_println!("Virtual 0x8000: {:#04x} (physical: {:#04x})", virt_byte, phys_b
     serial_println!("0x8FF0: 0x{:04X} (expected 0xDD0E)", values[7]);
     serial_println!("0x8FFE: 0x{:04X} (expected 0xDC0E)", values[8]);
 
-    let rsp_value = core::ptr::read_volatile(0x8FF0 as *const u64);
-    serial_println!("0x8FF0 (RSP): 0x{:016X} (expected non-zero)", rsp_value);
+    //let rsp_value = core::ptr::read_volatile(some_address_idk as *const u64);
+    //serial_println!(" (RSP): 0x{:016X} (expected non-zero)", rsp_value);
+    let entry_point_value = core::ptr::read_volatile(0x8FF8 as *const u64);
+    serial_println!("0x8FF8 (Entry Point): 0x{:016X} (expected non-zero)", entry_point_value);
+    serial_println!("actual ap_entry_point: {:#x}", ap_core_entry_point as u64);
     
     // Check 64-bit marker
     let diag64 = (0x8F00 + hhdm_offset) as *const u32;
@@ -932,30 +935,31 @@ serial_println!("Virtual 0x8000: {:#04x} (physical: {:#04x})", virt_byte, phys_b
     serial_println!("0x8F00: 0x{:08X} (expected 0x6464B007)", val64);
     
     // Determine where we failed
-    if values[0] != 0xDEAD {
-        serial_println!("AP NEVER STARTED - SIPI not received!");
-        return Err("AP failed to start - no execution");
-    } else if values[3] == 0 {
-        serial_println!("AP crashed in 16-bit mode (GDT or CR0)");
-    } else if values[4] == 0 {
-        serial_println!("AP crashed entering 32-bit mode");
-    } else if values[5] == 0 {
-        serial_println!("AP crashed loading CR3");
-    } else if values[6] == 0 {
-        serial_println!("AP crashed enabling long mode");
-    } else if values[7] == 0 {
-        serial_println!("AP crashed enabling paging (likely missing identity mapping)");
-    } else if val64 == 0x6464B007 {
-        serial_println!("SUCCESS! AP reached 64-bit mode!");
-    }
+    // if values[0] != 0xDEAD {
+    //     serial_println!("AP NEVER STARTED - SIPI not received!");
+    // } else if values[3] == 0 {
+    //     serial_println!("AP crashed in 16-bit mode (GDT or CR0)");
+    // } else if values[4] == 0 {
+    //     serial_println!("AP crashed entering 32-bit mode");
+    // } else if values[5] == 0 {
+    //     serial_println!("AP crashed loading CR3");
+    // } else if values[6] == 0 {
+    //     serial_println!("AP crashed enabling long mode");
+    // } else if values[7] == 0 {
+    //     serial_println!("AP crashed enabling paging (likely missing identity mapping)");
+    // } else if val64 == 0x6464B007 {
+    //     serial_println!("SUCCESS! AP reached 64-bit mode!");
+    // }
     
 
     if !started {
+        serial_println!("Core {}: AP failed to start after SIPIs", core_id);
         return Err("AP failed to start");
     }
     
     // Acknowledge the AP
     core::ptr::write_volatile(ack_ptr, 1);
+    serial_println!("Core {}: Sent acknowledgment to AP", core_id);
     
     // Wait for AP to finish with trampoline
     for _ in 0..1000000 {
@@ -1050,6 +1054,7 @@ serial_println!("ICR high after set: {:#x} (expected {:#x})",
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_core_entry_point() -> ! {
     // This runs on the AP core
+    serial_println!("SOME AP CORE ACTUALLY STARTED");
     let core_id = get_current_core_id();
     serial_println!("AP Core {}: Started successfully", core_id);
 

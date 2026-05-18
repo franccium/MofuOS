@@ -87,36 +87,52 @@ ap_long_mode:
     mov %ax, %es
     mov %ax, %ss
 
+    xor %rdi, %rdi
 
     
     # We're in 64-bit mode!
-    movl $0x6464B007, 0x8F00
+    #movl $0x6464B007, 0x8F00
 
-
+wait_for_entry:
+    mov $0x9010, %edi
+    mov (%rdi), %rax
+    test %rax, %rax                # Check if entry point is non-zero
+    jz wait_for_entry              # Wait for BSP to set it
+    
+    # Also verify stack is set up
+    mov $0x9008, %edi
+    mov (%rdi), %rsp
+    test %rsp, %rsp
+    jz wait_for_entry              # Wait for valid stack
+    
     
     # Set up stack
     mov $0x9008, %edi
     mov (%rdi), %rsp
 
     #movq %rsp, 0x8FF0
-    jmp .
-    
+    # try to write into stack
+    movq $0xBEEF, (%rsp)
+
     # Clear RFLAGS
     pushq $0
     popfq
+    #jmp .
     
     # Signal we're ready to jump
-    movl $0xB007B007, 0x8F04
+    # MAGIC_OFFSET == 0x8FF0
+    movl $0x41505354, 0x8FF0
     
     # Jump to Rust entry
+    xor %rdi, %rdi
     mov $0x9010, %edi
     mov (%rdi), %rax
 
-
-    
     # Signal the jump target
-    movq %rax, 0x8F08
-    
+    movq %rax, 0x8FF8
+
+    jmp .
+
     jmp *%rax
     
     # Should never get here
