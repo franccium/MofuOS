@@ -369,6 +369,9 @@ pub unsafe fn map_local_apic_for_current_core(
 ) -> *mut u32 {
     // Read the physical address from MSR
     let lapic_phys = get_lapic_base_addr_phys();
+    use x86_64::registers::control::Cr3;
+    let (active_pml4_frame, _) = Cr3::read();
+    serial_println!("2 Active PML4 frame: {:#x}", active_pml4_frame.start_address().as_u64());
 
     serial_println!("map_local_apic_for_current_core: {:#x}", lapic_phys);
 

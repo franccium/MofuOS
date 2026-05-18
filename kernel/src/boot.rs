@@ -10,6 +10,7 @@ use limine::{
 };
 use spin::Mutex;
 use spin::Once;
+use x86_64::VirtAddr;
 use crate::main;
 use kernel::{memory::allocator, init_globals, interrupts, memory, serial_println, util::cpuinfo::{init_cpu_info}, boot_info::{BOOT_INFO, BootInfo}};
 
@@ -153,8 +154,35 @@ unsafe extern "C" fn kmain() -> ! {
     )
     .expect("Failed to map ACPI regions");
 
+
+use x86_64::registers::control::Cr3;
+let (active_pml4_frame, _) = Cr3::read();
+serial_println!("1 Active PML4 frame: {:#x}", active_pml4_frame.start_address().as_u64());
+
     memory::memory::setup_ap_trampoline_mapping(&mut mapper, &mut frame_allocator);
-    cpuinfo::init_ap_support(&mut mapper, &mut frame_allocator);
+    {
+
+        // Get the currently active PML4
+        let (active_pml4_frame, _) = Cr3::read();
+        let active_pml4_phys = active_pml4_frame.start_address().as_u64();
+        let active_pml4_virt = active_pml4_phys + hhdm_offset;
+
+        serial_println!("Active PML4 physical: {:#x}", active_pml4_phys);
+        serial_println!("Active PML4 virtual: {:#x}", active_pml4_virt);
+
+        // Your mapper MUST point to THIS PML4!
+        // Create a mapper that points to the active PML4:
+        let mut active_mapper = unsafe { 
+            x86_64::structures::paging::mapper::OffsetPageTable::new(
+                &mut *(active_pml4_virt as *mut x86_64::structures::paging::page_table::PageTable),
+                VirtAddr::new(hhdm_offset),
+            )
+        };
+
+        // NOW initialize with THIS mapper:
+        cpuinfo::init_ap_support(&mut active_mapper, &mut frame_allocator);
+       // cpuinfo::init_ap_support(&mut mapper, &mut frame_allocator);
+    }
 
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");

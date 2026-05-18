@@ -96,6 +96,21 @@ pub fn setup_ap_trampoline_mapping(
         .unwrap()
         .flush();
     }
+
+
+    let stack_page = Page::<Size4KiB>::containing_address(VirtAddr::new(0x7000));
+    let stack_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(0x7000));
+    
+    unsafe {page_table.map_to(
+        stack_page,
+        stack_frame,
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+        frame_allocator,
+    )}
+    .expect("Failed to map 0x7000")
+    .flush();
+    
+    serial_println!("Identity-mapped 0x7000 for AP stack");
 }
 
 pub fn map_acpi_regions(

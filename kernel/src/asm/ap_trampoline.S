@@ -31,6 +31,7 @@ ap_trampoline_start:
 .code32
 ap_protected_mode:
     movw $0xD0D0, 0x8FF8   # In 32-bit mode
+
     
     # Set up data segments with 32-bit data segment (0x10)
     mov $0x10, %ax
@@ -45,6 +46,11 @@ ap_protected_mode:
     movl %eax, %cr4
     movw $0xDA1E, 0x8FFA   # PAE enabled
     
+    movl $0x9000, %edi
+    movl (%edi), %eax
+    movl %eax, 0x8FFA    # Write CR3 value before loading
+    movl %eax, %cr3
+
     # Load CR3
     movl $0x9000, %edi
     movl (%edi), %eax
@@ -57,12 +63,16 @@ ap_protected_mode:
     orl $0x100, %eax        # Set LME (Long Mode Enable)
     wrmsr
     movw $0xDC0E, 0x8FFE   # Long mode enabled
+
+
     
     # Enable paging (this activates long mode since LME is set)
     movl %cr0, %eax
     orl $0x80000000, %eax   # Set PG (Paging)
     movl %eax, %cr0
     movw $0xDD0E, 0x8FF0   # Paging enabled!
+
+
     
     # Now we're in compatibility mode (32-bit with paging)
     # Far jump to 64-bit code using 64-bit code segment (0x18)
@@ -75,14 +85,20 @@ ap_long_mode:
     mov %ax, %ds
     mov %ax, %es
     mov %ax, %ss
+
+
     
     # We're in 64-bit mode!
     movl $0x6464B007, 0x8F00
+
+
     
     # Set up stack
     mov $0x9008, %edi
     mov (%rdi), %rsp
-    
+
+    movq %rsp, 0x8FF0
+
     # Clear RFLAGS
     pushq $0
     popfq
@@ -93,6 +109,8 @@ ap_long_mode:
     # Jump to Rust entry
     mov $0x9010, %edi
     mov (%rdi), %rax
+
+
     
     # Signal the jump target
     movq %rax, 0x8F08

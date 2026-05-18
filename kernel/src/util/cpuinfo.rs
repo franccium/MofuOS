@@ -515,12 +515,33 @@ const MAX_AP_CORES: u32 = 4; // Support up to 16 AP cores
 
 // Virtual address where AP stacks will be mapped
 // Make sure this doesn't conflict with your kernel's memory layout!
-const AP_STACK_BASE: u64 = 0xFFFF_BC90_1000_0000; // Example address
+const AP_STACK_BASE: u64 = 0x80000000; // Example address
 
 pub fn init_ap_support(
     page_table: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) {
+
+// let stack_base = VirtAddr::new(0x80000000);
+    
+//     // Initialize and map
+//     initialize_ap_stack_memory(
+//         page_table,
+//         frame_allocator,
+//         stack_base,
+//         128 * 1024,
+//         4,
+//     ).expect("Failed to map AP stack memory");
+    
+//     // CRITICAL: Verify the mapping works from the BSP
+//     let test_addr = 0x80020000 as *const u64;
+//     unsafe {
+//         match core::ptr::read_volatile(test_addr) {
+//             val => serial_println!("AP stack test read: {:#x}", val),
+//         }
+//     }
+//     serial_println!("AP stack mapping verified!");
+
     // Initialize stack allocator
     ApStackAllocator::init(
         VirtAddr::new(AP_STACK_BASE),
@@ -608,6 +629,26 @@ let apic_base = unsafe { msr_read(0x1B) }; // IA32_APIC_BASE MSR
 let x2apic_enabled = (apic_base >> 10) & 1 == 1;  // Bit 10 is x2APIC enable
 serial_println!("x2APIC enabled: {}", x2apic_enabled);
 
+// Check number of local APICs
+let lapic_id_reg = lapic.offset(0x20 / 4);
+let my_id = (lapic_id_reg.read_volatile() >> 24) as u8;
+
+// Check LAPIC version register to see max LAPIC ID
+let version_reg = lapic.offset(0x30 / 4);
+let version = version_reg.read_volatile();
+let max_lvt = (version >> 16) & 0xFF;
+serial_println!("LAPIC version: {:#x}", version);
+serial_println!("Max LVT entry: {}", max_lvt);
+
+// Try sending SIPI to APIC ID 255 (should not exist)
+serial_println!("Testing SIPI to non-existent APIC 255...");
+while (icr_low.read_volatile() & (1 << 12)) != 0 {
+    core::hint::spin_loop();
+}
+icr_high.write_volatile((255u32) << 24);
+icr_low.write_volatile(0x00004608);
+serial_println!("SIPI to APIC 255 sent! (if we get here, sending itself works)");
+
 
 }
 pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64, mapper: &mut impl Mapper<Size4KiB>, frame_allocator: &mut impl FrameAllocator<Size4KiB>) -> Result<(), &'static str> {
@@ -651,11 +692,70 @@ pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64, mapper: 
     let cr3_ptr = (CR3_OFFSET + hhdm_offset) as *mut u64;
     let stack_ptr = (STACK_OFFSET + hhdm_offset) as *mut u64;
     let entry_ptr = (ENTRY_OFFSET + hhdm_offset) as *mut u64;
+
+
+    // let stack_ptr = 0x9008 as *mut u64;  // Identity-mapped, no HHDM offset!
+    
+    // // Hardcode the stack to 0x7000 (physical, identity-mapped)
+    // let temp_stack: u64 = 0x7000;
+    // core::ptr::write_volatile(stack_ptr, temp_stack);
+    
+    // // VERIFY
+    // let verify = core::ptr::read_volatile(stack_ptr);
+    // serial_println!("Stack value at 0x9008: {:#x}", verify);
+    
+    // if verify != 0x7000 {
+    //     serial_println!("FATAL: Cannot write stack pointer!");
+    //     return Err("Stack write failed");
+    // }
+    
+    // Make sure 0x7000 is accessible
+    let stack_test = 0x7000 as *mut u64;
+    core::ptr::write_volatile(stack_test, 0xCAFEBABE_DEADBEEFu64);
+    let stack_verify = core::ptr::read_volatile(stack_test);
+    
+    if stack_verify != 0xCAFEBABE_DEADBEEFu64 {
+        serial_println!("FATAL: Stack at 0x7000 not writable!");
+        serial_println!("Need to identity-map 0x7000 first!");
+        return Err("Stack not mapped");
+    }
+    
+    serial_println!("Stack at 0x7000 verified writable!");
+
+    // In start_ap_core, after writing stack_ptr:
     
     core::ptr::write_volatile(cr3_ptr, cr3_phys);
-    core::ptr::write_volatile(stack_ptr, ap_stack.top());
+    //core::ptr::write_volatile(stack_ptr, ap_stack.top());
+    core::ptr::write_volatile(stack_ptr, 0x7000);
     core::ptr::write_volatile(entry_ptr, ap_core_entry_point as u64);
+    
+    let stack_value = core::ptr::read_volatile(stack_ptr);
+    serial_println!("Stack pointer value at 0x9008: {:#x}", stack_value);
+    
+    // Try to read from that stack address on the BSP
+    let test_stack_ptr = stack_value as *const u64;
+    serial_println!("Attempting to read from stack address...");
+    // This will page fault on BSP if the stack isn't mapped!
+    let test_read = core::ptr::read_volatile(test_stack_ptr);
+    serial_println!("Successfully read from stack: {:#x}", test_read);
 
+
+// // After setting up identity mapping, check if it's in the PML4 you're sharing:
+// let (pml4_frame, _) = Cr3::read();
+// let pml4_phys = pml4_frame.start_address().as_u64();
+// let pml4_virt_ptr = (pml4_phys + hhdm_offset) as *const x86_64::structures::paging::page_table::PageTable;
+
+// // Read the PML4 entry for 0x7000 (index = (0x7000 >> 39) & 0x1FF = 0)
+// let pml4_index = (0x7000 >> 39) & 0x1FF;
+// let pml4_entry = unsafe { &(pml4_virt_ptr)[pml4_index] };
+// serial_println!("PML4[{}] for 0x7000: {:#x}", pml4_index, pml4_entry.addr().as_u64());
+
+// if pml4_entry.is_unused() {
+//     serial_println!("CRITICAL: 0x7000 NOT in page tables! PML4 entry is empty!");
+// }
+
+let (active_pml4_frame, _) = Cr3::read();
+serial_println!("3 Active PML4 frame: {:#x}", active_pml4_frame.start_address().as_u64());
     // === DEBUG: Check LAPIC access ===
     serial_println!("=== LAPIC Debug ===");
     
@@ -666,7 +766,40 @@ pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64, mapper: 
         let id_reg = lapic.offset(0x20 / 4);
         (id_reg.read_volatile() >> 24) as u8
     };
+
+
     
+    serial_println!("=== APIC MSR Debug ===");
+let apic_base = unsafe { msr_read(0x1B) };
+serial_println!("IA32_APIC_BASE MSR: {:#018x}", apic_base);
+serial_println!("  Physical base: {:#x}", apic_base & 0xFFFFF000);
+serial_println!("  BSP (bit 8): {}", (apic_base >> 8) & 1);
+serial_println!("  x2APIC (bit 10): {}", (apic_base >> 10) & 1);
+serial_println!("  APIC Enable (bit 11): {}", (apic_base >> 11) & 1);
+
+if (apic_base >> 11) & 1 == 0 {
+    serial_println!("CRITICAL: APIC is DISABLED in MSR!");
+    serial_println!("Enabling it now...");
+    
+    // Enable APIC by setting bit 11
+    let new_base = apic_base | (1 << 11);
+    unsafe {
+        let low = new_base as u32;
+        let high = (new_base >> 32) as u32;
+        asm!(
+            "wrmsr",
+            in("ecx") 0x1Bu32,
+            in("eax") low,
+            in("edx") high,
+            options(nostack, preserves_flags)
+        );
+    }
+    
+    // Re-read to verify
+    let verify = unsafe { msr_read(0x1B) };
+    serial_println!("After enable: {:#018x}", verify);
+    serial_println!("APIC enabled: {}", (verify >> 11) & 1 == 1);
+}
     
     serial_println!("[BSP] Current LAPIC ID: {}", lapic_id); 
 
@@ -721,6 +854,18 @@ pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64, mapper: 
     // But simpler: just wait, the LAPIC handles this
     // Let's skip de-assert for now
     
+    let phys_access = (0x8000 + hhdm_offset) as *const u8;
+let phys_byte = unsafe { core::ptr::read_volatile(phys_access) };
+
+// Virtual access (identity mapping should exist)
+let virt_access = 0x8000 as *const u8;
+// WARNING: This will page fault if not identity mapped!
+// But we can catch that...
+serial_println!("Attempting to read from virtual 0x8000 (tests identity mapping)...");
+// Try reading - if this crashes, identity mapping is missing
+let virt_byte = unsafe { core::ptr::read_volatile(virt_access) };
+serial_println!("Virtual 0x8000: {:#04x} (physical: {:#04x})", virt_byte, phys_byte);
+
     // Send first SIPI
     serial_println!("Core {}: Sending first SIPI", core_id);
     let sipi_vector = (TRAMPOLINE_PHYS >> 12) as u32 & 0xFF;
@@ -765,11 +910,15 @@ pub unsafe fn start_ap_core(core_id: u8, apic_id: u8, hhdm_offset: u64, mapper: 
     serial_println!("0x8FF0: 0x{:04X} (expected 0xDEAD)", values[0]);
     serial_println!("0x8FF2: 0x{:04X} (expected 0xBEEF)", values[1]);
     serial_println!("0x8FF4: 0x{:04X} (expected 0xCAFE)", values[2]);
-    serial_println!("0x8FF6: 0x{:04X} (expected 0xD0D0)", values[3]);
-    serial_println!("0x8FF8: 0x{:04X} (expected 0xDA1E)", values[4]);
-    serial_println!("0x8FFA: 0x{:04X} (expected 0xDB0E)", values[5]);
-    serial_println!("0x8FFC: 0x{:04X} (expected 0xDC0E)", values[6]);
-    serial_println!("0x8FFE: 0x{:04X} (expected 0xDD0E)", values[7]);
+    serial_println!("0x8FF6: 0x{:04X} (expected 0xC001)", values[3]);
+    serial_println!("0x8FF8: 0x{:04X} (expected 0xD0D0)", values[4]);
+    serial_println!("0x8FFA: 0x{:04X} (expected 0xDA1E)", values[5]);
+    serial_println!("0x8FFC: 0x{:04X} (expected 0xDB0E)", values[6]);
+    serial_println!("0x8FF0: 0x{:04X} (expected 0xDD0E)", values[7]);
+    serial_println!("0x8FFE: 0x{:04X} (expected 0xDC0E)", values[8]);
+
+    let rsp_value = core::ptr::read_volatile(0x8FF0 as *const u64);
+    serial_println!("0x8FF0 (RSP): 0x{:016X} (expected non-zero)", rsp_value);
     
     // Check 64-bit marker
     let diag64 = (0x8F00 + hhdm_offset) as *const u32;
