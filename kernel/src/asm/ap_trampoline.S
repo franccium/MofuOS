@@ -45,18 +45,20 @@ ap_protected_mode:
     orl $0x20, %eax
     movl %eax, %cr4
     movw $0xDA1E, 0x8FFA   # PAE enabled
+
+wait_for_cr3_written:
+    mov $0x9020, %edi
+    mov (%edi), %eax
+    test %eax, %eax
+    jz wait_for_cr3_written
     
     #TODO: check whether CR3 is correct here
     movl $0x9000, %edi
     movl %edi, 0x8FF4
     movl (%edi), %eax
-    movl %eax, 0x8FFA    # Write CR3 value before loading
+    movl %eax, 0x9060    # Write CR3 value before loading
     movl %eax, %cr3
 
-    # Load CR3
-    movl $0x9000, %edi
-    movl (%edi), %eax
-    movl %eax, %cr3
     movw $0xDB0E, 0x8FFC   # CR3 loaded
     
     # Enable long mode in EFER
@@ -82,11 +84,22 @@ ap_protected_mode:
     
 .code64
 ap_long_mode:
-    # Now in full 64-bit mode
-    movw $0x10, %ax         # Still using data segment 0x10
+    mov $0x9000, %rdi
+    mov (%rdi), %rax       # Read full 64-bit CR3 value
+    mov %rax, %cr3         # Reload CR3 - this flushes TLB completely
+    
+    # Now set up segments
+    movw $0x10, %ax
     mov %ax, %ds
     mov %ax, %es
     mov %ax, %ss
+
+    # CRITICAL: Reload CR3 AGAIN after segment setup to ensure consistency
+    mov $0x9000, %rdi
+    mov (%rdi), %rax
+    mov %rax, %cr3
+
+    movq %rax, 0x9060    # Write CR3 value before loading
 
     xor %rdi, %rdi
 
@@ -113,12 +126,12 @@ wait_for_bsp_ack:
     test %rax, %rax
     jz wait_for_bsp_ack
     
-    # Get stack from BSP
-    mov $0x9008, %edi
-    mov (%rdi), %rsp
-    test %rsp, %rsp
-    jz wait_for_bsp_ack
-    
+    movabs $0x9008, %rdi
+    movq (%rdi), %rsp
+    movq %rsp, 0x9068    # Write CR3 value before loading
+
+    #jmp .
+
     # Clear RFLAGS
     pushq $0
     popfq

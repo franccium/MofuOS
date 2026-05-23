@@ -7,11 +7,12 @@ use core::fmt::Write;
 use embedded_graphics::prelude::*;
 use kernel::data_structures::vector::Vec;
 use kernel::process::{ElfLoadError, ElfLoadInfo, elf_loader};
-use kernel::util::cpuinfo::SECRET_MESSAGE_OFFSET;
+use kernel::util::cpuinfo::{AP_CORE_CR3_MESSAGE_OFFSET, SECRET_MESSAGE_OFFSET, AP_CORE_APIC_ID_MESSAGE_OFFSET};
 use kernel::{
     filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
     programs::theophe::Theophe, serial_println,
 };
+use x86_64::PhysAddr;
 use x86_64::instructions::hlt;
 extern crate alloc;
 
@@ -289,7 +290,7 @@ fn test_filesystem_system() {
 fn main() -> ! {
     serial_println!("Welcome to MofuOS!");
 
-    kernel::process::syscall::init_syscall_stack();
+    //kernel::process::syscall::init_syscall_stack();
 
     //kernel::process_start::create_init_process();
     //kernel::process_start::create_userspace_processes();
@@ -297,7 +298,30 @@ fn main() -> ! {
 
     //test_process_system();
     //test_filesystem_system();
+    loop {
+        const MAGIC_OFFSET: u64 = 0x8FF0;
+        const AP_CORE_FUNCTION_ACHIEVED: u64 = 0x1234CCCC;
+        let val = unsafe { core::ptr::read_volatile(MAGIC_OFFSET as *const u64) };
+        if (val == AP_CORE_FUNCTION_ACHIEVED) {
+            serial_println!("AP core function achieved signal received in main loop");
 
+            let apic_id = unsafe { core::ptr::read_volatile(AP_CORE_APIC_ID_MESSAGE_OFFSET as *const u64) };
+            serial_println!("AP core APIC ID message: {}", apic_id);
+
+            let cr3_ap = unsafe { core::ptr::read_volatile(AP_CORE_CR3_MESSAGE_OFFSET as *const u64) };
+            serial_println!("Read cr3_ap pml4_addr: {:#x}", cr3_ap);
+
+            let (frame, _) = x86_64::registers::control::Cr3::read();
+            serial_println!("actual cr3: {:#x}", frame.start_address().as_u64());
+
+            let bsp_cr3: u64;
+            unsafe {core::arch::asm!("mov {}, cr3", out(reg) bsp_cr3, options(nostack));  }
+            serial_println!("CR3 read via asm: {:#x}", bsp_cr3);
+            break;
+        }
+        //hlt();
+    }
+    
     use embedded_graphics::pixelcolor::Rgb888;
     use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
 
@@ -362,22 +386,6 @@ fn main() -> ! {
     // compositor.focus_window(0);
     // compositor.compose(&mut framebuffer_target);
 
-    loop {
-        const MAGIC_OFFSET: u64 = 0x8FF0;
-        const AP_CORE_FUNCTION_ACHIEVED: u64 = 0x1234CCCC;
-        let val = unsafe { core::ptr::read_volatile(MAGIC_OFFSET as *const u64) };
-        if (val == AP_CORE_FUNCTION_ACHIEVED) {
-            serial_println!("AP core function achieved signal received in main loop");
-
-            let cr3_ap = unsafe { core::ptr::read_volatile(SECRET_MESSAGE_OFFSET as *const u64) };
-            serial_println!("Read cr3_ap: {:#x}", cr3_ap);
-
-            let (frame, _) = x86_64::registers::control::Cr3::read();
-            serial_println!("actual cr3: {:#x}", frame.start_address().as_u64());
-            break;
-        }
-        //hlt();
-    }
 
     loop {
         hlt();

@@ -98,28 +98,7 @@ unsafe extern "C" fn kmain() -> ! {
     serial_println!("HHDM offset: {:#x}", hhdm_offset);
     serial_println!("RSDP virtual address: {:#x}", rsdp_virt_addr);
 
-    let mp_response = MP_REQUEST
-        .get_response()
-        .expect("Failed to get SMP response");
-
-    let cpus= mp_response.cpus();
-    let core_count = cpus.len();
-    let bsp_lapic_id = mp_response.bsp_lapic_id();
-
-    serial_println!("MP Info:");
-    serial_println!("  Total cores: {}", core_count);
-    serial_println!("  BSP LAPIC ID: {}", bsp_lapic_id);
-
-    unsafe { init_cpu_info() };
-    for (i, cpu) in cpus.iter().enumerate() {
-    serial_println!("  CPU {}: LAPIC ID={}, Processor ID={}",
-        i, cpu.lapic_id, cpu.id);
-    }
-
-
-    let mut core_pool = CORE_POOL.lock();
-    core_pool.init_with_core_count(core_count as u8, cpus);
-    drop(core_pool);
+    
 
     let framebuffer_response = FRAMEBUFFER_REQUEST
     .get_response()
@@ -163,30 +142,54 @@ serial_println!("1 Active PML4 frame: {:#x}", active_pml4_frame.start_address().
     {
 
         // Get the currently active PML4
-        let (active_pml4_frame, _) = Cr3::read();
-        let active_pml4_phys = active_pml4_frame.start_address().as_u64();
-        let active_pml4_virt = active_pml4_phys + hhdm_offset;
+        // let (active_pml4_frame, _) = Cr3::read();
+        // let active_pml4_phys = active_pml4_frame.start_address().as_u64();
+        // let active_pml4_virt = active_pml4_phys + hhdm_offset;
 
-        serial_println!("Active PML4 physical: {:#x}", active_pml4_phys);
-        serial_println!("Active PML4 virtual: {:#x}", active_pml4_virt);
+        // serial_println!("Active PML4 physical: {:#x}", active_pml4_phys);
+        // serial_println!("Active PML4 virtual: {:#x}", active_pml4_virt);
 
-        // Your mapper MUST point to THIS PML4!
-        // Create a mapper that points to the active PML4:
-        let mut active_mapper = unsafe { 
-            x86_64::structures::paging::mapper::OffsetPageTable::new(
-                &mut *(active_pml4_virt as *mut x86_64::structures::paging::page_table::PageTable),
-                VirtAddr::new(hhdm_offset),
-            )
-        };
+        // // Your mapper MUST point to THIS PML4!
+        // // Create a mapper that points to the active PML4:
+        // let mut active_mapper = unsafe { 
+        //     x86_64::structures::paging::mapper::OffsetPageTable::new(
+        //         &mut *(active_pml4_virt as *mut x86_64::structures::paging::page_table::PageTable),
+        //         VirtAddr::new(hhdm_offset),
+        //     )
+        // };
 
         // NOW initialize with THIS mapper:
-        cpuinfo::init_ap_support(&mut active_mapper, &mut frame_allocator);
-        //cpuinfo::init_ap_support(&mut mapper, &mut frame_allocator);
+        //cpuinfo::init_ap_support(&mut active_mapper, &mut frame_allocator);
     }
-
+    
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
     serial_println!("Heap initialized");
+
+    cpuinfo::init_ap_support(&mut mapper, &mut frame_allocator);
+
+    let mp_response = MP_REQUEST
+        .get_response()
+        .expect("Failed to get SMP response");
+
+    let cpus= mp_response.cpus();
+    let core_count = cpus.len();
+    let bsp_lapic_id = mp_response.bsp_lapic_id();
+
+    serial_println!("MP Info:");
+    serial_println!("  Total cores: {}", core_count);
+    serial_println!("  BSP LAPIC ID: {}", bsp_lapic_id);
+
+    unsafe { init_cpu_info() };
+    for (i, cpu) in cpus.iter().enumerate() {
+    serial_println!("  CPU {}: LAPIC ID={}, Processor ID={}",
+        i, cpu.lapic_id, cpu.id);
+    }
+
+
+    let mut core_pool = CORE_POOL.lock();
+    core_pool.init_with_core_count(core_count as u8, cpus);
+    drop(core_pool);
 
     unsafe { init_cpu_infos(&cpus) };
     serial_println!("Mapping lapic for core 0");
@@ -236,7 +239,7 @@ serial_println!("1 Active PML4 frame: {:#x}", active_pml4_frame.start_address().
         unsafe { start_ap_core(core_id, cpu.lapic_id as u8, hhdm_offset, &mut mapper, &mut frame_allocator); }
     }
 
-    memory::init_memory_globals(frame_allocator, user_memory_manager);
+    //memory::init_memory_globals(frame_allocator, user_memory_manager);
 
     main()
 }

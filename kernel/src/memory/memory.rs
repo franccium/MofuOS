@@ -98,26 +98,26 @@ pub fn setup_ap_trampoline_mapping(
     }
 
 
-    let stack_start = 0x1200000;
-    let num_pages = 16;  // 4 pages = 16 KiB
+    // let stack_start = 0x1200000 + 16 * PAGE_SIZE as u64; // 16 pages for AP stack, starting at 0x1200000
+    // let num_pages = 32;  // 4 pages = 16 KiB
 
-    for i in 0..num_pages {
-        let stack_page = Page::<Size4KiB>::containing_address(VirtAddr::new(stack_start - (i * 4096)));
-        let stack_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(stack_start - (i * 4096)));
+    // for i in 0..num_pages {
+    //     let stack_page = Page::<Size4KiB>::containing_address(VirtAddr::new(stack_start - (i * 4096)));
+    //     let stack_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(stack_start - (i * 4096)));
         
-        unsafe {
-            page_table.map_to(
-                stack_page,
-                stack_frame,
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-                frame_allocator,
-            )
-            .expect("Failed to map stack page")
-            .flush();
-        }
-    }
+    //     unsafe {
+    //         page_table.map_to(
+    //             stack_page,
+    //             stack_frame,
+    //             PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+    //             frame_allocator,
+    //         )
+    //         .expect("Failed to map stack page")
+    //         .flush();
+    //     }
+    // }
     
-    serial_println!("Identity-mapped 0x7000 for AP stack");
+    // serial_println!("Identity-mapped 0x7000 for AP stack");
 }
 
 pub fn map_acpi_regions(

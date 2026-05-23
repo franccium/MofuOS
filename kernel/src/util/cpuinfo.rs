@@ -1,6 +1,6 @@
 use crate::asm::ap_trampoline;
 use crate::interrupts::{
-    self, get_lapic_base_addr, init_timer_for_core, map_local_apic_for_current_core
+    self, get_lapic_base_addr, init_timer_for_core, map_local_apic_for_current_core,
 };
 use crate::process::{CORE_POOL, SCHEDULER};
 use crate::serial_println;
@@ -8,10 +8,10 @@ use crate::util::apic::APICOffset;
 use crate::util::msr::msr_read;
 use alloc::vec::Vec;
 use bitflags::bitflags;
-use x86_64::instructions::hlt;
 use core::arch::asm;
 use limine::mp::Cpu;
 use spin::Once;
+use x86_64::instructions::hlt;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
 
 static mut CPU_INFO: CpuInfo = CpuInfo {
@@ -397,12 +397,18 @@ unsafe extern "C" {
 const TRAMPOLINE_PHYS: u64 = 0x8000;
 const MAGIC_OFFSET: u64 = 0x8FF0; // AP writes "APST" here
 pub const SECRET_MESSAGE_OFFSET: u64 = 0x8F30; // AP writes "APST" here
+pub const AP_CORE_CR3_MESSAGE_OFFSET: u64 = 0x8F40;
+pub const AP_CORE_APIC_ID_MESSAGE_OFFSET: u64 = 0x8F48;
+pub const AP_CORE_FUNCTION_ACHIEVED: u64 = 0x1234CCCC;
+
 const ACK_OFFSET: u64 = MAGIC_OFFSET; // BSP writes 1 here
 const DONE_OFFSET: u64 = MAGIC_OFFSET; // AP writes 1 when leaving trampoline
 const GDT_OFFSET: u64 = 0x8FF8; // GDT descriptor
 const CR3_OFFSET: u64 = 0x9000;
 const STACK_OFFSET: u64 = 0x9008;
 const ENTRY_OFFSET: u64 = 0x9010;
+
+const WRITTEN_CR3_OFFSET: u64 = 0x9020;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::VirtAddr;
@@ -472,31 +478,29 @@ impl ApStackAllocator {
     pub fn allocate_stack(&self, core_id: u8) -> Option<ApStack> {
         let stack_index = self.next_stack.fetch_add(1, Ordering::SeqCst);
 
-        // Check if we've exceeded maximum APs
         if stack_index >= self.max_aps as u64 {
             return None;
         }
 
-        // Calculate stack boundaries
-        // Stacks are placed sequentially: [stack0][stack1][stack2]...
-        // Each stack has a guard page between them
-        let guard_pages = 1; // One guard page between stacks
-
-        // Total space per stack including guard pages
+        let guard_pages = 1;
         let total_space = self.stack_size + (guard_pages * 0x1000);
-
-        // Calculate this stack's position
         let stack_offset = stack_index * total_space;
-        let stack_bottom = self.stack_base + stack_offset;
-        let stack_top = stack_bottom + self.stack_size;
 
-        // Stack grows downward, so the initial RSP should be at the top
-        // Align to 16 bytes for ABI compatibility
+        // The stack region looks like this in memory:
+        // High address:  [stack_top]     <- RSP starts here
+        //                [stack grows downward]
+        // Low address:   [stack_bottom]
+        //                [guard page]
+
+        let stack_top = self.stack_base + stack_offset + self.stack_size;
+        let stack_bottom = self.stack_base + stack_offset;
+
+        // Align stack top to 16 bytes for ABI compatibility
         let aligned_top = stack_top.align_down(16u64);
 
         Some(ApStack {
-            top: aligned_top,
-            bottom: stack_bottom,
+            top: aligned_top,     // RSP starts here (high address)
+            bottom: stack_bottom, // Stack ends here (low address)
             size: self.stack_size,
         })
     }
@@ -511,12 +515,12 @@ pub fn allocate_ap_stack(core_id: u8) -> ApStack {
         .unwrap_or_else(|| panic!("Failed to allocate stack for AP core {}", core_id))
 }
 
-const AP_STACK_SIZE: u64 = 16 * 1024; // 16KB per stack
-const MAX_AP_CORES: u32 = 4; // Support up to 16 AP cores
+const AP_STACK_SIZE: u64 = 8 * 1024; // 16KB per stack
+const MAX_AP_CORES: u32 = 2; // Support up to 16 AP cores
 
 // Virtual address where AP stacks will be mapped
 // Make sure this doesn't conflict with your kernel's memory layout!
-const AP_STACK_BASE: u64 = 0xFFFF_FFFF_FF99_0000; // Example address
+const AP_STACK_BASE: u64 = 0xFFFF_F40F_0000_0000; // Example address
 
 pub fn init_ap_support(
     page_table: &mut impl Mapper<Size4KiB>,
@@ -559,6 +563,12 @@ pub fn init_ap_support(
     serial_println!("  Base: {:#x}", AP_STACK_BASE);
     serial_println!("  Stack size: {} KB", AP_STACK_SIZE / 1024);
     serial_println!("  Max APs: {}", MAX_AP_CORES);
+
+    unsafe {
+        use x86_64::registers::control::Cr3;
+        let (frame, flags) = Cr3::read();
+        Cr3::write(frame, flags);
+    }
 }
 
 /// Initialize AP stack memory region in page tables
@@ -575,7 +585,7 @@ pub fn initialize_ap_stack_memory(
     let num_pages = (total_space + 0xFFF) / 0x1000; // Round up
 
     for i in 0..num_pages {
-        let page = Page::<Size4KiB>::from_start_address(stack_base - (i * 0x1000))
+        let page = Page::<Size4KiB>::from_start_address(stack_base + (i * 0x1000))
             .expect("Invalid page address");
 
         // Allocate physical frame for this page
@@ -593,6 +603,12 @@ pub fn initialize_ap_stack_memory(
                 )?
                 .flush();
         }
+
+        serial_println!(
+            "Mapped AP stack page: virtual {:#x} -> physical {:#x}",
+            page.start_address(),
+            frame.start_address()
+        );
     }
 
     Ok(())
@@ -670,6 +686,14 @@ pub unsafe fn start_ap_core(
     // Allocate a stack for this AP
     let ap_stack = allocate_ap_stack(core_id); // You need to implement this
 
+    serial_println!(
+        "Allocated stack for AP core {}: top={:#x}, bottom={:#x}, size={} KB",
+        core_id,
+        ap_stack.top(),
+        ap_stack.bottom(),
+        ap_stack.size() / 1024
+    );
+
     serial_println!("Core {}: Copying AP trampoline to memory", core_id);
     ap_trampoline::copy_to_memory(hhdm_offset);
 
@@ -702,41 +726,48 @@ pub unsafe fn start_ap_core(
     let cr3_ptr = (CR3_OFFSET + hhdm_offset) as *mut u64;
     let stack_ptr = (STACK_OFFSET + hhdm_offset) as *mut u64;
     let entry_ptr = (ENTRY_OFFSET + hhdm_offset) as *mut u64;
+    let cr3_written_ptr = (WRITTEN_CR3_OFFSET + hhdm_offset) as *mut u64;
+
+    let trampoline_written_cr3 = core::ptr::write_volatile(0x9060 as *mut u64, 0x1111111111111111);
 
     // let stack_ptr = 0x9008 as *mut u64;  // Identity-mapped, no HHDM offset!
 
-    // // Hardcode the stack to 0x1200000 (physical, identity-mapped)
-    // let temp_stack: u64 = 0x1200000;
+    // // Hardcode the stack to  ap_stack.top() (physical, identity-mapped)
+    // let temp_stack: u64 =  ap_stack.top();
     // core::ptr::write_volatile(stack_ptr, temp_stack);
 
     // // VERIFY
     // let verify = core::ptr::read_volatile(stack_ptr);
     // serial_println!("Stack value at 0x9008: {:#x}", verify);
 
-    // if verify != 0x1200000 {
+    // if verify !=  ap_stack.top() {
     //     serial_println!("FATAL: Cannot write stack pointer!");
     //     return Err("Stack write failed");
     // }
 
-    // Make sure 0x1200000 is accessible
-    let stack_test = 0x1200000 as *mut u64;
+    // Make sure  ap_stack.top() is accessible
+    let stack_test = ap_stack.bottom() as *mut u64;
     core::ptr::write_volatile(stack_test, 0xCAFEBABE_DEADBEEFu64);
     let stack_verify = core::ptr::read_volatile(stack_test);
 
     if stack_verify != 0xCAFEBABE_DEADBEEFu64 {
-        serial_println!("FATAL: Stack at 0x1200000 not writable!");
-        serial_println!("Need to identity-map 0x1200000 first!");
+        serial_println!("FATAL: Stack at  ap_stack.bottom() not writable!");
+        serial_println!("Need to identity-map  ap_stack.bottom() first!");
         return Err("Stack not mapped");
     }
 
-    serial_println!("Stack at 0x1200000 verified writable!");
+    serial_println!("Stack at  ap_stack.bottom() verified writable!");
 
     // In start_ap_core, after writing stack_ptr:
 
+    serial_println!("Writing CR3 for AP core: {:#x}", cr3_phys);
+
     core::ptr::write_volatile(cr3_ptr, cr3_phys);
     //core::ptr::write_volatile(stack_ptr, ap_stack.top());
-    core::ptr::write_volatile(stack_ptr, 0x1200000);
+    core::ptr::write_volatile(stack_ptr, ap_stack.top());
     core::ptr::write_volatile(entry_ptr, ap_core_entry_point as u64);
+
+    core::ptr::write_volatile(cr3_written_ptr, 1);
 
     let stack_value = core::ptr::read_volatile(stack_ptr);
     serial_println!("Stack pointer value at 0x9008: {:#x}", stack_value);
@@ -753,13 +784,13 @@ pub unsafe fn start_ap_core(
     // let pml4_phys = pml4_frame.start_address().as_u64();
     // let pml4_virt_ptr = (pml4_phys + hhdm_offset) as *const x86_64::structures::paging::page_table::PageTable;
 
-    // // Read the PML4 entry for 0x1200000 (index = (0x1200000 >> 39) & 0x1FF = 0)
-    // let pml4_index = (0x1200000 >> 39) & 0x1FF;
+    // // Read the PML4 entry for  ap_stack.top() (index = ( ap_stack.top() >> 39) & 0x1FF = 0)
+    // let pml4_index = ( ap_stack.top() >> 39) & 0x1FF;
     // let pml4_entry = unsafe { &(pml4_virt_ptr)[pml4_index] };
-    // serial_println!("PML4[{}] for 0x1200000: {:#x}", pml4_index, pml4_entry.addr().as_u64());
+    // serial_println!("PML4[{}] for  ap_stack.top(): {:#x}", pml4_index, pml4_entry.addr().as_u64());
 
     // if pml4_entry.is_unused() {
-    //     serial_println!("CRITICAL: 0x1200000 NOT in page tables! PML4 entry is empty!");
+    //     serial_println!("CRITICAL:  ap_stack.top() NOT in page tables! PML4 entry is empty!");
     // }
 
     let (active_pml4_frame, _) = Cr3::read();
@@ -931,12 +962,10 @@ pub unsafe fn start_ap_core(
     serial_println!("0x8FF0: 0x{:04X} (expected 0xDD0E)", values[7]);
     serial_println!("0x8FFE: 0x{:04X} (expected 0xDC0E)", values[8]);
 
-
-
     // Check 64-bit marker
-    let diag64 = (0x1200000 + hhdm_offset) as *const u32;
+    let diag64 = (ap_stack.top()) as *const u32;
     let val64 = core::ptr::read_volatile(diag64);
-    serial_println!("0x1200000: 0x{:08X} (expected 0x6464B007)", val64);
+    serial_println!(" ap_stack.top(): 0x{:08X} (expected 0x6464B007)", val64);
 
     // Determine where we failed
     // if values[0] != 0xDEAD {
@@ -987,11 +1016,22 @@ pub unsafe fn start_ap_core(
         "0x8F40 (Stack Pointer): 0x{:016X} (expected non-zero)",
         rsp_value
     );
-    serial_println!("actual stack ptr: {:#x}", 0x1200000);
+    serial_println!("actual stack ptr: {:#x}", ap_stack.top());
 
     serial_println!("Core {}: AP successfully started", core_id);
 
-
+    let stack_final_rsp_ap = core::ptr::read_volatile(0x9068 as *const u64);
+    let trampoline_written_cr3 = core::ptr::read_volatile(0x9060 as *const u64);
+    serial_println!(
+        "Core {}: AP signaled trampoline completion, cr 3 written: {:#x}",
+        core_id,
+        trampoline_written_cr3
+    );
+    serial_println!(
+        "Core {}: AP final RSP value: {:#x}",
+        core_id,
+        stack_final_rsp_ap
+    );
 
     Ok(())
 }
@@ -1082,71 +1122,75 @@ unsafe fn send_ipi(apic_id: u8, vector: u32) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_core_entry_point() -> ! {
-    const AP_CORE_FUNCTION_ACHIEVED: u64 = 0x1234CCCC;
+    //     let bsp_cr3: u64;
+    // asm!("mov {}, cr3", out(reg) bsp_cr3, options(nostack));
+
+    // core::ptr::write_volatile(MAGIC_OFFSET as *mut u64, AP_CORE_FUNCTION_ACHIEVED);
+    // core::ptr::write_volatile(AP_CORE_CR3_MESSAGE_OFFSET as *mut u64, bsp_cr3);
+
+    // STEP 1: Get current APIC ID WITHOUT accessing globals
+    // This is safe because we're just reading MSR and performing simple math
+    let apic_id = {
+        let apic_base_phys = {
+            let low: u32;
+            let high: u32;
+            core::arch::asm!(
+                "rdmsr",
+                in("ecx") 0x1B_u32,  // IA32_APIC_BASE MSR
+                out("eax") low,
+                out("edx") high,
+                options(nostack, preserves_flags)
+            );
+            ((high as u64) << 32) | (low as u64)
+        };
+        let apic_base_phys = apic_base_phys & 0xFFFFF000;
+
+        // Get HHDM offset from boot_info - this should be safe
+        //let hhdm_offset = crate::boot_info::boot_info().hhdm_offset;
+        let hhdm_offset = 0xFFFF800000000000;
+        let apic_virt = apic_base_phys + hhdm_offset;
+
+        // Read APIC ID from offset 0x20
+        let apic_id_reg = (apic_virt + 0x20) as *const u32;
+        let apic_id_val = core::ptr::read_volatile(apic_id_reg);
+        ((apic_id_val >> 24) & 0xFF) as u8
+    };
+
     core::ptr::write_volatile(MAGIC_OFFSET as *mut u64, AP_CORE_FUNCTION_ACHIEVED);
+    core::ptr::write_volatile(AP_CORE_APIC_ID_MESSAGE_OFFSET as *mut u64, apic_id as u64);
 
-    // use x86_64::instructions::tables::lidt;
-    // use x86_64::structures::DescriptorTablePointer;
+    use x86_64::registers::control::Cr3;
+    // let (pml4_frame, _) = Cr3::read();
 
-    // unsafe {
-    //     lidt(&idtr);
-    // }
-
-    interrupts::init_idt();
-
-
-    // use x86_64::registers::control::Cr3;
-
-// let (frame, _) = Cr3::read();
-
-// core::ptr::write_volatile(SECRET_MESSAGE_OFFSET as *mut u64, frame.start_address().as_u64());
-
-    // {
-    //     let mut core_pool = CORE_POOL.lock();
-    //     core_pool.mark_available(1);
-    // }
-    
-    // Test 3: Try your serial macro (will crash if issue)
-    
     loop {
         core::arch::asm!("hlt");
     }
 
-    hlt();
-    panic!()
-//     // This runs on the AP core
-//     serial_println!("SOME AP CORE ACTUALLY STARTED");
-//     let core_id = get_current_core_id();
-//     serial_println!("AP Core {}: Started successfully", core_id);
+    // STEP 2: Initialize per-core GDT and TSS BEFORE any globals access
+    // This ensures proper exception handling with IST stacks
+    crate::gdt::init_ap_core(apic_id);
 
-//     // Initialize this core (CPU info, timer, etc.)
-//     unsafe {
-//         init_current_core();
-//     }
+    let bsp_cr3: u64;
+    asm!("mov {}, cr3", out(reg) bsp_cr3, options(nostack));
+    core::ptr::write_volatile(MAGIC_OFFSET as *mut u64, AP_CORE_FUNCTION_ACHIEVED);
+    core::ptr::write_volatile(AP_CORE_CR3_MESSAGE_OFFSET as *mut u64, bsp_cr3);
 
-//     // Initialize scheduler for this core
-//     let core_id = get_current_core_id();
+    // STEP 3: Load IDT for this core
+    // This sets up exception handlers after we have a proper TSS
 
-//     // {
-//     //     let mut scheduler = SCHEDULER.lock();
-//     //     if (core_id as usize) >= scheduler.per_core.len() {
-//     //         let core_count = CORE_POOL.lock().total_cores();
-//     //         scheduler.init_with_core_count(core_count);
-//     //     }
-//     // }
+    interrupts::init_idt();
 
-//     // Mark core as available in the pool
-//     {
-//         let mut core_pool = CORE_POOL.lock();
-//         core_pool.mark_available(core_id);
-//     }
+    // STEP 4: Now we can safely access globals since exceptions are properly handled
 
-//     init_timer_for_core(core_id);
+    // Debug: Check page table
+    let (pml4_frame, _) = Cr3::read();
+    let pml4_addr = pml4_frame.start_address().as_u64();
+    serial_println!("AP Core {}: Started, CR3={:#x}", apic_id, pml4_addr);
 
-//     //enable_interrupts();
-
-//     // Enter the scheduler idle loop
-//     ap_core_scheduler_loop(core_id);
+    // Halt for now - further initialization should happen here
+    loop {
+        core::arch::asm!("hlt");
+    }
 }
 
 /// Scheduler loop for AP cores
