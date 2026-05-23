@@ -24,7 +24,7 @@ use limine::{
 };
 use spin::Mutex;
 use spin::Once;
-use x86_64::VirtAddr;
+use x86_64::{VirtAddr, structures::paging::frame};
 
 const MP_FLAG_NO_X2APIC: u64 = 0x0;
 
@@ -72,8 +72,6 @@ static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new(
 #[unsafe(link_section = ".requests")]
 static MP_REQUEST: MpRequest = MpRequest::new(MP_FLAG_NO_X2APIC);
 
-// /// Define the stand and end markers for Limine requests.
-
 #[used]
 #[unsafe(link_section = ".requests_end_marker")]
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
@@ -106,17 +104,18 @@ unsafe extern "C" fn kmain() -> ! {
         .response()
         .expect("Failed to get RSDP address response");
     let rsdp_virt_addr: usize = rsdp_addr_respone.address as usize;
-    serial_println!("RSDP virtual address response: {:#x}", rsdp_virt_addr);
     let rsdp_phys_addr = rsdp_virt_addr - hhdm_offset as usize;
 
-    serial_println!("RSDP physical address: {:#x}", rsdp_phys_addr);
     serial_println!("HHDM offset: {:#x}", hhdm_offset);
+    serial_println!("RSDP physical address: {:#x}", rsdp_phys_addr);
     serial_println!("RSDP virtual address: {:#x}", rsdp_virt_addr);
 
     let framebuffer_response = FRAMEBUFFER_REQUEST
         .response()
         .expect("Failed to get framebuffer response");
-    let framebuffer = framebuffer_response.framebuffers()[0];
+    let framebuffer_ref = framebuffer_response.framebuffers().get(0).unwrap();
+    let framebuffer = (*framebuffer_ref).clone();
+    kernel::graphics::framebuffer::init_framebuffer(framebuffer);
 
     let boot_info = BootInfo {
         hhdm_offset,
@@ -135,13 +134,13 @@ unsafe extern "C" fn kmain() -> ! {
     let mut frame_allocator =
         unsafe { MemoryMapFrameAllocator::init(memory_map_response.entries()) };
 
-    memory::memory::map_acpi_regions(
-        &mut mapper,
-        &mut frame_allocator,
-        rsdp_phys_addr,
-        hhdm_offset,
-    )
-    .expect("Failed to map ACPI regions");
+    // memory::memory::map_acpi_regions(
+    //     &mut mapper,
+    //     &mut frame_allocator,
+    //     rsdp_phys_addr,
+    //     hhdm_offset,
+    // )
+    // .expect("Failed to map ACPI regions");
 
     use x86_64::registers::control::Cr3;
     let (active_pml4_frame, _) = Cr3::read();
@@ -151,29 +150,6 @@ unsafe extern "C" fn kmain() -> ! {
     );
 
     memory::memory::setup_ap_trampoline_mapping(&mut mapper, &mut frame_allocator);
-    {
-
-        // Get the currently active PML4
-        // let (active_pml4_frame, _) = Cr3::read();
-        // let active_pml4_phys = active_pml4_frame.start_address().as_u64();
-        // let active_pml4_virt = active_pml4_phys + hhdm_offset;
-
-        // serial_println!("Active PML4 physical: {:#x}", active_pml4_phys);
-        // serial_println!("Active PML4 virtual: {:#x}", active_pml4_virt);
-
-        // // Your mapper MUST point to THIS PML4!
-        // // Create a mapper that points to the active PML4:
-        // let mut active_mapper = unsafe {
-        //     x86_64::structures::paging::mapper::OffsetPageTable::new(
-        //         &mut *(active_pml4_virt as *mut x86_64::structures::paging::page_table::PageTable),
-        //         VirtAddr::new(hhdm_offset),
-        //     )
-        // };
-
-        // NOW initialize with THIS mapper:
-        //cpuinfo::init_ap_support(&mut active_mapper, &mut frame_allocator);
-    }
-
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
     serial_println!("Heap initialized");
