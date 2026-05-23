@@ -21,8 +21,8 @@ struct Gdt {
     table: GlobalDescriptorTable,
     kernel_code_selector: SegmentSelector,
     kernel_data_selector: SegmentSelector,
-    user_code_selector: SegmentSelector,
     user_data_selector: SegmentSelector,
+    user_code_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
@@ -42,8 +42,8 @@ impl Gdt {
             table,
             kernel_code_selector,
             kernel_data_selector,
-            user_code_selector,
             user_data_selector,
+            user_code_selector,
             tss_selector,
         }
     }
@@ -57,16 +57,16 @@ impl Gdt {
         let mut table = GlobalDescriptorTable::new();
         let kernel_code_selector = table.append(Descriptor::kernel_code_segment());
         let kernel_data_selector = table.append(Descriptor::kernel_data_segment());
-        let user_code_selector = table.append(Descriptor::user_code_segment());
         let user_data_selector = table.append(Descriptor::user_data_segment());
+        let user_code_selector = table.append(Descriptor::user_code_segment());
         let tss_selector = table.append(Descriptor::tss_segment(tss));
 
         Gdt {
             table,
             kernel_code_selector,
             kernel_data_selector,
-            user_code_selector,
             user_data_selector,
+            user_code_selector,
             tss_selector,
         }
     }

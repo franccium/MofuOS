@@ -1,7 +1,6 @@
 use crate::{process::{
-    process::INVALID_PID,
-    process_manager::{ARCHE_PID, PROCESS_MANAGER},
-}, serial_println_core};
+    SCHEDULER, process::INVALID_PID, process_manager::{ARCHE_PID, PROCESS_MANAGER}, scheduler
+}, serial_println_core, util::cpuinfo::get_current_core_id};
 use crate::serial_println;
 use crate::util::msr::{msr_write};
 use core::arch::naked_asm;
@@ -302,7 +301,7 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
     let frame = unsafe { &mut *frame };
 
-    // serial_println!(
+    // serial_println_core!(
     //     "Syscall: num={}, arg1={:#x}, arg2={:#x}, arg3={:#x}, arg4={:#x}, arg5={:#x}, arg6={:#x}",
     //     frame.syscall_num,
     //     frame.arg1,
@@ -318,7 +317,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let fd = frame.arg1;
             let buf = frame.arg2 as *const u8;
             let count = frame.arg3 as usize;
-            serial_println!("WRITE: fd={}, buf={:p}, count={}", fd, buf, count);
+            serial_println_core!("WRITE: fd={}, buf={:p}, count={}", fd, buf, count);
 
             let slice = unsafe { core::slice::from_raw_parts(buf, count) };
             if let Ok(s) = core::str::from_utf8(slice) {
@@ -327,15 +326,32 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             count as u64
         }
         997 => {
-            // serial_println!("997 returning: {}", frame.arg1 + 4);
+            // serial_println_core!("997 returning: {}", frame.arg1 + 4);
             frame.arg1 + 4
         }
         999 => {
-            serial_println!("Process exited with code: {}", frame.arg1);
+            let exit_code = frame.arg1;
+            serial_println_core!("Process exited with code: {}", exit_code);
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+            serial_println_core!("Exiting process' PID: {}", pid);
+
+            {
+                let mut pm = PROCESS_MANAGER.lock();
+                pm.terminate_process(pid, exit_code as i32, false);
+            }
+
+            {
+                //let mut scheduler = SCHEDULER.lock();
+                //TODO: remove from here as well?
+            }
+
+            //TODO: return to scheduler
+
             loop {
                 x86_64::instructions::hlt();
             }
-            frame.arg1
+            exit_code
         }
         _ => u64::MAX,
     }
@@ -349,30 +365,41 @@ pub fn init_syscall() {
         });
     }
 
-    // setup STAR MSR
-    let user_cs = 0x1Bu64;
-    let user_ss = 0x23u64;
-    let kernel_cs = 0x08u64;
-    let kernel_ss = 0x10u64;
-    let star_value = (user_cs << 48) | (user_ss << 32) | (kernel_cs << 16) | kernel_ss;
+    // STAR MSR layout:
+    // Bits 63:48 = User CS base for sysretq (CS = this + 16, SS = this + 8)
+    // Bits 47:32 = Kernel CS base for syscall (CS = this, SS = this + 8)
+    // Bits 31:16 = Ignored in 64-bit mode
+    // Bits 15:0  = Ignored in 64-bit mode
+    //
+    // With GDT:
+    //   Index 3 (0x18): User Data (SS for ring 3)
+    //   Index 4 (0x20): User Code (CS for ring 3)
+    //
+    // For sysretq:
+    //   CS = (STAR[63:48] + 16) | 3 = 0x20 | 3 = 0x23
+    //   SS = (STAR[63:48] + 8) | 3  = 0x18 | 3 = 0x1B
+    //
+    // STAR[63:48] must be 0x10 (0x20 - 16 = 0x10, 0x18 - 8 = 0x10)
+    
+    let user_cs_base = 0x10u64;  // STAR[63:48]: sysretq CS = 0x10+16=0x20, SS = 0x10+8=0x18
+    let kernel_cs = 0x08u64;      // STAR[47:32]: syscall CS = 0x08 (kernel code)
+    // Bits 31:0 are unused in 64-bit mode
+    
+    let star_value = (user_cs_base << 48) | (kernel_cs << 32);
+    
     unsafe {
-        let msr = 0xC0000081u32;
-        msr_write(msr, star_value);
+        msr_write(0xC0000081, star_value);
     }
 
-    // set LSTAR to the syscall handler
-    // the CPU will load this into RIP to arrive there
+    // Set LSTAR to syscall handler
     let handler_addr = syscall_handler as *const () as u64;
     unsafe {
-        let msr = 0xC0000082u32;
-        msr_write(msr, handler_addr);
+        msr_write(0xC0000082, handler_addr);
     }
 
-    // no RFLAGS masking in syscall RFLAGS save state
-    const IA32_FMASK_MSR_VALUE: u64 = 0u64;
+    // No RFLAGS masking
     unsafe {
-        let msr = 0xC0000084u32;
-        msr_write(msr, IA32_FMASK_MSR_VALUE);
+        msr_write(0xC0000084, 0u64);
     }
 
     serial_println_core!("Syscall MSRs initialized");

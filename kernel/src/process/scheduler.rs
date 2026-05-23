@@ -1,21 +1,44 @@
+use core::sync::atomic::AtomicU64;
+
 use crate::data_structures::dequeue::Dequeue;
 use crate::data_structures::vector::Vec;
+use crate::process::execution::jump_to_userspace;
+use crate::process::process::INVALID_PID;
+use crate::process::process_manager::PROCESS_MANAGER;
 /// Scheduler - Priority-based, preemptive scheduler with per-core queues
 ///
 /// Uses the One-to-One threading model where each process is assigned a kernel thread
 /// that runs on a dedicated CPU core. Each core has its own scheduler queue.
-use crate::process::{PID, Process};
-use crate::process::execution::jump_to_userspace;
-use crate::process::process_manager::PROCESS_MANAGER;
-use crate::{serial_println, serial_println_core};
+use crate::process::{CORE_POOL, PID, Process};
 use crate::util::cpuinfo::get_current_core_id;
+use crate::{MAX_CORES, serial_println, serial_println_core};
 use spin::Mutex;
 use x86_64::PhysAddr;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::PhysFrame;
+use core::sync::atomic::Ordering;
 
 lazy_static::lazy_static! {
     pub static ref SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+}
+
+static CURRENT_PROCESS_ON_CORE: [AtomicU64; MAX_CORES as usize] = {
+    const EMPTY: AtomicU64 = AtomicU64::new(INVALID_PID as u64);
+    [EMPTY; MAX_CORES as usize]
+};
+
+pub fn set_current_process_for_core(core_id: u8, pid: PID) {
+    CURRENT_PROCESS_ON_CORE[core_id as usize]
+        .store(pid as u64, Ordering::SeqCst);
+}
+
+pub fn get_current_process_for_core(core_id: u8) -> PID {
+    CURRENT_PROCESS_ON_CORE[core_id as usize].load(Ordering::SeqCst) as PID
+}
+
+pub fn mark_core_idle(core_id: u8) {
+    CURRENT_PROCESS_ON_CORE[core_id as usize].store(INVALID_PID as u64, Ordering::SeqCst);
+    CORE_POOL.lock().mark_available(core_id);
 }
 
 /// Per-core scheduler queue with priority support
@@ -268,7 +291,6 @@ struct KernelContext {
     r13: u64,
     r14: u64,
     r15: u64,
-    rip: u64,
 }
 
 /// Save the current kernel context
@@ -281,9 +303,8 @@ fn save_kernel_context() -> KernelContext {
         r13: 0,
         r14: 0,
         r15: 0,
-        rip: 0,
     };
-    
+
     unsafe {
         core::arch::asm!(
             "mov {rsp}, rsp",
@@ -293,7 +314,6 @@ fn save_kernel_context() -> KernelContext {
             "mov {r13}, r13",
             "mov {r14}, r14",
             "mov {r15}, r15",
-            "lea {rip}, [2f + rip]",
             "2:",
             rsp = out(reg) ctx.rsp,
             rbp = out(reg) ctx.rbp,
@@ -302,11 +322,10 @@ fn save_kernel_context() -> KernelContext {
             r13 = out(reg) ctx.r13,
             r14 = out(reg) ctx.r14,
             r15 = out(reg) ctx.r15,
-            rip = out(reg) ctx.rip,
             options(nostack)
         );
     }
-    
+
     ctx
 }
 
@@ -321,7 +340,6 @@ fn restore_kernel_context(ctx: &KernelContext) {
             "mov r13, {r13}",
             "mov r14, {r14}",
             "mov r15, {r15}",
-            //"jmp {rip}",
             rsp = in(reg) ctx.rsp,
             rbp = in(reg) ctx.rbp,
             rbx = in(reg) ctx.rbx,
@@ -329,7 +347,6 @@ fn restore_kernel_context(ctx: &KernelContext) {
             r13 = in(reg) ctx.r13,
             r14 = in(reg) ctx.r14,
             r15 = in(reg) ctx.r15,
-            //rip = in(reg) ctx.rip,
             options(noreturn, nostack)
         );
     }
@@ -340,29 +357,28 @@ fn restore_kernel_context(ctx: &KernelContext) {
 pub fn execute_process(process: &Process) {
     let pid = process.pid;
     let core_id = get_current_core_id();
-    
+
+    set_current_process_for_core(core_id, pid);
+
     // Save current kernel context
     let kernel_context = save_kernel_context();
-    
+
     // Switch to the process's page table
-    let page_table_frame = PhysFrame::containing_address(
-        PhysAddr::new(process.execution_context.page_table_base_phys)
-    );
+    let page_table_frame = PhysFrame::containing_address(PhysAddr::new(
+        process.execution_context.page_table_base_phys,
+    ));
     let old_page_table = Cr3::read();
     unsafe {
         Cr3::write(page_table_frame, Cr3Flags::empty());
     }
-    
+
     // Jump to userspace
     // The process will come back via:
     // 1. Syscall (handled by syscall_handler)
     // 2. Timer interrupt (handled by timer_interrupt_handler)
     // 3. Page fault or other exception
     unsafe {
-        jump_to_userspace(
-            process.execution_context.rip,
-            process.execution_context.rsp,
-        );
+        jump_to_userspace(process.execution_context.rip, process.execution_context.rsp);
     }
     serial_println_core!("returned");
     // When we get back (via sysret or iret in interrupt handler):
@@ -371,7 +387,7 @@ pub fn execute_process(process: &Process) {
         let (frame, flags) = old_page_table;
         Cr3::write(frame, flags);
     }
-    
+
     // Restore kernel context
     restore_kernel_context(&kernel_context);
 }
@@ -380,7 +396,7 @@ pub fn execute_process(process: &Process) {
 /// This function runs forever on each core
 pub fn run_on_core_loop(core_id: u8) -> ! {
     serial_println_core!("Entering scheduler loop");
-    
+
     loop {
         // Disable interrupts for atomic scheduler check
         x86_64::instructions::interrupts::disable();
@@ -393,44 +409,43 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
         };
 
         serial_println_core!("got next on core");
-        
+
         if let Some(pid) = next_pid {
             {
                 let mut scheduler = SCHEDULER.lock();
                 scheduler.set_current_on_core(core_id, pid);
             }
-            
+
             // Re-enable interrupts before running the process
             x86_64::instructions::interrupts::enable();
-            
+
             // SWITCH TO THE PROCESS
             // This is where you'd do a context switch
             // For now, just signal that we'd run it
             let process_priority = 4;
-            
+
             serial_println_core!("set current on core");
 
             if SCHEDULER_ACTUALLY_RUN_A_PROCESS {
                 let pm = PROCESS_MANAGER.lock();
-                let process = {
-                    pm.get_process(pid)
-                };
+                let process = { pm.get_process(pid) };
 
                 if let Ok(process) = process {
                     execute_process(process);
                 }
             } else {
                 serial_println!("Would run PID {}", pid);
-                
+
                 // TODO: Actually switch to the process's address space and stack
                 // switch_to_process(pid);
             }
+
+            mark_core_idle(core_id);
 
             {
                 let mut scheduler = SCHEDULER.lock();
                 scheduler.enqueue_on_core(core_id, pid, process_priority);
             }
-            
         } else {
             // No process available - enable interrupts and halt
             x86_64::instructions::interrupts::enable();

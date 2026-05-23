@@ -28,12 +28,12 @@ use acpi::{
         },
     },
 };
-use x86_64::structures::paging::frame;
 use core::arch::asm;
 use core::arch::x86_64::__rdtscp;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
+use x86_64::structures::paging::frame;
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::rflags::RFlags,
@@ -58,7 +58,7 @@ pub const TICK_DURATION_NS: u64 = 1_000_000_000 / TIMER_TICK_FREQ_HZ;
 pub const TICK_DURATION_US: u64 = 1_000_000 / TIMER_TICK_FREQ_HZ;
 
 const LAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_0000_0000;
-
+const IOAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_FF00_0000;
 
 pub fn system_uptime_ns() -> u64 {
     SYSTEM_TICKS.load(core::sync::atomic::Ordering::Relaxed) * TICK_DURATION_NS
@@ -130,12 +130,12 @@ unsafe fn map_apic_mem_identity(
 
 unsafe fn map_apic_mem(
     phys_address: u32,
+    base_virt_address: u64,
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> VirtAddr {
-    let lapic_virt_base = LAPIC_VIRT_BASE;
     let physical_address = PhysAddr::new(phys_address as u64);
-    let page = Page::containing_address(VirtAddr::new(lapic_virt_base));
+    let page = Page::containing_address(VirtAddr::new(base_virt_address));
     let frame = PhysFrame::containing_address(physical_address);
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
 
@@ -161,7 +161,8 @@ unsafe fn init_io_apic(
 ) {
     serial_println!("Mapping IO APIC");
 
-    let virt_addr = unsafe { map_apic_mem(phys_address, mapper, frame_allocator) };
+    let virt_addr =
+        unsafe { map_apic_mem(phys_address, IOAPIC_VIRT_BASE, mapper, frame_allocator) };
 
     let io_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
@@ -261,7 +262,7 @@ unsafe fn init_local_apic(
 ) {
     serial_println!("Mapping Local APIC");
 
-    let virt_addr = unsafe { map_apic_mem(phys_address, mapper, frame_allocator) };
+    let virt_addr = unsafe { map_apic_mem(phys_address, LAPIC_VIRT_BASE, mapper, frame_allocator) };
 
     let local_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
@@ -270,7 +271,6 @@ unsafe fn init_local_apic(
     // let virt_addr = LAPIC_VIRT_ADDR.lock();
     // let virt_
     // let local_apic_ptr = virt_addr.as_mut_ptr::<u32>();
-
 
     unsafe {
         //init_timer(local_apic_ptr);
@@ -530,6 +530,8 @@ pub unsafe fn init_acpi(
     let mut io_apic_addr: u32 = 0;
     let mut got_apic_addr = false;
 
+    serial_println!("AcpiPlatform created");
+
     match acpi_platform.interrupt_model {
         InterruptModel::Apic(apic) => {
             serial_println!("APIC supported");
@@ -630,7 +632,6 @@ pub unsafe fn init_acpi(
     } else {
         serial_println!("ERROR: Cannot find IO apic");
     }
-
 
     disable_pic();
 }
@@ -768,6 +769,38 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         error_code,
         stack_frame
     );
+
+    serial_println!("EXCEPTION: GENERAL PROTECTION FAULT");
+    serial_println!("Error Code: {}", error_code);
+    serial_println!("RIP: {:#x}", stack_frame.instruction_pointer);
+    serial_println!("CS: {:?}", stack_frame.code_segment);
+    serial_println!("RFLAGS: {:?}", stack_frame.cpu_flags);
+    serial_println!("RSP: {:#x}", stack_frame.stack_pointer);
+    serial_println!("SS: {:?}", stack_frame.stack_segment);
+    
+    // Read the values that iretq would pop
+    unsafe {
+        let rsp = stack_frame.stack_pointer.as_u64() as *const u64;
+        serial_println!("Stack contents for iretq:");
+        serial_println!("  RIP: {:#x}", *rsp);
+        serial_println!("  CS: {:#x}", *rsp.add(1));
+        serial_println!("  RFLAGS: {:#x}", *rsp.add(2));
+        serial_println!("  RSP: {:#x}", *rsp.add(3));
+        serial_println!("  SS: {:#x}", *rsp.add(4));
+    }
+
+    // Try to read the instruction that caused the fault
+    let rip = stack_frame.instruction_pointer.as_u64();
+    serial_println!("Faulting instruction at: {:#x}", rip);
+    
+    // Read the bytes at RIP to identify the instruction
+    unsafe {
+        let instr_ptr = rip as *const u8;
+        serial_println!("Instruction bytes: {:02x} {:02x} {:02x} {:02x} {:02x}", 
+            *instr_ptr, *instr_ptr.add(1), *instr_ptr.add(2), 
+            *instr_ptr.add(3), *instr_ptr.add(4));
+    }
+
     hlt_loop();
 }
 

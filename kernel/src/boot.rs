@@ -147,14 +147,24 @@ unsafe extern "C" fn kmain() -> ! {
         "1 Active PML4 frame: {:#x}",
         active_pml4_frame.start_address().as_u64()
     );
-    unsafe { map_local_apic_for_current_core(&mut mapper, &mut frame_allocator) };
-
+    // unsafe { map_local_apic_for_current_core(&mut mapper, &mut frame_allocator) };
+    
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
     serial_println!("Heap initialized");
-
+    
+    // NOTE: has to be called after heap is initialized, AcpiPlatform uses heap
+    unsafe {
+        interrupts::init_acpi(
+            rsdp_phys_addr,
+            hhdm_offset,
+            &mut mapper,
+            &mut frame_allocator,
+        )
+    };
+    
     let mp_response = MP_REQUEST.response().expect("Failed to get MP response");
-
+    
     serial_println!("MP Response received");
     serial_println!("BSP LAPIC ID: {}", mp_response.bsp_lapic_id);
     serial_println!(
@@ -165,11 +175,11 @@ unsafe extern "C" fn kmain() -> ! {
     let cpus = mp_response.cpus();
     let core_count = cpus.len();
     let bsp_lapic_id = mp_response.bsp_lapic_id;
-
+    
     serial_println!("MP Info:");
     serial_println!("  Total cores: {}", core_count);
     serial_println!("  BSP LAPIC ID: {}", bsp_lapic_id);
-
+    
     unsafe { init_cpu_info() };
     for (i, cpu) in cpus.iter().enumerate() {
         serial_println!(
@@ -179,11 +189,11 @@ unsafe extern "C" fn kmain() -> ! {
             cpu.processor_id
         );
     }
-
+    
+    
     unsafe { init_cpu_infos(&cpus) };
     serial_println!("Mapping lapic for core 0");
     unsafe { interrupts::init_lapic_for_current_core(0) };
-
     let mut core_pool = CORE_POOL.lock();
     core_pool.init_with_core_count(core_count as u8, cpus);
     drop(core_pool);
@@ -191,15 +201,6 @@ unsafe extern "C" fn kmain() -> ! {
     let mut scheduler = SCHEDULER.lock();
     scheduler.init_with_core_count(core_count as u8);
     drop(scheduler);
-
-    unsafe {
-        interrupts::init_acpi(
-            rsdp_phys_addr,
-            hhdm_offset,
-            &mut mapper,
-            &mut frame_allocator,
-        )
-    };
 
     interrupts::disable_interrupts();
     
