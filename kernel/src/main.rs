@@ -3,9 +3,9 @@
 
 mod boot;
 
+use core::fmt::Write;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use core::fmt::Write;
 use kernel::data_structures::vector::Vec;
 use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use kernel::graphics::compositor::Compositor;
@@ -18,10 +18,16 @@ use kernel::graphics::shaders::{PassThroughVS, TextureSamplePS};
 use kernel::graphics::window::{self, Window, WindowBuffer};
 use kernel::interrupts;
 use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, TEST_ELF};
+use kernel::util::cpuinfo::{
+    AP_CORE_APIC_ID_MESSAGE_OFFSET, AP_CORE_CR3_MESSAGE_OFFSET, SECRET_MESSAGE_OFFSET,
+};
 use kernel::{
     filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
     programs::theophe::Theophe, serial_println,
+    filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
+    programs::theophe::Theophe, serial_println,
 };
+use x86_64::PhysAddr;
 use x86_64::instructions::hlt;
 extern crate alloc;
 use kernel::tests_exp::{test_filesystem::test_filesystem, test_graphics, test_process};
@@ -55,15 +61,27 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 fn main() -> ! {
     serial_println!("Welcome to MofuOS!");
 
-    kernel::process::syscall::init_syscall_stack();
+    //kernel::process::syscall::init_syscall_stack();
 
+    //kernel::process_start::create_init_process();
+    //kernel::process_start::create_userspace_processes();
+    //kernel::process_start::create_and_run_init_process();
+
+    //test_process_system();
+    
     //test_filesystem_system();
+
 
     //test_process::test_process_system();
     //test_process::create_init_process();
     //test_process::create_and_run_init_process();
 
-    let mut framebuffer_target = FrameBufferTarget::new(boot::boot_info().framebuffer.lock());
+    {
+        let mut framebuffer_target = kernel::graphics::framebuffer::get_framebuffer();
+        let fb = &mut *framebuffer_target;
+
+        let fb_width = fb.width as f32;
+        let fb_height = fb.height as f32;
 
     test_graphics::draw_shapes(&mut framebuffer_target);
 
@@ -188,6 +206,69 @@ fn main() -> ! {
     ];
 
     let mut time_elapsed = 0;
+        Rectangle::new(Point::new(0, 0), Size::new(100, 100))
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::RED))
+            .draw(fb)
+            .unwrap();
+
+                Rectangle::new(Point::new(60, 60), Size::new(100, 100))
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::GREEN))
+            .draw(fb)
+            .unwrap();
+
+        let style = PrimitiveStyleBuilder::new()
+            .stroke_color(Rgb888::RED)
+            .stroke_width(3)
+            .fill_color(Rgb888::WHITE)
+            .build();
+        for i in 0..5 {
+            let x = (fb_width / 9.0) * (i as f32 + 1.0) - 10.0;
+            let y = (fb_height / 9.0) * (i as f32 + 1.0);
+            let radius = 10.0 + i as f32 * 2.5;
+
+            Circle::new(Point::new(x as i32, y as i32), radius as u32)
+                .into_styled(style)
+                .draw(fb)
+                .unwrap();
+        }
+
+        let mut vec = Vec::<i32>::with_capacity(4);
+        vec.push(1);
+        vec.push(2);
+        vec.push(3);
+        vec.push(1);
+        vec.push(2);
+        vec.push(3);
+        for i in 0..vec.size {
+            serial_println!("vec[{}] = {}", i, vec.get(i));
+        }
+        serial_println!("Vector capacity: {}", vec.capacity);
+
+        use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
+        use kernel::graphics::compositor::Compositor;
+        use kernel::graphics::window::{Window, WindowBuffer};
+        //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
+        serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
+
+
+        let mut compositor = Compositor::new(fb_width as u32,  fb_height as u32);
+        let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
+        serial_println!("Created window with ID: {}", window_id);
+    
+        let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
+        theophe.write_line("");
+        theophe.write_line("  hi");
+        theophe.write_line("==========================================================");
+        let cpu_info = kernel::util::cpuinfo::get_cpu_info();
+        let cpu_info_str = cpu_info.to_pretty_string();
+        theophe.write_str(&cpu_info_str);
+    
+        theophe.render();
+    
+        compositor.focus_window(0);
+        compositor.compose(fb);
+    }
+
 
     loop {
         let time_start = interrupts::system_uptime_ns();

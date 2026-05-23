@@ -158,7 +158,17 @@ pub fn handle_syscall(pid: usize, call: SystemCall) -> Result<(), SyscallError> 
             if pid != parent_pid && pid != ARCHE_PID {
                 return Err(SyscallError::PermissionDenied);
             }
-            match pm.create_process(parent_pid, priority, name_ptr, name_len, is_out) {
+            // TODO: entry_point, stack_top, and page_table_base should come from ELF loader
+            match pm.create_process(
+                parent_pid,
+                priority,
+                name_ptr,
+                name_len,
+                is_out,
+                0, // entry_point (placeholder - will be set by ELF loader)
+                0, // stack_top (placeholder - will be set by ELF loader)
+                0, // page_table_base (placeholder - will be set by ELF loader)
+            ) {
                 Ok(new_pid) => {
                     serial_println!("Created process with PID: {}", new_pid);
                     Ok(())

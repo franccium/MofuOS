@@ -19,6 +19,8 @@ const MAX_LINES: usize = 20;
 const LINE_SPACING: i32 = 15;
 const MAX_CHARS_PER_LINE: usize = 80;
 
+const DEBUG_LOG: bool = false;
+
 const CHARACTER_STYLE: MonoTextStyle<Rgb888> = MonoTextStyle::new(&FONT_8X13, Rgb888::WHITE);
 const BACKGROUND_COLOR: Rgb888 = Rgb888::BLACK;
 

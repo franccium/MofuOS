@@ -3,9 +3,11 @@
 #![feature(abi_x86_interrupt)]
 #![feature(allocator_api)]
 #![feature(portable_simd)]
+#![allow(warnings, unused)] // TODO: remove this
 
 pub mod memory;
 extern crate alloc;
+pub mod asm;
 pub mod data_structures;
 pub mod filesystem;
 pub mod gdt;
@@ -16,6 +18,7 @@ pub mod process;
 pub mod programs;
 pub mod util;
 pub mod tests_exp;
+pub mod boot_info;
 
 pub use alloc::string::String;
 

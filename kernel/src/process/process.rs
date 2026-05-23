@@ -1,6 +1,6 @@
 use crate::{
     data_structures::vector::Vec,
-    process::{elf_loader::ElfLoadInfo, process_mem::ProcessMemoryLayout},
+    process::{ElfLoadInfo, KernelThread, ThreadState, process_mem::ProcessMemoryLayout},
     serial_println,
 };
 use alloc::string::String;
@@ -160,6 +160,38 @@ impl Process {
     //     }
     // }
 
+    pub fn new(
+        pid: usize,
+        parent_pid: usize,
+        priority: u8,
+        name: String,
+        is_out: bool,
+        resources: ProcessResources,
+        entry_point: u64,
+        stack_top: u64,
+        page_table_base_phys: u64,
+    ) -> Result<Self, MapToError<Size4KiB>> {
+        let address_space_manager = &crate::memory::get_user_mem_mgr();
+        let mut frame_allocator = crate::memory::get_frame_allocator();
+
+        let mut memory_layout = ProcessMemoryLayout::new(address_space_manager, &mut frame_allocator)?;
+
+        Ok(Self {
+            pid,
+            parent_pid,
+            priority,
+            state: ProcessState::Ready,
+            name,
+            children: Vec::new(),
+            file_descriptors: Vec::new(),
+            resources,
+            exit_code: None,
+            is_out,
+            execution_context: ExecutionContext::new(entry_point, stack_top, page_table_base_phys),
+            memory_layout: memory_layout
+        })
+    }
+
     pub fn create_with_elf(
         elf_info: &ElfLoadInfo,
         name: &str,
@@ -272,4 +304,99 @@ impl Process {
             memory_layout,
         })
     }
+}
+
+use core::arch::asm;
+
+/// Save the current CPU context into a thread's ExecutionContext
+pub unsafe fn save_thread_context(thread: &mut KernelThread) {
+    // Read current registers and save to thread context
+    asm!(
+        "mov {}, rsp",
+        "mov {}, rbp",
+        "mov {}, rbx",
+        "mov {}, r12",
+        "mov {}, r13",
+        "mov {}, r14",
+        "mov {}, r15",
+        out(reg) thread.context.rsp,
+        out(reg) thread.context.rbp,
+        out(reg) thread.context.rbx,
+        out(reg) thread.context.r12,
+        out(reg) thread.context.r13,
+        out(reg) thread.context.r14,
+        out(reg) thread.context.r15,
+        options(nomem, nostack)
+    );
+
+    // Get the return address (RIP) from the stack
+    asm!(
+        "mov {}, [rsp]",
+        out(reg) thread.context.rip,
+        options(nostack)
+    );
+
+    // Get current RFLAGS
+    asm!(
+        "pushfq; pop {}",
+        out(reg) thread.context.rflags,
+        options(nostack)
+    );
+
+    // CR3 is saved when switching address spaces
+    // We'll handle it separately during context switch
+}
+
+/// Restore a thread's ExecutionContext to the CPU
+pub unsafe fn restore_thread_context(thread: &KernelThread) -> ! {
+    // Switch page table (CR3) if this is a user process
+    let cr3 = thread.context.page_table_base_phys;
+    if cr3 != 0 {
+        asm!(
+            "mov cr3, {}",
+            in(reg) cr3,
+            options(nostack)
+        );
+    }
+
+    // Restore registers and jump to the thread
+    asm!(
+        // Restore general purpose registers
+        "mov rsp, {}",
+        "mov rbp, {}",
+        "mov rbx, {}",
+        "mov r12, {}",
+        "mov r13, {}",
+        "mov r14, {}",
+        "mov r15, {}",
+        // Push return address and flags, then IRETQ or RET
+        "push {}",
+        "push {}",
+        "add rsp, 8",  // Skip the push for RIP alignment
+        "ret",
+        in(reg) thread.context.rsp,
+        in(reg) thread.context.rbp,
+        in(reg) thread.context.rbx,
+        in(reg) thread.context.r12,
+        in(reg) thread.context.r13,
+        in(reg) thread.context.r14,
+        in(reg) thread.context.r15,
+        in(reg) thread.context.rflags,
+        in(reg) thread.context.rip,
+        options(noreturn)
+    );
+
+    unreachable!();
+}
+
+/// Switch between two threads (save current, restore next)
+pub unsafe fn switch_threads(current: &mut KernelThread, next: &KernelThread) {
+    // Save current thread's context
+    save_thread_context(current);
+
+    // Update thread states
+    current.state = ThreadState::Ready;
+
+    // Restore next thread's context (this will jump to the next thread)
+    restore_thread_context(next);
 }

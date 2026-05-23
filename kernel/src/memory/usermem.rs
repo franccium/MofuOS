@@ -111,14 +111,14 @@ impl UserMemoryManager {
 
         let user_flags = protection_flags | PageTableFlags::USER_ACCESSIBLE;
 
-        let start_page = Page::containing_address(virt_addr);
-        let end_page = Page::containing_address(virt_addr + size_bytes - 1u64);
-        for page in Page::range_inclusive(start_page, end_page) {
-            let phys_frame = frame_allocator.allocate_frame().ok_or(MapToError::FrameAllocationFailed)?;
-            unsafe {
-                user_page_mapper.map_to(page, phys_frame, user_flags, frame_allocator)?.flush();
-            }
-        }
+        // let start_page = Page::containing_address(virt_addr);
+        // let end_page = Page::containing_address(virt_addr + size_bytes - 1u64);
+        // for page in Page::range_inclusive(start_page, end_page) {
+        //     let phys_frame = frame_allocator.allocate_frame().ok_or(MapToError::FrameAllocationFailed)?;
+        //     unsafe {
+        //         user_page_mapper.map_to(page, phys_frame, user_flags, frame_allocator)?.flush();
+        //     }
+        // }
 
         Ok(())
     }
