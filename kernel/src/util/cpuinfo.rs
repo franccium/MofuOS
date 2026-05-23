@@ -8,8 +8,8 @@ use crate::util::apic::APICOffset;
 use crate::util::msr::msr_read;
 use alloc::vec::Vec;
 use bitflags::bitflags;
+use limine::mp::MpInfo;
 use core::arch::asm;
-use limine::mp::Cpu;
 use spin::Once;
 use x86_64::instructions::hlt;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
@@ -212,7 +212,7 @@ pub unsafe fn init_cpu_info() {
     }
 }
 
-pub fn init_cpu_infos(cpus: &[&Cpu]) {
+pub fn init_cpu_infos(cpus: &[&MpInfo]) {
     let core_count = cpus.len();
     serial_println!("init_cpu_infos: {} cores", core_count);
 
@@ -1347,22 +1347,10 @@ impl CpuInfo {
     }
 }
 
-pub unsafe extern "C" fn ap_core_from_limine_entry_point_for_bsp(cpu: &Cpu) -> ! {
-    let apic_id = cpu.id as u8;
-    let lapic_id = cpu.lapic_id as u8;
-
-    let lapic_base_addr = get_lapic_base_addr_phys();
-    serial_println!("AP core entry point reached for APIC ID {} (CPU {})", lapic_id, apic_id);
-    serial_println!("AP core {}: LAPIC base physical address: {:#x}", apic_id, lapic_base_addr);
-    use x86_64::registers::control::Cr3;
-    let (active_pml4_frame, _) = Cr3::read();
-    serial_println!("AP core {}: Active PML4 frame: {:#x}", apic_id, active_pml4_frame.start_address().as_u64());
-    hlt_loop()
-}
 
 
-pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &Cpu) -> ! {
-    let apic_id = cpu.id as u8;
+pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
+    let apic_id = cpu.processor_id as u8;
     let lapic_id = cpu.lapic_id as u8;
     if apic_id == 0 {
         serial_println!("BSP core entered AP entry point, this should never happen!");

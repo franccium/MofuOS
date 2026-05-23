@@ -8,17 +8,17 @@ use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use spin::{MutexGuard};
 
 pub struct FrameBufferTarget<'a> {
-    pub framebuffer: MutexGuard<'a, Framebuffer<'static>>,
+    pub framebuffer: MutexGuard<'a, Framebuffer>,
     pub width: u64,
     pub height: u64,
     pub pitch: u64,
 }
 
 impl<'a> FrameBufferTarget<'a> {
-    pub fn new(framebuffer: MutexGuard<'a, Framebuffer<'static>>) -> Self {
-        let width = framebuffer.width();
-        let height = framebuffer.height();
-        let pitch = framebuffer.pitch();
+    pub fn new(framebuffer: MutexGuard<'a, Framebuffer>) -> Self {
+        let width = framebuffer.width;
+        let height = framebuffer.height;
+        let pitch = framebuffer.pitch;
         Self {
             framebuffer,
             width,
@@ -35,7 +35,7 @@ impl<'a> FrameBufferTarget<'a> {
         let px_offset = y * self.pitch + x * 4;
         let px_ptr = unsafe {
             self.framebuffer
-                .addr()
+                .address()
                 .add(px_offset as usize)
                 .cast::<u32>()
         };
@@ -64,7 +64,7 @@ impl<'a> FrameBufferTarget<'a> {
         let dst_offset = dst_y * self.pitch + dst_x * FRAMEBUFFER_BYTES_PER_PIXEL as u64;
         let dst_ptr = unsafe {
             self.framebuffer
-                .addr()
+                .address()
                 .add(dst_offset as usize)
                 .cast::<u32>()
         };
@@ -81,7 +81,7 @@ impl<'a> FrameBufferTarget<'a> {
         let color_xrgb = ((color.r() as u32) << 16) | ((color.g() as u32) << 8) | (color.b() as u32);
 
         unsafe {
-            let fb_addr = self.framebuffer.addr();
+            let fb_addr = self.framebuffer.address();
 
             for row in 0..height {
                 let row_offset = (y + row) * self.pitch + x * 4;

@@ -5,7 +5,7 @@ use spin::{Mutex, Once};
 
 pub struct BootInfo {
     pub hhdm_offset: u64,
-    pub framebuffer: Mutex<Framebuffer<'static>>,
+    //pub framebuffer: Mutex<Framebuffer>,
 }
 
 pub static BOOT_INFO: Once<BootInfo> = Once::new();

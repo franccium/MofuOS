@@ -77,8 +77,8 @@ pub fn init_heap(
 
     let heap_ptr = VirtAddr::new(HEAP_POINTER as u64);
     let heap_end = heap_ptr + HEAP_SIZE_BYTES as u64 - 1;
-    let heap_start_page = Page::containing_address(heap_ptr);
-    let heap_last_page = Page::containing_address(heap_end);
+    let heap_start_page: Page<Size4KiB> = Page::containing_address(heap_ptr);
+    let heap_last_page: Page<Size4KiB> = Page::containing_address(heap_end);
     let page_range = Page::range_inclusive(heap_start_page, heap_last_page);
 
     serial_println!(

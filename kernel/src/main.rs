@@ -322,53 +322,57 @@ fn main() -> ! {
         //hlt();
     }
     
-    use embedded_graphics::pixelcolor::Rgb888;
-    use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
+    // use embedded_graphics::pixelcolor::Rgb888;
+    // use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
 
-    let mut framebuffer_target =
-        FrameBufferTarget::new(kernel::boot_info::boot_info().framebuffer.lock());
+    // let mut framebuffer_target =
+    //     FrameBufferTarget::new(kernel::boot_info::boot_info().framebuffer.lock());
 
-    Rectangle::new(Point::new(0, 0), Size::new(100, 100))
-        .into_styled(PrimitiveStyle::with_fill(Rgb888::RED))
-        .draw(&mut framebuffer_target)
-        .unwrap();
+    // Rectangle::new(Point::new(0, 0), Size::new(100, 100))
+    //     .into_styled(PrimitiveStyle::with_fill(Rgb888::RED))
+    //     .draw(&mut framebuffer_target)
+    //     .unwrap();
 
-    let style = PrimitiveStyleBuilder::new()
-        .stroke_color(Rgb888::RED)
-        .stroke_width(3)
-        .fill_color(Rgb888::WHITE)
-        .build();
+    // let style = PrimitiveStyleBuilder::new()
+    //     .stroke_color(Rgb888::RED)
+    //     .stroke_width(3)
+    //     .fill_color(Rgb888::WHITE)
+    //     .build();
 
-    let fb_width = framebuffer_target.width as f32;
-    let fb_height = framebuffer_target.height as f32;
-    for i in 0..5 {
-        let x = (fb_width / 9.0) * (i as f32 + 1.0) - 10.0;
-        let y = (fb_height / 9.0) * (i as f32 + 1.0);
-        let radius = 10.0 + i as f32 * 2.5;
+    // let fb_width = framebuffer_target.width as f32;
+    // let fb_height = framebuffer_target.height as f32;
+    // for i in 0..5 {
+    //     let x = (fb_width / 9.0) * (i as f32 + 1.0) - 10.0;
+    //     let y = (fb_height / 9.0) * (i as f32 + 1.0);
+    //     let radius = 10.0 + i as f32 * 2.5;
 
-        Circle::new(Point::new(x as i32, y as i32), radius as u32)
-            .into_styled(style)
-            .draw(&mut framebuffer_target)
-            .unwrap();
-    }
+    //     Circle::new(Point::new(x as i32, y as i32), radius as u32)
+    //         .into_styled(style)
+    //         .draw(&mut framebuffer_target)
+    //         .unwrap();
+    // }
 
-    let mut vec = Vec::<i32>::with_capacity(4);
-    vec.push(1);
-    vec.push(2);
-    vec.push(3);
-    vec.push(1);
-    vec.push(2);
-    vec.push(3);
-    for i in 0..vec.size {
-        serial_println!("vec[{}] = {}", i, vec.get(i));
-    }
-    serial_println!("Vector capacity: {}", vec.capacity);
+    // let mut vec = Vec::<i32>::with_capacity(4);
+    // vec.push(1);
+    // vec.push(2);
+    // vec.push(3);
+    // vec.push(1);
+    // vec.push(2);
+    // vec.push(3);
+    // for i in 0..vec.size {
+    //     serial_println!("vec[{}] = {}", i, vec.get(i));
+    // }
+    // serial_println!("Vector capacity: {}", vec.capacity);
 
-    use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
-    use kernel::graphics::compositor::Compositor;
-    use kernel::graphics::window::{Window, WindowBuffer};
-    //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
-    serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
+    // use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
+    // use kernel::graphics::compositor::Compositor;
+    // use kernel::graphics::window::{Window, WindowBuffer};
+    // //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
+    // serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
+
+
+
+    
     // let mut compositor = Compositor::new(fb_width as u32,  fb_height as u32);
     // let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
     // serial_println!("Created window with ID: {}", window_id);

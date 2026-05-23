@@ -1,6 +1,6 @@
 use crate::serial_println;
 use acpi::{Handler, PhysicalMapping};
-use limine::memory_map::{Entry, EntryType};
+use limine::memmap::{Entry, MEMMAP_ACPI_NVS, MEMMAP_ACPI_RECLAIMABLE, MEMMAP_USABLE};
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3,
@@ -142,8 +142,8 @@ pub fn map_acpi_regions(
 
     // map all ACPI regions
     for entry in frame_allocator.memory_map {
-        if entry.entry_type == EntryType::ACPI_RECLAIMABLE
-            || entry.entry_type == EntryType::ACPI_NVS
+        if entry.type_ == MEMMAP_ACPI_RECLAIMABLE
+            || entry.type_ == MEMMAP_ACPI_NVS
         {
             let start = align_down(entry.base, PAGE_SIZE as u64);
             let end = align_up(entry.base + entry.length, PAGE_SIZE as u64);
@@ -233,7 +233,7 @@ impl MemoryMapFrameAllocator {
 
     fn _usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
         let regions = self.memory_map.iter();
-        let usable_regions = regions.filter(|r| r.entry_type == EntryType::USABLE);
+        let usable_regions = regions.filter(|r| r.type_ == MEMMAP_USABLE);
         let addr_ranges = usable_regions.map(|r| r.base..r.base + r.length);
         let frame_addresses = addr_ranges.flat_map(|r| r.step_by(PAGE_SIZE));
 
@@ -246,7 +246,7 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryMapFrameAllocator {
         loop {
             let region = self.memory_map.get(self.curr_region_index)?;
 
-            if region.entry_type != EntryType::USABLE {
+            if region.type_ != MEMMAP_USABLE {
                 self.curr_region_index += 1;
                 self.frame_offset_in_region = 0;
                 continue;

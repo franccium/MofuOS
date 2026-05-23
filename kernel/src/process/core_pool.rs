@@ -2,7 +2,7 @@ use crate::data_structures::vector::Vec;
 use crate::serial_println;
 use spin::Mutex;
 use crate::process::process::{PID, INVALID_PID};
-use limine::mp::Cpu;
+use limine::mp::{MpInfo, MpGotoFunction};
 
 lazy_static::lazy_static! {
     pub static ref CORE_POOL: Mutex<CorePool> = Mutex::new(CorePool::new());
@@ -31,7 +31,7 @@ impl CorePool {
     }
 
     /// Called once during kernel initialization
-    pub fn init_with_core_count(&mut self, core_count: u8, cpus: &[&Cpu]) {
+    pub fn init_with_core_count(&mut self, core_count: u8, cpus: &[&MpInfo]) {
         if core_count == 0 {
             serial_println!("ERROR: Invalid core count: {}, using 1", core_count);
             return;
