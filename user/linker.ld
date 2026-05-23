@@ -23,7 +23,6 @@ SECTIONS
         *(.bss*)
     }
     
-    /* Discard unnecessary sections */
     /DISCARD/ : {
         *(.comment)
         *(.eh_frame)

@@ -2,6 +2,7 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 #![feature(allocator_api)]
+#![feature(portable_simd)]
 #![allow(warnings, unused)] // TODO: remove this
 
 pub mod memory;
@@ -16,7 +17,7 @@ pub mod io;
 pub mod process;
 pub mod programs;
 pub mod util;
-pub mod process_start;
+pub mod tests_exp;
 pub mod boot_info;
 
 pub use alloc::string::String;

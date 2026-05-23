@@ -9,6 +9,8 @@ use embedded_graphics::{
     text::{Alignment, LineHeight, Text, TextStyle, TextStyleBuilder},
 };
 
+const DEBUG_PRINT: bool = false;
+
 const CHARACTER_WIDTH: usize = 8; // FONT_8X13 width
 const CHARACTER_HEIGHT: usize = 13;
 const MARGIN_LEFT: i32 = 0;
@@ -145,7 +147,7 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
                 if i > bytes_start {
                     let line = self.get_last_line();
                     let written = line.write_slice(&bytes[bytes_start..i]);
-                    if DEBUG_LOG {
+                    if DEBUG_PRINT {
                         serial_println!(
                             "Found newline, written: {}, space left now: {}",
                             written,
@@ -160,13 +162,11 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
             let remaining = bytes_len - bytes_start;
             let line = self.get_last_line();
             let space_left = max_chars_per_line - line.length;
-            if DEBUG_LOG {
-                serial_println!("Remaining bytes: {}", remaining);
-            }
+            if DEBUG_PRINT { serial_println!("Remaining bytes: {}", remaining); }
 
             if remaining <= space_left {
                 let written = line.write_slice(&bytes[bytes_start..]);
-                if DEBUG_LOG {
+                if DEBUG_PRINT { 
                     serial_println!(
                         "Fit in last line, written: {}, space left now: {}",
                         written,
@@ -210,7 +210,7 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
 
         for i in 0..bytes_len {
             if bytes[i] == b'\n' {
-                if DEBUG_LOG {
+                if DEBUG_PRINT {
                     serial_println!(
                         "\\n detected: Writing: '{}'; bytes_length: {}, curr_line_idx: {}",
                         text,
@@ -227,7 +227,7 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
         }
 
         if bytes_start < bytes_len {
-            if DEBUG_LOG {
+            if DEBUG_PRINT {
                 serial_println!(
                     "Writing: '{}'; bytes_length: {}, curr_line_idx: {}",
                     text,
@@ -288,9 +288,7 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
     fn redraw_all(&mut self) {
         self.clear_screen();
 
-        if DEBUG_LOG {
-            serial_println!("Theophe: redraw_all");
-        }
+        if DEBUG_PRINT { serial_println!("Theophe: redraw_all"); }
 
         for i in 0..=self.curr_line_idx {
             if !self.lines[i].is_empty() {

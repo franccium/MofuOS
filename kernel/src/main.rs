@@ -4,19 +4,33 @@
 mod boot;
 
 use core::fmt::Write;
-use embedded_graphics::prelude::*;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
 use kernel::data_structures::vector::Vec;
-use kernel::process::{ElfLoadError, ElfLoadInfo, elf_loader};
+use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
+use kernel::graphics::compositor::Compositor;
+use kernel::graphics::pipeline::{
+    BlendState, PipelineState, RasterizerState, RenderMode, Vertex3D, VertexLayout,
+};
+use kernel::graphics::renderer::RenderContext;
+use kernel::graphics::resources::{ConstantBuffer, Texture};
+use kernel::graphics::shaders::{PassThroughVS, TextureSamplePS};
+use kernel::graphics::window::{self, Window, WindowBuffer};
+use kernel::interrupts;
+use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, TEST_ELF};
 use kernel::util::cpuinfo::{
     AP_CORE_APIC_ID_MESSAGE_OFFSET, AP_CORE_CR3_MESSAGE_OFFSET, SECRET_MESSAGE_OFFSET,
 };
 use kernel::{
     filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
     programs::theophe::Theophe, serial_println,
+    filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
+    programs::theophe::Theophe, serial_println,
 };
 use x86_64::PhysAddr;
 use x86_64::instructions::hlt;
 extern crate alloc;
+use kernel::tests_exp::{test_filesystem::test_filesystem, test_graphics, test_process};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -44,251 +58,6 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     exit_qemu(QemuExitCode::Failed);
 }
 
-fn test_process_system() {
-    use kernel::process::{
-        process_manager::PROCESS_MANAGER,
-        syscall::{SystemCall, handle_syscall},
-    };
-
-    // Check arche
-    {
-        let pm = PROCESS_MANAGER.lock();
-        if let Ok(arche) = pm.get_process(0) {
-            serial_println!("Arche PID: {}, Name: {}", arche.pid, arche.name);
-        }
-    }
-
-    let process_name = "process_1";
-    let process_2_name = "process_2";
-
-    let result1 = handle_syscall(
-        0,
-        SystemCall::CreateProcess {
-            parent_pid: 0,
-            name_ptr: process_name.as_ptr(),
-            name_len: process_name.len() as u8,
-            is_out: false,
-        },
-    );
-
-    let result2 = handle_syscall(
-        0,
-        SystemCall::CreateProcess {
-            parent_pid: 0,
-            name_ptr: process_2_name.as_ptr(),
-            name_len: process_2_name.len() as u8,
-            is_out: false,
-        },
-    );
-
-    if result1.is_ok() && result2.is_ok() {
-        {
-            let pm = PROCESS_MANAGER.lock();
-            if let Ok(p1) = pm.get_process(1) {
-                serial_println!(
-                    "P1 - PID: {}, Name: {}, Parent: {}",
-                    p1.pid,
-                    p1.name,
-                    p1.parent_pid
-                );
-                serial_println!("P1 - Memory limit: {}", p1.resources.memory_limit);
-            }
-            if let Ok(p2) = pm.get_process(2) {
-                serial_println!(
-                    "P2 - PID: {}, Name: {}, Parent: {}",
-                    p2.pid,
-                    p2.name,
-                    p2.parent_pid
-                );
-                serial_println!("P2 - Memory limit: {}", p2.resources.memory_limit);
-            }
-        }
-
-        let _ = handle_syscall(
-            1,
-            SystemCall::TerminateProcess {
-                pid_to_kill: 1,
-                exit_code: 0,
-                kill_children: false,
-            },
-        );
-
-        {
-            let pm = PROCESS_MANAGER.lock();
-            if let Ok(p1) = pm.get_process(1) {
-                serial_println!("Process 1 after termination:");
-                serial_println!("State: {:?}", p1.state);
-                serial_println!("Exit code: {:?}", p1.exit_code);
-            }
-        }
-    } else {
-        serial_println!("Failed to create processes");
-    }
-}
-
-fn test_filesystem_system() {
-    use kernel::filesystem::{
-        fat32::test_data::create_fat32_image, init_filesystem, sirius::get_sirius,
-    };
-
-    serial_println!("\nTesting Filesystem");
-
-    let fat32_image_data = create_fat32_image();
-
-    let image_slice = &*fat32_image_data;
-
-    match init_filesystem(image_slice) {
-        Ok(_) => {
-            serial_println!("Filesystem initialized");
-
-            // Try to read root directory
-            {
-                let mut sirius = get_sirius();
-                match sirius.list_directory("/") {
-                    Ok(entries) => {
-                        serial_println!("Root directory opened");
-                        serial_println!("  Found {} entries:", entries.len());
-                        for entry in &entries {
-                            serial_println!("   - {} ({} bytes)", entry.name, entry.size);
-
-                            if entry.file_type == FileType::File {
-                                let mut buffer = [0u8; 64];
-                                match sirius.read_file(&entry.name, 0, &mut buffer) {
-                                    Ok(contents) => {
-                                        serial_println!(
-                                            "    Read file contents: '{}' {}",
-                                            contents,
-                                            entry.size
-                                        );
-                                        let content_str = core::str::from_utf8(&buffer[..contents])
-                                            .unwrap_or("not utf8?");
-                                        serial_println!("    Content: '{}'", content_str);
-                                    }
-                                    Err(e) => {
-                                        serial_println!("    Failed to read file: {:?}", e);
-                                    }
-                                }
-                            }
-                        }
-
-                        serial_println!("FILE CREATION");
-                        match sirius.create_file("/newfile.txt") {
-                            Ok(node) => {
-                                serial_println!("Created new file: {}", node.name);
-                            }
-                            Err(e) => {
-                                serial_println!("Failed to create file: {:?}", e);
-                            }
-                        }
-
-                        serial_println!("DIRECTORY CREATION");
-                        match sirius.create_directory("/somedir") {
-                            Ok(node) => {
-                                serial_println!("Created new directory: {}", node.name);
-                            }
-                            Err(e) => {
-                                serial_println!("Failed to create directory: {:?}", e);
-                            }
-                        }
-
-                        serial_println!("FILE IN SUBDIR CREATION");
-                        match sirius.create_file("/somedir/nested.txt") {
-                            Ok(node) => {
-                                serial_println!("Created new file: {}", node.name);
-                            }
-                            Err(e) => {
-                                serial_println!("Failed to create file: {:?}", e);
-                            }
-                        }
-                    }
-                    Err(e) => serial_println!("Failed to open root: {:?}", e),
-                }
-            }
-
-            {
-                let mut sirius = get_sirius();
-                match sirius.list_directory("/") {
-                    Ok(entries) => {
-                        serial_println!("Root directory opened");
-                        serial_println!("  Found {} entries:", entries.len());
-                        for entry in &entries {
-                            serial_println!("   - {} ({} bytes)", entry.name, entry.size);
-
-                            if entry.file_type == FileType::File {
-                                let mut buffer = [0u8; 64];
-                                match sirius.read_file(&entry.name, 0, &mut buffer) {
-                                    Ok(contents) => {
-                                        serial_println!(
-                                            "    Read file contents: '{}' {}",
-                                            contents,
-                                            entry.size
-                                        );
-                                        let content_str = core::str::from_utf8(&buffer[..contents])
-                                            .unwrap_or("not utf8?");
-                                        serial_println!("    Content: '{}'", content_str);
-                                    }
-                                    Err(e) => {
-                                        serial_println!("    Failed to read file: {:?}", e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => serial_println!("Failed to open root: {:?}", e),
-                }
-
-                serial_println!("FILE DELETION");
-                match sirius.delete("/newfile.txt") {
-                    Ok(_) => {
-                        serial_println!("  deleted");
-                    }
-                    Err(e) => {
-                        serial_println!("  Failed to delete file: {:?}", e);
-                    }
-                }
-                match sirius.delete("/somedir") {
-                    Ok(_) => {
-                        serial_println!("  deleted");
-                    }
-                    Err(e) => {
-                        serial_println!("  Failed to delete file: {:?}", e);
-                    }
-                }
-                match sirius.list_directory("/") {
-                    Ok(entries) => {
-                        serial_println!("Root directory opened");
-                        serial_println!("  Found {} entries:", entries.len());
-                        for entry in &entries {
-                            serial_println!("   - {} ({} bytes)", entry.name, entry.size);
-
-                            if entry.file_type == FileType::File {
-                                let mut buffer = [0u8; 64];
-                                match sirius.read_file(&entry.name, 0, &mut buffer) {
-                                    Ok(contents) => {
-                                        serial_println!(
-                                            "    Read file contents: '{}' {}",
-                                            contents,
-                                            entry.size
-                                        );
-                                        let content_str = core::str::from_utf8(&buffer[..contents])
-                                            .unwrap_or("not utf8?");
-                                        serial_println!("    Content: '{}'", content_str);
-                                    }
-                                    Err(e) => {
-                                        serial_println!("    Failed to read file: {:?}", e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => serial_println!("Failed to open root: {:?}", e),
-                }
-            }
-        }
-        Err(e) => serial_println!("Failed to initialize filesystem: {}", e),
-    }
-}
-
 fn main() -> ! {
     serial_println!("Welcome to MofuOS!");
 
@@ -299,37 +68,13 @@ fn main() -> ! {
     //kernel::process_start::create_and_run_init_process();
 
     //test_process_system();
+    
     //test_filesystem_system();
-    // loop {
-    //     const MAGIC_OFFSET: u64 = 0x8FF0;
-    //     const AP_CORE_FUNCTION_ACHIEVED: u64 = 0x1234CCCC;
-    //     let val = unsafe { core::ptr::read_volatile(MAGIC_OFFSET as *const u64) };
-    //     if (val == AP_CORE_FUNCTION_ACHIEVED) {
-    //         serial_println!("AP core function achieved signal received in main loop");
 
-    //         let apic_id =
-    //             unsafe { core::ptr::read_volatile(AP_CORE_APIC_ID_MESSAGE_OFFSET as *const u64) };
-    //         serial_println!("AP core APIC ID message: {}", apic_id);
 
-    //         let cr3_ap =
-    //             unsafe { core::ptr::read_volatile(AP_CORE_CR3_MESSAGE_OFFSET as *const u64) };
-    //         serial_println!("Read cr3_ap pml4_addr: {:#x}", cr3_ap);
-
-    //         let (frame, _) = x86_64::registers::control::Cr3::read();
-    //         serial_println!("actual cr3: {:#x}", frame.start_address().as_u64());
-
-    //         let bsp_cr3: u64;
-    //         unsafe {
-    //             core::arch::asm!("mov {}, cr3", out(reg) bsp_cr3, options(nostack));
-    //         }
-    //         serial_println!("CR3 read via asm: {:#x}", bsp_cr3);
-    //         break;
-    //     }
-    //     //hlt();
-    // }
-
-    use embedded_graphics::pixelcolor::Rgb888;
-    use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
+    //test_process::test_process_system();
+    //test_process::create_init_process();
+    //test_process::create_and_run_init_process();
 
     {
         let mut framebuffer_target = kernel::graphics::framebuffer::get_framebuffer();
@@ -338,6 +83,129 @@ fn main() -> ! {
         let fb_width = fb.width as f32;
         let fb_height = fb.height as f32;
 
+    test_graphics::draw_shapes(&mut framebuffer_target);
+
+    let fb_width = framebuffer_target.width as f32;
+    let fb_height = framebuffer_target.height as f32;
+
+    //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
+    serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
+    let mut compositor = Compositor::new(fb_width as u32, fb_height as u32);
+    let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
+
+    let (window3_id, window3_buffer) = compositor.create_window(400, 300, 700, 200);
+    compositor.set_z_index(window3_id, 5);
+    serial_println!("Created window with ID: {}", window3_id);
+
+    //test_graphics::render_shaders(&window3_buffer);
+    test_graphics::render_shaders_3d(&window3_buffer);
+
+    // {
+    //     let mut back_buffer = window3_buffer.back_buffer_mut();
+    //     for y in 0..window3_buffer.height {
+    //         for x in 0..window3_buffer.width {
+    //             let r = (x as f32 / window3_buffer.width as f32 * 255.0) as u8;
+    //             let g = (y as f32 / window3_buffer.height as f32 * 255.0) as u8;
+    //             let b = 0;
+    //             back_buffer.write_pixel(x, y, Rgba8888UNORM::from_rgb(r, g, b));
+    //         }
+    //     }
+
+    //     serial_println!("Presenting window3 ");
+    //     window3_buffer.present();
+    // }
+
+    let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
+    theophe.write_line("");
+    theophe.write_line("  hi");
+    theophe.write_line("==========================================================");
+    let cpu_info = kernel::util::cpuinfo::get_cpu_info();
+    let cpu_info_str = cpu_info.to_pretty_string();
+    theophe.write_str(&cpu_info_str);
+
+    theophe.render();
+
+    compositor.focus_window(0);
+    //compositor.compose(&mut framebuffer_target);
+
+    let mut ctx = RenderContext::new();
+
+    // Create a checkerboard texture
+    const SIZE: u32 = 64;
+    let texture_data = alloc::vec::Vec::from(
+        (0..(SIZE * SIZE))
+            .map(|i| {
+                let x = i % SIZE;
+                let y = i / SIZE;
+                let checker = ((x / 8) + (y / 8)) % 2 == 0;
+                if checker {
+                    Rgba8888UNORM::from_rgb(255, 128, 0).to_u32_rgba() // Orange
+                } else {
+                    Rgba8888UNORM::from_rgb(0, 128, 255).to_u32_rgba() // Blue
+                }
+            })
+            .collect::<alloc::vec::Vec<u32>>(),
+    );
+    let texture = Texture::from_data(SIZE, SIZE, texture_data);
+    let texture_slot = ctx.bind_texture(texture);
+
+    // Set up constant buffer with MVP matrix (update this each frame for animation)
+    let mut constant_data = alloc::vec![0u8; 64]; // 4x4 matrix = 64 bytes
+    let cbuffer = ConstantBuffer::from_data(constant_data);
+    let cbuffer_slot = ctx.bind_cbuffer(cbuffer);
+    let mut obj_x = 2f32;
+    let mut obj_y = 1f32;
+    let mut obj_z = 1f32;
+    let mut angle = 0f32;
+    // compositor.compose(&mut framebuffer_target);
+    let mut back_buffer = window3_buffer.back_buffer_mut();
+    let mut render_target = ctx.begin_frame(&mut back_buffer);
+
+    let s = 1f32; // half-size
+    let vertices = [
+        // Front face
+        Vertex3D::new(-s, -s, s, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        Vertex3D::new(s, -s, s, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        Vertex3D::new(s, s, s, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0),
+        Vertex3D::new(-s, s, s, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0),
+        // Back face
+        Vertex3D::new(-s, -s, -s, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0),
+        Vertex3D::new(s, -s, -s, 1.0, 1.0, 0.0, 0.0, 0.0, -1.0),
+        Vertex3D::new(s, s, -s, 1.0, 1.0, 1.0, 0.0, 0.0, -1.0),
+        Vertex3D::new(-s, s, -s, 1.0, 0.0, 1.0, 0.0, 0.0, -1.0),
+        // Top face
+        Vertex3D::new(-s, s, -s, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+        Vertex3D::new(s, s, -s, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0),
+        Vertex3D::new(s, s, s, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0),
+        Vertex3D::new(-s, s, s, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0),
+        // Bottom face
+        Vertex3D::new(-s, -s, -s, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0),
+        Vertex3D::new(s, -s, -s, 1.0, 1.0, 0.0, 0.0, -1.0, 0.0),
+        Vertex3D::new(s, -s, s, 1.0, 1.0, 1.0, 0.0, -1.0, 0.0),
+        Vertex3D::new(-s, -s, s, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0),
+        // Right face
+        Vertex3D::new(s, -s, -s, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+        Vertex3D::new(s, s, -s, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0),
+        Vertex3D::new(s, s, s, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0),
+        Vertex3D::new(s, -s, s, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0),
+        // Left face
+        Vertex3D::new(-s, -s, -s, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, s, -s, 1.0, 1.0, 0.0, -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, s, s, 1.0, 1.0, 1.0, -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, -s, s, 1.0, 0.0, 1.0, -1.0, 0.0, 0.0),
+    ];
+
+    let indices = [
+        // Front (+Z)
+        0, 1, 2, 0, 2, 3, // Back (-Z)
+        4, 6, 5, 4, 7, 6, // Top (+Y)
+        8, 10, 9, 8, 11, 10, // Bottom (-Y)
+        12, 13, 14, 12, 14, 15, // Right (+X)
+        16, 17, 18, 16, 18, 19, // Left (-X)
+        20, 22, 21, 20, 23, 22,
+    ];
+
+    let mut time_elapsed = 0;
         Rectangle::new(Point::new(0, 0), Size::new(100, 100))
             .into_styled(PrimitiveStyle::with_fill(Rgb888::RED))
             .draw(fb)
@@ -403,8 +271,37 @@ fn main() -> ! {
 
 
     loop {
-        hlt();
+        let time_start = interrupts::system_uptime_ns();
+        ctx.clear(&mut render_target, Rgba8888UNORM::GRAY);
+
+        test_graphics::render_shaders_2d(&window3_buffer, &mut render_target);
+        // test_graphics::render_shaders_3d_loop(
+        //     &window3_buffer,
+        //     &mut render_target,
+        //     &mut ctx,
+        //     obj_x,
+        //     obj_y,
+        //     obj_z,
+        //     angle,
+        //     &vertices,
+        //     &indices,
+        // );
+        // //obj_y += 0.1f32;
+        angle += 45f32;
+        window3_buffer.present();
+        compositor.compose(&mut framebuffer_target);
+        let time_end = interrupts::system_uptime_ns();
+        let dt: u64 = time_end - time_start;
+        time_elapsed += dt;
+        serial_println!(
+            "Loop time: {} ns; {} ms",
+            dt,
+            dt as f32 / 1_000_000.0
+        );
+        // hlt();
     }
+
+    drop(render_target);
 
     exit_qemu(QemuExitCode::Success);
 }

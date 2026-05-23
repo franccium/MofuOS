@@ -27,12 +27,6 @@ run-hdd: run-hdd-$(KARCH)
 .PHONY: fat32-image
 fat32-image: test_disk_image.fat32.img
 
-#		-drive file=test_disk_image.fat32.img,format=raw,if=none,id=drive0 \
-#		-device virtio-blk-pci,drive=drive0,disable-legacy=on,disable-modern=off \
-
-# -device virtio-blk-pci,drive=drive0,disable-modern=on,disable-legacy=off,id=virtblk0,num-queues=4 \
-#		-drive file=test_disk_image.fat32.img,format=raw,if=none,id=drive0 \
-
 .PHONY: run-x86_64
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
 	qemu-system-$(KARCH) \
@@ -47,6 +41,22 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-serial stdio \
 		-no-reboot \
 		-monitor telnet:127.0.0.1:1234,server,nowait \
+		$(QEMUFLAGS)
+
+.PHONY: run-fast-x86_64
+run-fast-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
+	qemu-system-$(KARCH) \
+		-M q35 \
+		-accel kvm \
+		-cpu host \
+		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
+		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
+		-cdrom $(IMAGE_NAME).iso \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		-device virtio-vga-gl \
+		-display gtk,gl=on \
+		-serial stdio \
+		-no-reboot \
 		$(QEMUFLAGS)
 
 .PHONY: run-hdd-x86_64

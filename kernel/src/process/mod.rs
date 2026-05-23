@@ -8,7 +8,7 @@ pub mod execution;
 pub mod kernel_thread;
 pub mod core_pool;
 
-pub use process::{FileDescriptor, Process, PID, ProcessResources, ProcessState, ExecutionContext};
+pub use process::{Process, PID};
 pub use process_manager::ProcessManager;
 pub use syscall::{SystemCall};
 pub use elf_loader::{ElfLoadInfo, ElfLoadError};
