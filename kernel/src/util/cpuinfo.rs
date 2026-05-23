@@ -1,18 +1,22 @@
 use crate::asm::ap_trampoline;
 use crate::interrupts::{
-    self, get_lapic_base_addr, get_lapic_base_addr_phys, init_timer_for_core, map_local_apic_for_current_core
+    self, get_lapic_base_addr, get_lapic_base_addr_phys, init_timer_for_core,
+    map_local_apic_for_current_core,
 };
-use crate::process::{CORE_POOL, SCHEDULER};
-use crate::{hlt_loop, serial_println};
+use crate::memory::{FRAME_ALLOCATOR, get_frame_allocator};
+use crate::process::{self, CORE_POOL, SCHEDULER};
 use crate::util::apic::APICOffset;
 use crate::util::msr::msr_read;
+use crate::{HHDM_OFFSET, gdt, hlt_loop, serial_println, serial_println_core};
 use alloc::vec::Vec;
 use bitflags::bitflags;
-use limine::mp::MpInfo;
 use core::arch::asm;
+use limine::mp::MpInfo;
 use spin::Once;
 use x86_64::instructions::hlt;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, OffsetPageTable, PageTable, Size4KiB, frame,
+};
 
 static mut CPU_INFO: CpuInfo = CpuInfo {
     features: CpuFeatureFlags::empty(),
@@ -240,6 +244,8 @@ pub unsafe fn init_current_core() {
 
     unsafe { init_cpu_info_for_core(core_id) };
     unsafe { init_timer_for_core(core_id) };
+
+    process::syscall::init_syscall();
 
     serial_println!("Core {}: Initialized successfully", core_id);
 }
@@ -564,9 +570,11 @@ impl CpuInfo {
 }
 
 pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
-    let apic_id = cpu.processor_id as u8;
+    //hlt_loop();
+
+    let proc_id = cpu.processor_id as u8;
     let lapic_id = cpu.lapic_id as u8;
-    if apic_id == 0 {
+    if proc_id == 0 {
         serial_println!("BSP core entered AP entry point, this should never happen!");
         loop {
             core::arch::asm!("hlt");
@@ -574,13 +582,85 @@ pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
     }
 
     let lapic_base_addr = get_lapic_base_addr_phys();
-    serial_println!("AP core entry point reached for APIC ID {} (CPU {})", lapic_id, apic_id);
-    serial_println!("AP core {}: LAPIC base physical address: {:#x}", apic_id, lapic_base_addr);
+    serial_println!(
+        "AP core entry point reached for APIC ID {} (CPU {})",
+        lapic_id,
+        proc_id
+    );
+    serial_println!(
+        "AP core {}: LAPIC base physical address: {:#x}",
+        proc_id,
+        lapic_base_addr
+    );
     use x86_64::registers::control::Cr3;
     let (active_pml4_frame, _) = Cr3::read();
-    serial_println!("AP core {}: Active PML4 frame: {:#x}", apic_id, active_pml4_frame.start_address().as_u64());
+    serial_println!(
+        "AP core {}: Active PML4 frame: {:#x}",
+        proc_id,
+        active_pml4_frame.start_address().as_u64()
+    );
 
-    loop {
-        core::arch::asm!("hlt");
+    serial_println!(
+        "AP core {} (LAPIC ID {}) starting initialization...",
+        proc_id,
+        lapic_id
+    );
+
+    // Create the core's GDT
+    gdt::init_core_gdt(proc_id);
+    serial_println!("Core {}: GDT loaded", proc_id);
+
+    // Load IDT
+    interrupts::load_idt();
+    serial_println!("Core {}: IDT loaded", proc_id);
+
+    // we use the same page tables so we dont have to map
+    // but we need to initialize this core's LAPIC registers
+    {
+        let phys_mem_offset = VirtAddr::new(HHDM_OFFSET);
+        let pml4_virt =
+            VirtAddr::new(active_pml4_frame.start_address().as_u64() as u64 + HHDM_OFFSET);
+        let pml4_table = unsafe { &mut *(pml4_virt.as_u64() as *mut PageTable) };
+
+        let mut mapper = unsafe { OffsetPageTable::new(pml4_table, phys_mem_offset) };
+
+        let mut frame_allocator = get_frame_allocator();
+        let fa = &mut *frame_allocator;
+
+        // unsafe { map_local_apic_for_current_core(&mut mapper, fa) };
     }
+    unsafe { interrupts::init_lapic_for_current_core(proc_id) };
+    serial_println!("Core {}: LAPIC initialized", proc_id);
+
+    // TODO: Initialize this core in the core pool
+
+    // Initialize timer
+    unsafe { init_current_core() };
+    serial_println!("Core {}: Timer initialized", proc_id);
+
+    serial_println!("Core {}: Enabling interrupts...", proc_id);
+    interrupts::enable_interrupts();
+    serial_println!("Core {}: Interrupts enabled", proc_id);
+
+    let mut time_elapsed = 0;
+
+    process::scheduler::run_on_core_loop(proc_id);
+    // loop {
+    //     core::arch::asm!("hlt");
+    // }
+
+    // loop {
+    //     // let time_start = interrupts::system_uptime_ns();
+
+    //     // let time_end = interrupts::system_uptime_ns();
+    //     // let dt: u64 = time_end - time_start;
+    //     // time_elapsed += dt;
+    //     // serial_println_core!(
+    //     //     "Loop time: {} ns; {} ms",
+    //     //     dt,
+    //     //     dt as f32 / 1_000_000.0
+    //     // );
+
+    //     core::arch::asm!("hlt");
+    // }
 }

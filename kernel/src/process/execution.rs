@@ -3,7 +3,7 @@ use x86_64::{
     registers::control::{Cr3, Cr3Flags},
     structures::paging::PhysFrame,
 };
-use crate::{process::{Process}, serial_println};
+use crate::{hlt_loop, process::Process, serial_println, serial_println_core};
 use core::arch::asm;
 
 pub fn execute_process_direct(process: &Process) -> ! {
@@ -32,15 +32,15 @@ pub fn execute_process_direct(process: &Process) -> ! {
 }
 
 #[unsafe(no_mangle)]
-unsafe fn jump_to_userspace(entry_point: u64, stack_pointer: u64) -> ! {
-    serial_println!("Jumping to userspace:");
-    serial_println!("  Entry: {:#x}", entry_point);
-    serial_println!("  Stack: {:#x}", stack_pointer);
+pub unsafe fn jump_to_userspace(entry_point: u64, stack_pointer: u64) -> ! {
+    // serial_println_core!("Jumping to userspace:");
+    // serial_println_core!("  Entry: {:#x}", entry_point);
+    // serial_println_core!("  Stack: {:#x}", stack_pointer);
     
     let user_code_selector = crate::gdt::get_user_code_selector().0 as u64;
     let user_data_selector = crate::gdt::get_user_data_selector().0 as u64;
-    serial_println!("  CS: {:#x}", user_code_selector);
-    serial_println!("  SS: {:#x}", user_data_selector);
+    // serial_println_core!("  CS: {:#x}", user_code_selector);
+    // serial_println_core!("  SS: {:#x}", user_data_selector);
     
     x86_64::instructions::interrupts::disable();
     
@@ -69,4 +69,5 @@ unsafe fn jump_to_userspace(entry_point: u64, stack_pointer: u64) -> ! {
             options(noreturn)
         );
     }
+    hlt_loop()
 }

@@ -58,7 +58,7 @@ pub enum APICOffset {
     LvtPmcr = 0x340,  // LVT Performance Monitoring Counters Register
     LvtLint0 = 0x350, // LVT LINT0 Register
     LvtLint1 = 0x360, // LVT LINT1 Register
-    LvtE = 0x370,     // LVT Error Register
+    LvtErr = 0x370,     // LVT Error Register
     Ticr = 0x380,     // Initial Count Register (for Timer)
     Tccr = 0x390,     // Current Count Register (for Timer)
     R0x3A0 = 0x3A0,   // --reserved--

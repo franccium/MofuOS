@@ -1,7 +1,7 @@
-use crate::process::{
+use crate::{process::{
     process::INVALID_PID,
     process_manager::{ARCHE_PID, PROCESS_MANAGER},
-};
+}, serial_println_core};
 use crate::serial_println;
 use crate::util::msr::{msr_write};
 use core::arch::naked_asm;
@@ -204,6 +204,7 @@ pub fn handle_syscall(pid: usize, call: SystemCall) -> Result<(), SyscallError> 
 }
 
 //TODO: fix stacks
+//TODO: make per-core
 const SYSCALL_STACK_SIZE: usize = 4096 * 16;
 #[repr(align(4096))]
 struct SyscallStack([u8; SYSCALL_STACK_SIZE]);
@@ -300,17 +301,17 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 #[unsafe(no_mangle)]
 unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
     let frame = unsafe { &mut *frame };
-    
-    serial_println!(
-        "Syscall: num={}, arg1={:#x}, arg2={:#x}, arg3={:#x}, arg4={:#x}, arg5={:#x}, arg6={:#x}",
-        frame.syscall_num,
-        frame.arg1,
-        frame.arg2,
-        frame.arg3,
-        frame.arg4,
-        frame.arg5,
-        frame.arg6,
-    );
+
+    // serial_println!(
+    //     "Syscall: num={}, arg1={:#x}, arg2={:#x}, arg3={:#x}, arg4={:#x}, arg5={:#x}, arg6={:#x}",
+    //     frame.syscall_num,
+    //     frame.arg1,
+    //     frame.arg2,
+    //     frame.arg3,
+    //     frame.arg4,
+    //     frame.arg5,
+    //     frame.arg6,
+    // );
 
     match frame.syscall_num {
         2 => {
@@ -326,14 +327,15 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             count as u64
         }
         997 => {
-            serial_println!("997 returning: {}", frame.arg1 + 4);
+            // serial_println!("997 returning: {}", frame.arg1 + 4);
             frame.arg1 + 4
         }
         999 => {
-            serial_println!("Process exited");
+            serial_println!("Process exited with code: {}", frame.arg1);
             loop {
                 x86_64::instructions::hlt();
             }
+            frame.arg1
         }
         _ => u64::MAX,
     }
@@ -373,5 +375,5 @@ pub fn init_syscall() {
         msr_write(msr, IA32_FMASK_MSR_VALUE);
     }
 
-    serial_println!("Syscall MSRs initialized");
+    serial_println_core!("Syscall MSRs initialized");
 }

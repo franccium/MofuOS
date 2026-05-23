@@ -1,5 +1,5 @@
 use crate::data_structures::vector::Vec;
-use crate::process::ProcessResources;
+use crate::process::process::ProcessResources;
 //use alloc::vec::Vec;
 use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
@@ -177,6 +177,8 @@ impl ProcessManager {
         priority: u8,
     ) -> Result<usize, ProcessError> {
         // Verify parent exists
+        serial_println!("create_process_from_elf");
+
         let _parent = self
             .get_process(parent_pid)
             .map_err(|_| ProcessError::ParentNotFound)?;
@@ -184,12 +186,16 @@ impl ProcessManager {
         let new_pid = self.new_pid;
         self.new_pid += 1;
 
+        serial_println!("create_process_from_elf: assigned pid: {}", new_pid);
+
         // Allocate a CPU core for this process
         let mut core_pool = CORE_POOL.lock();
         let core_id = core_pool
             .allocate_core(new_pid)
             .ok_or(ProcessError::NoCoresAvailable)?;
         drop(core_pool);
+
+        serial_println!("create_process_from_elf: assigned Core ID: {}", core_id);
 
         // Create process structure with ELF-loaded memory
         let mut process = Process::create_with_elf(elf_info, name, new_pid, parent_pid)
@@ -210,13 +216,17 @@ impl ProcessManager {
         );
         kernel_thread.assign_to_core(core_id);
 
+        serial_println!("create_process_from_elf: assigned kernel thread to Core ID: {} for process name: {}, pid: {}", core_id, kernel_thread.name, kernel_thread.pid);
+
         // Create thread group
         let thread_group = ThreadGroup::new(new_pid, kernel_thread);
-
+        
         // Enqueue thread in scheduler for its assigned core
         let mut scheduler = SCHEDULER.lock();
         scheduler.enqueue_on_core(core_id, new_pid, priority);
         drop(scheduler);
+
+        serial_println!("create_process_from_elf: enqueued process PID {} on core {}; priority: {}", new_pid, core_id, priority);
 
         // Store process and thread group
         self.processes.push(process);

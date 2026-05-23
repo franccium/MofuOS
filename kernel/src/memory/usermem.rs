@@ -1,4 +1,4 @@
-use crate::{memory::memory::MemoryMapFrameAllocator, serial_println};
+use crate::{HHDM_OFFSET, memory::memory::MemoryMapFrameAllocator, serial_println};
 use x86_64::{
     PhysAddr, VirtAddr, structures::paging::{
         FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, Size4KiB, mapper::MapToError
@@ -36,6 +36,12 @@ impl UserMemoryManager {
         for kernel_entry_idx in LEVEL_4_KERNEL_ENTRIES_START..LEVEL_4_KERNEL_ENTRIES_END {
             pml4_table[kernel_entry_idx] = kernel_pml4_table[kernel_entry_idx].clone();
         }
+
+        // After mapping LAPIC, verify it's in the kernel PML4:
+let pml4_virt = VirtAddr::new(self.kernel_page_table_phys.as_u64() + HHDM_OFFSET);
+let pml4 = unsafe { &*(pml4_virt.as_u64() as *const PageTable) };
+let lapic_pml4_idx = ((0xFFFF_FFFF_FF80_0000u64 >> 39) & 0x1FF) as usize;
+serial_println!("LAPIC PML4 entry {}: {:?}", lapic_pml4_idx, pml4[lapic_pml4_idx].flags());
 
         serial_println!("allocate_new_address_space: Created user address space: top-level table at {:?}", new_table_pml4_phys);
 
@@ -111,14 +117,14 @@ impl UserMemoryManager {
 
         let user_flags = protection_flags | PageTableFlags::USER_ACCESSIBLE;
 
-        // let start_page = Page::containing_address(virt_addr);
-        // let end_page = Page::containing_address(virt_addr + size_bytes - 1u64);
-        // for page in Page::range_inclusive(start_page, end_page) {
-        //     let phys_frame = frame_allocator.allocate_frame().ok_or(MapToError::FrameAllocationFailed)?;
-        //     unsafe {
-        //         user_page_mapper.map_to(page, phys_frame, user_flags, frame_allocator)?.flush();
-        //     }
-        // }
+        let start_page = Page::containing_address(virt_addr);
+        let end_page = Page::containing_address(virt_addr + size_bytes - 1u64);
+        for page in Page::range_inclusive(start_page, end_page) {
+            let phys_frame = frame_allocator.allocate_frame().ok_or(MapToError::FrameAllocationFailed)?;
+            unsafe {
+                user_page_mapper.map_to(page, phys_frame, user_flags, frame_allocator)?.flush();
+            }
+        }
 
         Ok(())
     }

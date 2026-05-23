@@ -4,9 +4,15 @@ use crate::data_structures::vector::Vec;
 ///
 /// Uses the One-to-One threading model where each process is assigned a kernel thread
 /// that runs on a dedicated CPU core. Each core has its own scheduler queue.
-use crate::process::PID;
-use crate::serial_println;
+use crate::process::{PID, Process};
+use crate::process::execution::jump_to_userspace;
+use crate::process::process_manager::PROCESS_MANAGER;
+use crate::{serial_println, serial_println_core};
+use crate::util::cpuinfo::get_current_core_id;
 use spin::Mutex;
+use x86_64::PhysAddr;
+use x86_64::registers::control::{Cr3, Cr3Flags};
+use x86_64::structures::paging::PhysFrame;
 
 lazy_static::lazy_static! {
     pub static ref SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
@@ -249,6 +255,194 @@ impl Scheduler {
             total_blocked,
         }
     }
+}
+
+const SCHEDULER_ACTUALLY_RUN_A_PROCESS: bool = true;
+
+#[repr(C)]
+struct KernelContext {
+    rsp: u64,
+    rbp: u64,
+    rbx: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    rip: u64,
+}
+
+/// Save the current kernel context
+fn save_kernel_context() -> KernelContext {
+    let mut ctx = KernelContext {
+        rsp: 0,
+        rbp: 0,
+        rbx: 0,
+        r12: 0,
+        r13: 0,
+        r14: 0,
+        r15: 0,
+        rip: 0,
+    };
+    
+    unsafe {
+        core::arch::asm!(
+            "mov {rsp}, rsp",
+            "mov {rbp}, rbp",
+            "mov {rbx}, rbx",
+            "mov {r12}, r12",
+            "mov {r13}, r13",
+            "mov {r14}, r14",
+            "mov {r15}, r15",
+            "lea {rip}, [2f + rip]",
+            "2:",
+            rsp = out(reg) ctx.rsp,
+            rbp = out(reg) ctx.rbp,
+            rbx = out(reg) ctx.rbx,
+            r12 = out(reg) ctx.r12,
+            r13 = out(reg) ctx.r13,
+            r14 = out(reg) ctx.r14,
+            r15 = out(reg) ctx.r15,
+            rip = out(reg) ctx.rip,
+            options(nostack)
+        );
+    }
+    
+    ctx
+}
+
+/// Restore kernel context (called after returning from userspace)
+fn restore_kernel_context(ctx: &KernelContext) {
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {rsp}",
+            "mov rbp, {rbp}",
+            "mov rbx, {rbx}",
+            "mov r12, {r12}",
+            "mov r13, {r13}",
+            "mov r14, {r14}",
+            "mov r15, {r15}",
+            //"jmp {rip}",
+            rsp = in(reg) ctx.rsp,
+            rbp = in(reg) ctx.rbp,
+            rbx = in(reg) ctx.rbx,
+            r12 = in(reg) ctx.r12,
+            r13 = in(reg) ctx.r13,
+            r14 = in(reg) ctx.r14,
+            r15 = in(reg) ctx.r15,
+            //rip = in(reg) ctx.rip,
+            options(noreturn, nostack)
+        );
+    }
+}
+
+/// Execute a process in userspace
+/// This function returns when the process is preempted or makes a syscall
+pub fn execute_process(process: &Process) {
+    let pid = process.pid;
+    let core_id = get_current_core_id();
+    
+    // Save current kernel context
+    let kernel_context = save_kernel_context();
+    
+    // Switch to the process's page table
+    let page_table_frame = PhysFrame::containing_address(
+        PhysAddr::new(process.execution_context.page_table_base_phys)
+    );
+    let old_page_table = Cr3::read();
+    unsafe {
+        Cr3::write(page_table_frame, Cr3Flags::empty());
+    }
+    
+    // Jump to userspace
+    // The process will come back via:
+    // 1. Syscall (handled by syscall_handler)
+    // 2. Timer interrupt (handled by timer_interrupt_handler)
+    // 3. Page fault or other exception
+    unsafe {
+        jump_to_userspace(
+            process.execution_context.rip,
+            process.execution_context.rsp,
+        );
+    }
+    serial_println_core!("returned");
+    // When we get back (via sysret or iret in interrupt handler):
+    // Restore kernel page table
+    unsafe {
+        let (frame, flags) = old_page_table;
+        Cr3::write(frame, flags);
+    }
+    
+    // Restore kernel context
+    restore_kernel_context(&kernel_context);
+}
+
+/// The main scheduler loop for each core
+/// This function runs forever on each core
+pub fn run_on_core_loop(core_id: u8) -> ! {
+    serial_println_core!("Entering scheduler loop");
+    
+    loop {
+        // Disable interrupts for atomic scheduler check
+        x86_64::instructions::interrupts::disable();
+        serial_println_core!("disabled interrupts");
+
+        // Get next process for this core
+        let next_pid = {
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.get_next_on_core(core_id)
+        };
+
+        serial_println_core!("got next on core");
+        
+        if let Some(pid) = next_pid {
+            {
+                let mut scheduler = SCHEDULER.lock();
+                scheduler.set_current_on_core(core_id, pid);
+            }
+            
+            // Re-enable interrupts before running the process
+            x86_64::instructions::interrupts::enable();
+            
+            // SWITCH TO THE PROCESS
+            // This is where you'd do a context switch
+            // For now, just signal that we'd run it
+            let process_priority = 4;
+            
+            serial_println_core!("set current on core");
+
+            if SCHEDULER_ACTUALLY_RUN_A_PROCESS {
+                let pm = PROCESS_MANAGER.lock();
+                let process = {
+                    pm.get_process(pid)
+                };
+
+                if let Ok(process) = process {
+                    execute_process(process);
+                }
+            } else {
+                serial_println!("Would run PID {}", pid);
+                
+                // TODO: Actually switch to the process's address space and stack
+                // switch_to_process(pid);
+            }
+
+            {
+                let mut scheduler = SCHEDULER.lock();
+                scheduler.enqueue_on_core(core_id, pid, process_priority);
+            }
+            
+        } else {
+            // No process available - enable interrupts and halt
+            x86_64::instructions::interrupts::enable();
+            x86_64::instructions::hlt();
+        }
+    }
+}
+
+/// Mark a core as ready to receive work
+pub fn core_ready(core_id: u8) {
+    serial_println!("Core {}: Marked as ready", core_id);
+    // Any additional initialization for the core in scheduler
 }
 
 #[derive(Debug, Clone, Copy)]

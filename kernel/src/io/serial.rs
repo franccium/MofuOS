@@ -39,3 +39,24 @@ macro_rules! serial_println {
     ($fmt:expr, $($arg:tt)*) => ($crate::serial_print!(
         concat!($fmt, "\n"), $($arg)*));
 }
+
+/// Prints to the host through the serial interface with core ID prepended, appending a newline.
+#[macro_export]
+macro_rules! serial_println_core {
+    () => (
+        $crate::serial_print!("[Core {}] \n", $crate::util::cpuinfo::get_current_core_id())
+    );
+    ($fmt:expr) => (
+        $crate::serial_print!(
+            concat!("[Core {}] ", $fmt, "\n"),
+            $crate::util::cpuinfo::get_current_core_id()
+        )
+    );
+    ($fmt:expr, $($arg:tt)*) => (
+        $crate::serial_print!(
+            concat!("[Core {}] ", $fmt, "\n"),
+            $crate::util::cpuinfo::get_current_core_id(),
+            $($arg)*
+        )
+    );
+}

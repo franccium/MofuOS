@@ -1,16 +1,12 @@
 use crate::main;
 use kernel::{
-    boot_info::{BOOT_INFO, BootInfo},
-    init_globals, interrupts, memory,
-    memory::allocator,
-    serial_println,
-    util::cpuinfo::init_cpu_info,
+    boot_info::{BOOT_INFO, BootInfo}, gdt::init_core_gdt, interrupts, memory::{self, allocator}, serial_println, serial_println_core, util::cpuinfo::init_cpu_info
 };
 use kernel::{
     interrupts::map_local_apic_for_current_core,
     memory::memory::MemoryMapFrameAllocator,
     process::{CORE_POOL, CorePool, SCHEDULER},
-    util::cpuinfo::{self, ap_core_entry_point, init_cpu_infos, init_current_core, start_ap_core},
+    util::cpuinfo::{self, init_cpu_infos, init_current_core},
 };
 use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker,
@@ -113,8 +109,7 @@ unsafe extern "C" fn kmain() -> ! {
     let framebuffer_response = FRAMEBUFFER_REQUEST
         .response()
         .expect("Failed to get framebuffer response");
-    let framebuffer_ref = framebuffer_response.framebuffers().get(0).unwrap();
-    let framebuffer = (*framebuffer_ref).clone();
+    let framebuffer = framebuffer_response.framebuffers().get(0).unwrap();
     kernel::graphics::framebuffer::init_framebuffer(framebuffer);
 
     let boot_info = BootInfo {
@@ -125,7 +120,11 @@ unsafe extern "C" fn kmain() -> ! {
     BOOT_INFO.call_once(|| boot_info);
     serial_println!("Boot Info: hhdm_offset: {}", hhdm_offset);
 
-    init_globals();
+    // init BSP's GDT and IDT
+    unsafe {
+        init_core_gdt(0);
+        interrupts::load_idt();
+    }
 
     let mut mapper = unsafe { memory::memory::init_offset_page_table(hhdm_offset) };
     serial_println!("Offset page table initialized");
@@ -148,13 +147,11 @@ unsafe extern "C" fn kmain() -> ! {
         "1 Active PML4 frame: {:#x}",
         active_pml4_frame.start_address().as_u64()
     );
+    unsafe { map_local_apic_for_current_core(&mut mapper, &mut frame_allocator) };
 
-    memory::memory::setup_ap_trampoline_mapping(&mut mapper, &mut frame_allocator);
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
     serial_println!("Heap initialized");
-
-    cpuinfo::init_ap_support(&mut mapper, &mut frame_allocator);
 
     let mp_response = MP_REQUEST.response().expect("Failed to get MP response");
 
@@ -185,7 +182,7 @@ unsafe extern "C" fn kmain() -> ! {
 
     unsafe { init_cpu_infos(&cpus) };
     serial_println!("Mapping lapic for core 0");
-    unsafe { map_local_apic_for_current_core(&mut mapper, &mut frame_allocator) };
+    unsafe { interrupts::init_lapic_for_current_core(0) };
 
     let mut core_pool = CORE_POOL.lock();
     core_pool.init_with_core_count(core_count as u8, cpus);
@@ -205,26 +202,29 @@ unsafe extern "C" fn kmain() -> ! {
     };
 
     interrupts::disable_interrupts();
+    
+    let (kernel_page_table_frame, _) = x86_64::registers::control::Cr3::read();
+    let kernel_page_table_phys = kernel_page_table_frame.start_address();
+    let user_memory_manager =
+        memory::usermem::UserMemoryManager::new(kernel_page_table_phys, hhdm_offset);
+        serial_println_core!("Global memory managers initialized");
+
+    memory::init_memory_globals(frame_allocator, user_memory_manager);
 
     // the address to jump to. Writing to this field will cause the core to jump to the given function.
     // The function will receive a pointer to this structure, and it will have its own 64KiB
     cpus[1].bootstrap(cpuinfo::ap_core_from_limine_entry_point, 0x12345678);
     let passed = cpus[1].extra_argument();
-    serial_println!(
-        "Bootstrap signal sent to AP core 1, extra argument read back: {:#x}",
+    serial_println_core!(
+        "Bootstrap done for AP core 1, extra argument read back: {:#x}",
         passed
     );
 
-    serial_println!("BSP continued execution");
+    serial_println_core!("BSP continued execution");
 
-    let (kernel_page_table_frame, _) = x86_64::registers::control::Cr3::read();
-    let kernel_page_table_phys = kernel_page_table_frame.start_address();
-    let user_memory_manager =
-        memory::usermem::UserMemoryManager::new(kernel_page_table_phys, hhdm_offset);
-    serial_println!("Global memory managers initialized");
+    serial_println_core!("ENABLING INTERRUPTS");
     interrupts::enable_interrupts();
 
-    //memory::init_memory_globals(frame_allocator, user_memory_manager);
 
     main()
 }

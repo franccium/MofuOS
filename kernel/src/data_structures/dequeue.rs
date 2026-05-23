@@ -94,7 +94,6 @@ impl<T> Dequeue<T> {
         
         self.tail = self.wrap_index(self.tail + 1);
         self.size += 1;
-        serial_println!("push_back: New tail: {}, size: {}", self.tail, self.size);
     }
 
     pub fn push_front(&mut self, value: T) {
