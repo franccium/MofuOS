@@ -208,17 +208,12 @@ unsafe extern "C" fn kmain() -> ! {
 
     // the address to jump to. Writing to this field will cause the core to jump to the given function.
     // The function will receive a pointer to this structure, and it will have its own 64KiB
-
     cpus[1].bootstrap(cpuinfo::ap_core_from_limine_entry_point, 0x12345678);
     let passed = cpus[1].extra_argument();
     serial_println!(
         "Bootstrap signal sent to AP core 1, extra argument read back: {:#x}",
         passed
     );
-
-    // cpus[1].extra.store(0x12345678, core::sync::atomic::Ordering::SeqCst);
-    // core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    // cpus[1].goto_address.write(cpuinfo::ap_core_from_limine_entry_point(&cpus[1]));
 
     serial_println!("BSP continued execution");
 
@@ -228,24 +223,6 @@ unsafe extern "C" fn kmain() -> ! {
         memory::usermem::UserMemoryManager::new(kernel_page_table_phys, hhdm_offset);
     serial_println!("Global memory managers initialized");
     interrupts::enable_interrupts();
-
-    // /// init other cores and timers
-    // let hhdm_offset = BOOT_INFO.get().unwrap().hhdm_offset;
-    // for (idx, cpu) in cpus.iter().enumerate() {
-    //     let core_id = cpu.id as u8;
-
-    //     if core_id == 0 {
-    //         continue;
-    //     }
-
-    //     serial_println!("Booting AP Core {} (LAPIC ID: {})", core_id, cpu.lapic_id);
-
-    //     // Send INIT-SIPI-SIPI sequence to start the AP core
-    //     // This is architecture-specific and depends on your APIC implementation
-    //     let entry_phys = (ap_core_entry_point as u64) - hhdm_offset;
-
-    //     unsafe { start_ap_core(core_id, cpu.lapic_id as u8, hhdm_offset, &mut mapper, &mut frame_allocator); }
-    // }
 
     //memory::init_memory_globals(frame_allocator, user_memory_manager);
 
