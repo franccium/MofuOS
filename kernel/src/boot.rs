@@ -1,12 +1,8 @@
 use kernel::{interrupts::map_local_apic_for_current_core, memory::memory::MemoryMapFrameAllocator, process::{CORE_POOL, CorePool, SCHEDULER}, util::cpuinfo::{self, ap_core_entry_point, init_cpu_infos, init_current_core, start_ap_core}};
 use limine::{
-    BaseRevision,
-    framebuffer::{Framebuffer},
-    paging::Mode,
-    request::{
-        EfiMemoryMapRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, PagingModeRequest,
-        RequestsEndMarker, RequestsStartMarker, RsdpRequest, MpRequest
-    },
+    BaseRevision, framebuffer::Framebuffer, paging::Mode, request::{
+        EfiMemoryMapRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, MpRequest, PagingModeRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest
+    }
 };
 use spin::Mutex;
 use spin::Once;
@@ -170,7 +166,11 @@ serial_println!("1 Active PML4 frame: {:#x}", active_pml4_frame.start_address().
 
     let mp_response = MP_REQUEST
         .get_response()
-        .expect("Failed to get SMP response");
+        .expect("Failed to get MP response");
+
+    serial_println!("MP Response received");
+    serial_println!("BSP LAPIC ID: {}", mp_response.bsp_lapic_id());
+    serial_println!("uses 2xAPIC? {}", mp_response.flags().contains(limine::mp::ResponseFlags::X2APIC));
 
     let cpus= mp_response.cpus();
     let core_count = cpus.len();
@@ -182,18 +182,17 @@ serial_println!("1 Active PML4 frame: {:#x}", active_pml4_frame.start_address().
 
     unsafe { init_cpu_info() };
     for (i, cpu) in cpus.iter().enumerate() {
-    serial_println!("  CPU {}: LAPIC ID={}, Processor ID={}",
-        i, cpu.lapic_id, cpu.id);
+        serial_println!("  CPU {}: LAPIC ID={}, Processor ID={}",
+            i, cpu.lapic_id, cpu.id);
     }
-
-
-    let mut core_pool = CORE_POOL.lock();
-    core_pool.init_with_core_count(core_count as u8, cpus);
-    drop(core_pool);
 
     unsafe { init_cpu_infos(&cpus) };
     serial_println!("Mapping lapic for core 0");
     unsafe { map_local_apic_for_current_core(&mut mapper, &mut frame_allocator) };
+    
+    let mut core_pool = CORE_POOL.lock();
+    core_pool.init_with_core_count(core_count as u8, cpus);
+    drop(core_pool);
     unsafe { init_current_core() };
     let mut scheduler = SCHEDULER.lock();
     scheduler.init_with_core_count(core_count as u8);
@@ -209,6 +208,18 @@ serial_println!("1 Active PML4 frame: {:#x}", active_pml4_frame.start_address().
         )
     };
 
+    interrupts::disable_interrupts();
+
+    // the address to jump to. Writing to this field will cause the core to jump to the given function. 
+    // The function will receive a pointer to this structure, and it will have its own 64KiB
+
+    cpus[1].extra.store(0x12345678, core::sync::atomic::Ordering::SeqCst);
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    cpus[1].goto_address.write(cpuinfo::ap_core_from_limine_entry_point(&cpus[1]));
+
+    serial_println!("BSP continued execution");
+
+
     let (kernel_page_table_frame, _) = x86_64::registers::control::Cr3::read();
     let kernel_page_table_phys = kernel_page_table_frame.start_address();
     let user_memory_manager = memory::usermem::UserMemoryManager::new(
@@ -218,26 +229,26 @@ serial_println!("1 Active PML4 frame: {:#x}", active_pml4_frame.start_address().
     serial_println!("Global memory managers initialized");
     interrupts::enable_interrupts();
     
-    /// init other cores and timers
-    let hhdm_offset = BOOT_INFO.get().unwrap().hhdm_offset;
-    for (idx, cpu) in cpus.iter().enumerate() {
-        let core_id = cpu.id as u8;
+    // /// init other cores and timers
+    // let hhdm_offset = BOOT_INFO.get().unwrap().hhdm_offset;
+    // for (idx, cpu) in cpus.iter().enumerate() {
+    //     let core_id = cpu.id as u8;
 
 
-        if core_id == 0 {
-            continue;
-        }
+    //     if core_id == 0 {
+    //         continue;
+    //     }
 
-        serial_println!("Booting AP Core {} (LAPIC ID: {})", core_id, cpu.lapic_id);
-
-
-        // Send INIT-SIPI-SIPI sequence to start the AP core
-        // This is architecture-specific and depends on your APIC implementation
-        let entry_phys = (ap_core_entry_point as u64) - hhdm_offset;
+    //     serial_println!("Booting AP Core {} (LAPIC ID: {})", core_id, cpu.lapic_id);
 
 
-        unsafe { start_ap_core(core_id, cpu.lapic_id as u8, hhdm_offset, &mut mapper, &mut frame_allocator); }
-    }
+    //     // Send INIT-SIPI-SIPI sequence to start the AP core
+    //     // This is architecture-specific and depends on your APIC implementation
+    //     let entry_phys = (ap_core_entry_point as u64) - hhdm_offset;
+
+
+    //     unsafe { start_ap_core(core_id, cpu.lapic_id as u8, hhdm_offset, &mut mapper, &mut frame_allocator); }
+    // }
 
     //memory::init_memory_globals(frame_allocator, user_memory_manager);
 

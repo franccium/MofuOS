@@ -1,9 +1,9 @@
 use crate::asm::ap_trampoline;
 use crate::interrupts::{
-    self, get_lapic_base_addr, init_timer_for_core, map_local_apic_for_current_core,
+    self, get_lapic_base_addr, get_lapic_base_addr_phys, init_timer_for_core, map_local_apic_for_current_core
 };
 use crate::process::{CORE_POOL, SCHEDULER};
-use crate::serial_println;
+use crate::{hlt_loop, serial_println};
 use crate::util::apic::APICOffset;
 use crate::util::msr::msr_read;
 use alloc::vec::Vec;
@@ -568,6 +568,10 @@ pub fn init_ap_support(
         use x86_64::registers::control::Cr3;
         let (frame, flags) = Cr3::read();
         Cr3::write(frame, flags);
+
+        core::ptr::write_volatile(MAGIC_OFFSET as *mut u64, 0);
+        core::ptr::write_volatile(AP_CORE_APIC_ID_MESSAGE_OFFSET as *mut u64, 0);
+        core::ptr::write_volatile(AP_CORE_CR3_MESSAGE_OFFSET as *mut u64, 0);
     }
 }
 
@@ -1342,3 +1346,133 @@ impl CpuInfo {
         s
     }
 }
+
+pub unsafe extern "C" fn ap_core_from_limine_entry_point_for_bsp(cpu: &Cpu) -> ! {
+    let apic_id = cpu.id as u8;
+    let lapic_id = cpu.lapic_id as u8;
+
+    let lapic_base_addr = get_lapic_base_addr_phys();
+    serial_println!("AP core entry point reached for APIC ID {} (CPU {})", lapic_id, apic_id);
+    serial_println!("AP core {}: LAPIC base physical address: {:#x}", apic_id, lapic_base_addr);
+    use x86_64::registers::control::Cr3;
+    let (active_pml4_frame, _) = Cr3::read();
+    serial_println!("AP core {}: Active PML4 frame: {:#x}", apic_id, active_pml4_frame.start_address().as_u64());
+    hlt_loop()
+}
+
+
+pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &Cpu) -> ! {
+    let apic_id = cpu.id as u8;
+    let lapic_id = cpu.lapic_id as u8;
+    if apic_id == 0 {
+        serial_println!("BSP core entered AP entry point, this should never happen!");
+        loop {
+            core::arch::asm!("hlt");
+        }
+    }
+
+    let lapic_base_addr = get_lapic_base_addr_phys();
+    serial_println!("AP core entry point reached for APIC ID {} (CPU {})", lapic_id, apic_id);
+    serial_println!("AP core {}: LAPIC base physical address: {:#x}", apic_id, lapic_base_addr);
+    use x86_64::registers::control::Cr3;
+    let (active_pml4_frame, _) = Cr3::read();
+    serial_println!("AP core {}: Active PML4 frame: {:#x}", apic_id, active_pml4_frame.start_address().as_u64());
+    // // CRITICAL: Initialize AP's Local APIC FIRST
+    // unsafe {
+    //     //let lapic_ptr = 0xFEE00000 as *mut u32;
+    //TODO: this is incorrect should have different lapic base
+    //     let lapic_ptr = (0xFFFF_8000_0000_0000 as u64 + 0xfee00000 as u64) as *mut u32;
+        
+    //     // 1. Enable the LAPIC by setting spurious interrupt vector
+    //     // Bit 8 = APIC Software Enable/Disable
+    //     // Bits 0-7 = Spurious vector (usually 0xFF)
+    //     let svr = lapic_ptr.add(0x0F0 / 4);
+    //     let current_svr = core::ptr::read_volatile(svr);
+    //     core::ptr::write_volatile(svr, current_svr | 0x1FF); // Enable + vector 0xFF
+
+    //     serial_println!("AP core {}: LAPIC enabled with SVR={:#x}", apic_id, current_svr | 0x1FF);
+        
+    //     // 2. Initialize LVT entries to masked state
+    //     // LVT Timer
+    //     core::ptr::write_volatile(lapic_ptr.add(0x320 / 4), 0x10000); // Masked
+    //     // LVT LINT0
+    //     core::ptr::write_volatile(lapic_ptr.add(0x350 / 4), 0x10000); // Masked  
+    //     // LVT LINT1
+    //     core::ptr::write_volatile(lapic_ptr.add(0x360 / 4), 0x10000); // Masked
+    //     // LVT Error
+    //     core::ptr::write_volatile(lapic_ptr.add(0x370 / 4), 0x10000); // Masked
+    //     // LVT Performance Counter
+    //     core::ptr::write_volatile(lapic_ptr.add(0x340 / 4), 0x10000); // Masked
+    //     // LVT Thermal Sensor
+    //     core::ptr::write_volatile(lapic_ptr.add(0x330 / 4), 0x10000); // Masked
+
+    //     serial_println!("AP core {}: LAPIC LVT entries masked", apic_id);
+        
+    //     // 3. Clear any pending errors
+    //     core::ptr::write_volatile(lapic_ptr.add(0x280 / 4), 0); // Error Status Register
+        
+    //     // 4. Send EOI (though INIT shouldn't need one, it's safe)
+    //     core::ptr::write_volatile(lapic_ptr.add(0x0B0 / 4), 0);
+        
+    //     // 5. Set Task Priority to 0 (accept all interrupts)
+    //     core::ptr::write_volatile(lapic_ptr.add(0x080 / 4), 0);
+        
+    //     // 6. Set Logical Destination Register
+    //     core::ptr::write_volatile(lapic_ptr.add(0x0D0 / 4), 
+    //         (core::ptr::read_volatile(lapic_ptr.add(0x0D0 / 4)) & 0xFFFFFF00) | 1);
+            
+    //     // 7. Set Destination Format Register for flat model
+    //     core::ptr::write_volatile(lapic_ptr.add(0x0E0 / 4), 0xFFFFFFFF);
+
+    //     serial_println!("AP core {}: LAPIC fully initialized", apic_id);
+    // }
+    
+    // serial_println!("AP core entry point reached for APIC ID {} (CPU {})", lapic_id, apic_id);
+    
+    // // Write APIC ID to trampoline message area for debugging
+    // core::ptr::write_volatile(MAGIC_OFFSET as *mut u64, AP_CORE_FUNCTION_ACHIEVED);
+    // core::ptr::write_volatile(AP_CORE_APIC_ID_MESSAGE_OFFSET as *mut u64, apic_id as u64);
+    // core::ptr::write_volatile(AP_CORE_CR3_MESSAGE_OFFSET as *mut u64, cpu.extra.load(Ordering::Relaxed) as u64);
+    
+    // // Signal back to BSP that we're initialized
+    // // (You could use an atomic flag here)
+    
+    loop {
+        core::arch::asm!("hlt");
+    }
+}
+
+// pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &Cpu) -> ! {
+//     let apic_id = cpu.id as u8;
+//     let lapic_id = cpu.lapic_id as u8;
+//     serial_println!("AP core entry point reached for APIC ID {} (CPU {})", lapic_id, apic_id);
+
+//     unsafe {
+//         // Map AP's Local APIC (same physical address, identity mapped usually)
+//         // The AP also needs access to its LAPIC at 0xFEE00000
+        
+//         // Send EOI to clear any pending INIT/SIPI state
+//         let lapic_ptr = 0xFEE00000 as *mut u32;
+//         let eoi_offset = 0x0B0 / 4; // EOI register offset
+//         core::ptr::write_volatile(lapic_ptr.add(eoi_offset), 0);
+        
+//         // Initialize AP's LAPIC (similar to BSP initialization)
+//         // At minimum: set spurious interrupt vector and enable it
+//     }
+
+//     // Write APIC ID to trampoline message area for debugging
+//     core::ptr::write_volatile(MAGIC_OFFSET as *mut u64, AP_CORE_FUNCTION_ACHIEVED);
+//     core::ptr::write_volatile(AP_CORE_APIC_ID_MESSAGE_OFFSET as *mut u64, apic_id as u64);
+//     core::ptr::write_volatile(AP_CORE_CR3_MESSAGE_OFFSET as *mut u64, cpu.extra.load(Ordering::Relaxed) as u64);
+
+//     // loop {
+//     //     core::arch::asm!("hlt");
+//     // }
+
+    
+
+//     // Now call the main AP entry point
+//     //ap_core_entry_point();
+
+//     hlt_loop()
+// }
