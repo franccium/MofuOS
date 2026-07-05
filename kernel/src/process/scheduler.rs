@@ -427,17 +427,42 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
             serial_println_core!("set current on core");
 
             if SCHEDULER_ACTUALLY_RUN_A_PROCESS {
-                let pm = PROCESS_MANAGER.lock();
-                let process = { pm.get_process(pid) };
+                // Extract the execution context while holding the PM lock, then
+                // drop the lock BEFORE jumping to userspace.  jump_to_userspace
+                // is `-> !` (it never returns here), so any lock held across it
+                // is held forever.  When the process makes a syscall (e.g. exit)
+                // the syscall handler tries to acquire PROCESS_MANAGER — which
+                // would deadlock if we still held it here.
+                let exec_ctx = {
+                    let pm = PROCESS_MANAGER.lock();
+                    match pm.get_process(pid) {
+                        Ok(process) => Some((
+                            process.pid,
+                            process.execution_context.rip,
+                            process.execution_context.rsp,
+                            process.execution_context.page_table_base_phys,
+                        )),
+                        Err(_) => None,
+                    }
+                    // pm lock is released here
+                };
 
-                if let Ok(process) = process {
-                    execute_process(process);
+                if let Some((proc_pid, rip, rsp, cr3)) = exec_ctx {
+                    set_current_process_for_core(core_id, proc_pid);
+
+                    let page_table_frame = PhysFrame::containing_address(
+                        PhysAddr::new(cr3)
+                    );
+                    unsafe {
+                        Cr3::write(page_table_frame, Cr3Flags::empty());
+                    }
+
+                    unsafe {
+                        jump_to_userspace(rip, rsp);
+                    }
                 }
             } else {
                 serial_println!("Would run PID {}", pid);
-
-                // TODO: Actually switch to the process's address space and stack
-                // switch_to_process(pid);
             }
 
             mark_core_idle(core_id);

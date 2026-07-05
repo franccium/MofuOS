@@ -219,10 +219,10 @@ impl Process {
             let in_memory_size = segment.in_memory_size as u64;
 
             let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-            if segment.flags & ElfLoadFlags::Writable != 0 {
+            if segment.flags & ElfLoadFlags::Writable as u32 != 0 {
                 flags |= PageTableFlags::WRITABLE;
             }
-            if segment.flags & ElfLoadFlags::Executable == 0 {
+            if segment.flags & ElfLoadFlags::Executable as u32 == 0 {
                 flags |= PageTableFlags::NO_EXECUTE;
             }
 
