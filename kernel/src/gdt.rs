@@ -118,21 +118,26 @@ pub unsafe fn init_core_gdt(core_id: u8) {
 }
 
 pub fn get_kernel_code_selector() -> SegmentSelector {
-    unsafe { PER_CORE_GDT[0].kernel_code_selector }
+    let core_id = crate::util::cpuinfo::get_current_core_id() as usize;
+    unsafe { PER_CORE_GDT[core_id].kernel_code_selector }
 }
 
 pub fn get_kernel_data_selector() -> SegmentSelector {
-    unsafe { PER_CORE_GDT[0].kernel_data_selector }
+    let core_id = crate::util::cpuinfo::get_current_core_id() as usize;
+    unsafe { PER_CORE_GDT[core_id].kernel_data_selector }
 }
 
 pub fn get_user_code_selector() -> SegmentSelector {
-    unsafe { PER_CORE_GDT[0].user_code_selector }
+    let core_id = crate::util::cpuinfo::get_current_core_id() as usize;
+    unsafe { PER_CORE_GDT[core_id].user_code_selector }
 }
 
 pub fn get_user_data_selector() -> SegmentSelector {
-    unsafe { PER_CORE_GDT[0].user_data_selector }
+    let core_id = crate::util::cpuinfo::get_current_core_id() as usize;
+    unsafe { PER_CORE_GDT[core_id].user_data_selector }
 }
 
 pub fn get_tss_selector() -> SegmentSelector {
-    unsafe { PER_CORE_GDT[0].tss_selector }
+    let core_id = crate::util::cpuinfo::get_current_core_id() as usize;
+    unsafe { PER_CORE_GDT[core_id].tss_selector }
 }

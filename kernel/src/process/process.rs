@@ -171,10 +171,17 @@ impl Process {
         stack_top: u64,
         page_table_base_phys: u64,
     ) -> Result<Self, MapToError<Size4KiB>> {
-        let address_space_manager = &crate::memory::get_user_mem_mgr();
-        let mut frame_allocator = crate::memory::get_frame_allocator();
-
-        let mut memory_layout = ProcessMemoryLayout::new(address_space_manager, &mut frame_allocator)?;
+        // Caller provides a fully-constructed memory layout so that this
+        // constructor does not silently allocate (and potentially leak) a PML4
+        // frame that the caller would then ignore.
+        let memory_layout = crate::process::process_mem::ProcessMemoryLayout {
+            top_page_table_phys: x86_64::PhysAddr::new(page_table_base_phys),
+            stack_top: x86_64::VirtAddr::new(stack_top),
+            stack_size: 0,
+            heap_start: x86_64::VirtAddr::new(0x0000_0000_6000_0000),
+            heap_end: x86_64::VirtAddr::new(0x0000_0000_6000_0000),
+            mapped_regions: alloc::vec::Vec::new(),
+        };
 
         Ok(Self {
             pid,
@@ -188,7 +195,7 @@ impl Process {
             exit_code: None,
             is_out,
             execution_context: ExecutionContext::new(entry_point, stack_top, page_table_base_phys),
-            memory_layout: memory_layout
+            memory_layout,
         })
     }
 
@@ -210,18 +217,22 @@ impl Process {
             let vaddr = VirtAddr::new(segment.vaddr);
             let in_memory_size = segment.in_memory_size as u64;
 
-            // TODO: Parse actual segment flags from ELF
+            // Parse ELF p_flags: PF_X=1, PF_W=2, PF_R=4
+            const PF_X: u32 = 0x1;
+            const PF_W: u32 = 0x2;
             let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-            if segment.vaddr >= 0x400000 {
+            if segment.flags & PF_W != 0 {
                 flags |= PageTableFlags::WRITABLE;
-            } else {
-                flags |= PageTableFlags::WRITABLE;
+            }
+            if segment.flags & PF_X == 0 {
+                flags |= PageTableFlags::NO_EXECUTE;
             }
 
             serial_println!(
-                "  Mapping ELF segment: vaddr={:#x}, size={:#x}",
+                "  Mapping ELF segment: vaddr={:#x}, size={:#x}, elf_flags={:#x}",
                 vaddr.as_u64(),
-                in_memory_size
+                in_memory_size,
+                segment.flags,
             );
 
             address_space_manager.map_virt_mem_region(
@@ -232,36 +243,62 @@ impl Process {
                 &mut frame_allocator,
             )?;
 
-            let phys_addr = address_space_manager
-                .translate_user_virt_to_phys(memory_layout.top_page_table_phys, vaddr)
-                .expect("Failed to translate user virtual address to physical");
-            let hhdm_vaddr = phys_addr.as_u64() + address_space_manager.phys_offset;
+            // Copy segment file data into the mapped pages via HHDM.
+            // translate_user_virt_to_phys returns the physical address of the
+            // page containing the given vaddr, so we drive the copy page-by-page.
+            let mut bytes_copied: u64 = 0;
+            let file_size = segment.in_file_size as u64;
+            while bytes_copied < file_size {
+                let src_vaddr = vaddr + bytes_copied;
+                let phys = address_space_manager
+                    .translate_user_virt_to_phys(memory_layout.top_page_table_phys, src_vaddr)
+                    .expect("Failed to translate user vaddr for segment copy");
+                let hhdm_vaddr = phys.as_u64() + address_space_manager.phys_offset;
 
-            // copy segment data
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    segment.data.as_ptr(),
-                    hhdm_vaddr as *mut u8,
-                    segment.in_file_size as usize,
-                );
+                // How many bytes remain in this 4 KiB page?
+                let page_offset = src_vaddr.as_u64() & 0xFFF;
+                let bytes_in_page = (0x1000 - page_offset).min(file_size - bytes_copied);
+
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        segment.data.as_ptr().add(bytes_copied as usize),
+                        hhdm_vaddr as *mut u8,
+                        bytes_in_page as usize,
+                    );
+                }
+                bytes_copied += bytes_in_page;
             }
             serial_println!(
                 "  Copied {} bytes to {:#x}",
-                segment.in_file_size,
+                file_size,
                 vaddr.as_u64()
             );
 
-            // zero-fill the bss section
+            // Zero-fill the BSS (in-memory > in-file) via HHDM, page by page.
             if segment.in_memory_size > segment.in_file_size {
-                let bss_start = vaddr + segment.in_file_size;
-                let bss_size = segment.in_memory_size - segment.in_file_size;
-                unsafe {
-                    core::ptr::write_bytes(bss_start.as_mut_ptr::<u8>(), 0u8, bss_size as usize);
+                let bss_offset = segment.in_file_size as u64;
+                let bss_size   = (segment.in_memory_size - segment.in_file_size) as u64;
+                let mut bytes_zeroed: u64 = 0;
+
+                while bytes_zeroed < bss_size {
+                    let bss_vaddr = vaddr + bss_offset + bytes_zeroed;
+                    let phys = address_space_manager
+                        .translate_user_virt_to_phys(memory_layout.top_page_table_phys, bss_vaddr)
+                        .expect("Failed to translate user vaddr for BSS zeroing");
+                    let hhdm_vaddr = phys.as_u64() + address_space_manager.phys_offset;
+
+                    let page_offset = bss_vaddr.as_u64() & 0xFFF;
+                    let bytes_in_page = (0x1000 - page_offset).min(bss_size - bytes_zeroed);
+
+                    unsafe {
+                        core::ptr::write_bytes(hhdm_vaddr as *mut u8, 0u8, bytes_in_page as usize);
+                    }
+                    bytes_zeroed += bytes_in_page;
                 }
                 serial_println!(
-                    "  Zeroed BSS: {:#x} bytes at {:#x}",
+                    "  Zeroed BSS: {:#x} bytes starting at user vaddr {:#x}",
                     bss_size,
-                    bss_start.as_u64()
+                    (vaddr + bss_offset).as_u64(),
                 );
             }
 

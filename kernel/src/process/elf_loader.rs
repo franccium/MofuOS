@@ -17,6 +17,8 @@ pub struct LoadSegment {
     pub vaddr: u64,
     pub in_file_size: u64,
     pub in_memory_size: u64, // includes the bss section
+    /// Raw ELF p_flags: PF_X=1, PF_W=2, PF_R=4
+    pub flags: u32,
     pub data: Vec<u8>,
 }
 
@@ -51,7 +53,8 @@ fn merge_segments(segments: Vec<LoadSegment>) -> Vec<LoadSegment> {
         if next.vaddr <= curr_end {
             let next_end = next.vaddr + next.in_memory_size;
             let new_end = core::cmp::max(next_end, curr_end);
-            curr_seg.in_memory_size = new_end - curr_end;
+            curr_seg.in_memory_size = new_end - curr_seg.vaddr;
+            curr_seg.flags |= next.flags;
 
             if next.in_file_size > 0 {
                 let offset_in_curr = (next.vaddr - curr_seg.vaddr) as usize;
@@ -114,10 +117,11 @@ impl ElfLoadInfo {
                 let offset = segment.p_offset;
 
                 serial_println!(
-                    "ELF: Found LOAD segment: vaddr={:#x}, in_file_size={}, in_memory_size={}",
+                    "ELF: Found LOAD segment: vaddr={:#x}, in_file_size={}, in_memory_size={}, flags={:#x}",
                     vaddr,
                     in_file_size,
-                    in_memory_size
+                    in_memory_size,
+                    segment.p_flags,
                 );
                 
                 min_vaddr = core::cmp::min(vaddr, min_vaddr);
@@ -140,6 +144,7 @@ impl ElfLoadInfo {
                     vaddr,
                     in_file_size,
                     in_memory_size,
+                    flags: segment.p_flags,
                     data: segment_data,
                 });
             }
