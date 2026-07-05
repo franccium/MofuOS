@@ -212,6 +212,10 @@ unsafe extern "C" fn kmain() -> ! {
 
     memory::init_memory_globals(frame_allocator, user_memory_manager);
 
+    // Calibrate TSC frequency via PIT and record the boot epoch.
+    // Must happen before APs start so all cores share the same measured frequency.
+    unsafe { interrupts::init_tsc_globals() };
+
     // the address to jump to. Writing to this field will cause the core to jump to the given function.
     // The function will receive a pointer to this structure, and it will have its own 64KiB
     cpus[1].bootstrap(cpuinfo::ap_core_from_limine_entry_point, 0x12345678);

@@ -40,22 +40,29 @@ macro_rules! serial_println {
         concat!($fmt, "\n"), $($arg)*));
 }
 
-/// Prints to the host through the serial interface with core ID prepended, appending a newline.
+/// Prints to the host through the serial interface with core ID and
+/// microsecond timestamp prepended, appending a newline.
 #[macro_export]
 macro_rules! serial_println_core {
     () => (
-        $crate::serial_print!("[Core {}] \n", $crate::util::cpuinfo::get_current_core_id())
+        $crate::serial_print!(
+            "[Core {} | {}us] \n",
+            $crate::util::cpuinfo::get_current_core_id(),
+            $crate::interrupts::tsc_timestamp_us(),
+        )
     );
     ($fmt:expr) => (
         $crate::serial_print!(
-            concat!("[Core {}] ", $fmt, "\n"),
-            $crate::util::cpuinfo::get_current_core_id()
+            concat!("[Core {} | {}us] ", $fmt, "\n"),
+            $crate::util::cpuinfo::get_current_core_id(),
+            $crate::interrupts::tsc_timestamp_us(),
         )
     );
     ($fmt:expr, $($arg:tt)*) => (
         $crate::serial_print!(
-            concat!("[Core {}] ", $fmt, "\n"),
+            concat!("[Core {} | {}us] ", $fmt, "\n"),
             $crate::util::cpuinfo::get_current_core_id(),
+            $crate::interrupts::tsc_timestamp_us(),
             $($arg)*
         )
     );

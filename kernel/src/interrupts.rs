@@ -47,10 +47,18 @@ const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
 
-pub const TSC_MOCK_FREQUENCY: u64 = 2400000000u64;
+/// TSC frequency measured at boot via PIT calibration.
+/// Written once by core 0 before any AP is started.
+/// All cores read this after it is set.
+static TSC_FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
+
+/// TSC value at the moment core 0 finished basic init (just before APs start).
+/// Used as the zero-point for log timestamps.
+static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
+
 pub const TIMER_TICK_INTERVAL_MS: u64 = 10;
 pub const TIMER_TICK_FREQ_HZ: u64 = 1000 / TIMER_TICK_INTERVAL_MS;
-pub const TSC_CYCLES_PER_TICK: u64 = TSC_MOCK_FREQUENCY / TIMER_TICK_FREQ_HZ;
+
 const MSR_IA32_TSC_DEADLINE: u32 = 0x6E0;
 
 static SYSTEM_TICKS: AtomicU64 = AtomicU64::new(0);
@@ -59,6 +67,120 @@ pub const TICK_DURATION_US: u64 = 1_000_000 / TIMER_TICK_FREQ_HZ;
 
 const LAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_0000_0000;
 const IOAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_FF00_0000;
+
+// PIT port constants (channel 2, used for calibration only — no IRQ involved)
+const PIT_CHANNEL2_DATA: u16 = 0x42;
+const PIT_CMD: u16 = 0x43;
+const PIT_PC_SPEAKER: u16 = 0x61;
+const PIT_BASE_HZ: u64 = 1_193_182; // fixed hardware frequency
+
+/// Measure the TSC frequency by counting cycles over a PIT-timed interval.
+///
+/// Uses PIT channel 2 in one-shot mode so it does not disturb the system
+/// timer (channel 0) or require interrupts to be enabled.  The measurement
+/// window is ~50 ms, which gives ~0.1 % accuracy and is fast enough to not
+/// delay boot noticeably.
+///
+/// Must be called with interrupts disabled.
+pub unsafe fn measure_tsc_frequency_via_pit() -> u64 {
+    // We count down from 65535 ticks of the PIT (≈ 54.9 ms).
+    // Actual elapsed time = count / PIT_BASE_HZ seconds.
+    const PIT_COUNT: u16 = 0xFFFF; // 65535 ticks ≈ 54.9 ms
+    const PIT_MODE_ONE_SHOT_CH2: u8 = 0b1011_0000; // channel 2, lo/hi, mode 1
+
+    unsafe {
+        use x86_64::instructions::port::Port;
+
+        let mut cmd_port: Port<u8> = Port::new(PIT_CMD);
+        let mut ch2_port: Port<u8> = Port::new(PIT_CHANNEL2_DATA);
+        let mut speaker_port: Port<u8> = Port::new(PIT_PC_SPEAKER);
+
+        // Disable the PC speaker gate so the PIT runs silently.
+        let old_speaker = speaker_port.read();
+        // Bit 0 = gate input to channel 2; bit 1 = speaker output enable.
+        // Set gate (bit 0), clear speaker (bit 1).
+        speaker_port.write((old_speaker & !0x02) | 0x01);
+
+        // Program channel 2 as one-shot.
+        cmd_port.write(PIT_MODE_ONE_SHOT_CH2);
+
+        // Load the count (LSB first, then MSB).
+        ch2_port.write((PIT_COUNT & 0xFF) as u8);
+        ch2_port.write((PIT_COUNT >> 8) as u8);
+
+        // Read TSC right as we start.
+        let tsc_start = tsc_read();
+
+        // Poll bit 5 of port 0x61 (OUT2 status) until PIT reaches zero.
+        // OUT2 goes high when the count expires.
+        loop {
+            let status = speaker_port.read();
+            if status & 0x20 != 0 {
+                break;
+            }
+        }
+
+        let tsc_end = tsc_read();
+
+        // Restore speaker port.
+        speaker_port.write(old_speaker);
+
+        // tsc_cycles elapsed over PIT_COUNT PIT ticks.
+        let tsc_cycles = tsc_end - tsc_start;
+
+        // TSC Hz = tsc_cycles * PIT_BASE_HZ / PIT_COUNT
+        let freq = tsc_cycles * PIT_BASE_HZ / PIT_COUNT as u64;
+
+        serial_println!(
+            "TSC calibration: {} cycles over {} PIT ticks -> {} Hz ({} MHz)",
+            tsc_cycles,
+            PIT_COUNT,
+            freq,
+            freq / 1_000_000
+        );
+
+        freq
+    }
+}
+
+/// Initialise the global TSC frequency and boot epoch.
+/// Have to call this on core 0 once, before starting APs, with interrupts disabled.
+pub unsafe fn init_tsc_globals() {
+    let freq = unsafe { measure_tsc_frequency_via_pit() };
+    TSC_FREQUENCY_HZ.store(freq, Ordering::SeqCst);
+    // Record the epoch *after* calibration so t=0 is close to the point
+    // where meaningful kernel work begins.
+    BOOT_TSC.store(unsafe { tsc_read() }, Ordering::SeqCst);
+    serial_println!(
+        "TSC globals: freq={} Hz, boot_tsc={}",
+        freq,
+        BOOT_TSC.load(Ordering::Relaxed)
+    );
+}
+
+/// Microseconds since `init_tsc_globals` was called on core 0.
+/// Safe to call from any core.
+#[inline]
+pub fn tsc_timestamp_us() -> u64 {
+    let freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
+    if freq == 0 {
+        return 0;
+    }
+    let boot = BOOT_TSC.load(Ordering::Relaxed);
+    let now = unsafe { tsc_read() };
+    now.saturating_sub(boot) / (freq / 1_000_000)
+}
+
+/// TSC cycles per timer tick, computed from the measured frequency.
+/// Falls back to a sane default until `init_tsc_globals` is called.
+pub fn tsc_cycles_per_tick() -> u64 {
+    let freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
+    if freq == 0 {
+        // Fallback before calibration: assume 2 GHz, 10 ms tick
+        return 2_000_000_000 / TIMER_TICK_FREQ_HZ;
+    }
+    freq / TIMER_TICK_FREQ_HZ
+}
 
 pub fn system_uptime_ns() -> u64 {
     SYSTEM_TICKS.load(core::sync::atomic::Ordering::Relaxed) * TICK_DURATION_NS
@@ -295,7 +417,7 @@ unsafe fn tsc_read() -> u64 {
 }
 
 unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32, core_id: u8) {
-    let tsc_freq = TSC_MOCK_FREQUENCY;
+    let tsc_freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
     serial_println!("Core {}: Setting up TSC-Deadline mode", core_id);
     serial_println!("TSC Frequency: {} Hz", tsc_freq);
 
@@ -397,9 +519,9 @@ pub unsafe fn init_timer_tsc(local_apic_ptr: *mut u32, core_id: u8) {
         use core::arch::x86_64::_mm_mfence;
         _mm_mfence();
 
-        let tsc_freq = TSC_MOCK_FREQUENCY;
-        serial_println!("TSC Frequency: {}", tsc_freq);
-        let tsc_deadline = tsc_read() + TSC_CYCLES_PER_TICK;
+        let tsc_freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
+        serial_println!("TSC Frequency: {} Hz", tsc_freq);
+        let tsc_deadline = tsc_read() + tsc_cycles_per_tick();
 
         // write the deadline to the MSR to arm it
         msr_write(MSR_IA32_TSC_DEADLINE, tsc_deadline);
@@ -777,7 +899,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     serial_println!("RFLAGS: {:?}", stack_frame.cpu_flags);
     serial_println!("RSP: {:#x}", stack_frame.stack_pointer);
     serial_println!("SS: {:?}", stack_frame.stack_segment);
-    
+
     // Read the values that iretq would pop
     unsafe {
         let rsp = stack_frame.stack_pointer.as_u64() as *const u64;
@@ -792,13 +914,18 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     // Try to read the instruction that caused the fault
     let rip = stack_frame.instruction_pointer.as_u64();
     serial_println!("Faulting instruction at: {:#x}", rip);
-    
+
     // Read the bytes at RIP to identify the instruction
     unsafe {
         let instr_ptr = rip as *const u8;
-        serial_println!("Instruction bytes: {:02x} {:02x} {:02x} {:02x} {:02x}", 
-            *instr_ptr, *instr_ptr.add(1), *instr_ptr.add(2), 
-            *instr_ptr.add(3), *instr_ptr.add(4));
+        serial_println!(
+            "Instruction bytes: {:02x} {:02x} {:02x} {:02x} {:02x}",
+            *instr_ptr,
+            *instr_ptr.add(1),
+            *instr_ptr.add(2),
+            *instr_ptr.add(3),
+            *instr_ptr.add(4)
+        );
     }
 
     hlt_loop();
@@ -841,7 +968,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         SYSTEM_TICKS.fetch_add(1, Ordering::Relaxed);
 
         // re-arm the timer for the next tick
-        let next_deadline = tsc_read() + TSC_CYCLES_PER_TICK;
+        let next_deadline = tsc_read() + tsc_cycles_per_tick();
         msr_write(MSR_IA32_TSC_DEADLINE, next_deadline);
 
         let mut scheduler = SCHEDULER.lock();
