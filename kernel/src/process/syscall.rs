@@ -326,8 +326,8 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             count as u64
         }
         997 => {
-            // serial_println_core!("997 returning: {}", frame.arg1 + 4);
-            frame.arg1 + 4
+            // serial_println_core!("997 returning: {}", frame.arg1);
+            frame.arg1
         }
         999 => {
             let exit_code = frame.arg1;
