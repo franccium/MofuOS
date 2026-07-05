@@ -75,17 +75,11 @@ const PIT_PC_SPEAKER: u16 = 0x61;
 const PIT_BASE_HZ: u64 = 1_193_182; // fixed hardware frequency
 
 /// Measure the TSC frequency by counting cycles over a PIT-timed interval.
-///
-/// Uses PIT channel 2 in one-shot mode so it does not disturb the system
-/// timer (channel 0) or require interrupts to be enabled.  The measurement
-/// window is ~50 ms, which gives ~0.1 % accuracy and is fast enough to not
-/// delay boot noticeably.
-///
 /// Must be called with interrupts disabled.
 pub unsafe fn measure_tsc_frequency_via_pit() -> u64 {
-    // We count down from 65535 ticks of the PIT (≈ 54.9 ms).
+    // We count down from 65535 ticks of the PIT (around 54.9 ms).
     // Actual elapsed time = count / PIT_BASE_HZ seconds.
-    const PIT_COUNT: u16 = 0xFFFF; // 65535 ticks ≈ 54.9 ms
+    const PIT_COUNT: u16 = 0xFFFF;
     const PIT_MODE_ONE_SHOT_CH2: u8 = 0b1011_0000; // channel 2, lo/hi, mode 1
 
     unsafe {

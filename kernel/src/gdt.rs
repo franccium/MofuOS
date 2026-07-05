@@ -14,12 +14,9 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 const PER_CORE_STACK_SIZE: usize = 8 * 4096; // 32 KiB
 
 // Backing storage for per-core kernel stacks.
-// These live in .bss, are automatically mapped by the bootloader, and stay
-// alive for the lifetime of the kernel — exactly what the TSS raw pointers need.
-//
 // Layout per core:
-//   [0..PER_CORE_STACK_SIZE]              → RSP0 stack  (ring 0 interrupt stack)
-//   [PER_CORE_STACK_SIZE..2*STACK_SIZE]   → IST[0] stack (double-fault stack)
+//      [0..PER_CORE_STACK_SIZE] - RSP0 stack (ring 0 interrupt stack)
+//      [PER_CORE_STACK_SIZE..2*STACK_SIZE] - IST[0] stack (double-fault stack)
 #[repr(align(16))]
 struct KernelStack([u8; PER_CORE_STACK_SIZE]);
 
@@ -69,9 +66,7 @@ impl Gdt {
         let idx = core_id as usize;
         let tss = unsafe { &mut *PER_CORE_TSS[idx].get() };
 
-        // RSP0: used by the CPU on any ring-3→ring-0 transition (interrupts,
-        // exceptions, syscalls via INT).  Without this, the hardware tries to
-        // switch to stack address 0x0, which is unmapped → immediate triple fault.
+        // RSP0: used by the CPU on any ring3 --> ring0 transition
         let rsp0_top = unsafe {
             let stack = &RSP0_STACKS[idx].0;
             // Stack grows downward; top = one-past-end of the array.
@@ -79,9 +74,9 @@ impl Gdt {
         };
         tss.privilege_stack_table[0] = VirtAddr::new(rsp0_top);
 
-        // IST[0]: dedicated stack for the double-fault handler.  Without this
+        // IST[0]: dedicated stack for the double-fault handler. Without this
         // the double-fault handler runs on whatever (possibly corrupt) RSP it
-        // inherited, which immediately causes another fault → triple fault.
+        // inherited, which immediately causes another fault and a triple fault.
         let ist0_top = unsafe {
             let stack = &IST0_STACKS[idx].0;
             stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64

@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-MofuOS log splitter.
-
 Reads QEMU serial output from two Unix sockets:
-  COM1 (argv[1]) — kernel debug output  → core_N.txt + all.txt
-  COM2 (argv[2]) — userspace output     → userspace_pid_<pid>.txt + all.txt
+  COM1 (argv[1]) --> kernel debug output (core_N.txt + all.txt)
+  COM2 (argv[2]) --> userspace output (userspace_pid_<pid>.txt + all.txt)
 
 All files are written into  logs/<YYYY-MM-DD_HH-MM-SS>/
 
 Usage:
   python3 scripts/log_splitter.py /tmp/mofuos_com1.sock /tmp/mofuos_com2.sock
-
-  Or from stdin (single stream, no COM2):
-  make run | python3 scripts/log_splitter.py
+  or its just hooked up to make run
 """
 
 import sys
@@ -22,22 +18,19 @@ import datetime
 import threading
 from pathlib import Path
 
-# ── configuration ─────────────────────────────────────────────────────────────
-
 # Keep in sync with kernel MAX_CORES (lib.rs).
 MAX_CORES = 16
 
 LOGS_ROOT = Path(__file__).parent.parent / "logs"
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
-
-# ── helpers ───────────────────────────────────────────────────────────────────
+_CORE_RE = re.compile(r"^\[Core\s+(\d+)")
+_PID_RE = re.compile(r"^\[pid=(\d+)\](.*)$", re.DOTALL)
 
 def make_timestamp() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 def strip_ansi(line: str) -> str:
-    """Remove ANSI escape sequences from a line."""
     return _ANSI_RE.sub('', line)
 
 class SessionFiles:
@@ -76,14 +69,7 @@ class SessionFiles:
             f.close()
 
 
-# ── line routing ──────────────────────────────────────────────────────────────
-
-_CORE_RE  = re.compile(r"^\[Core\s+(\d+)")
-_PID_RE   = re.compile(r"^\[pid=(\d+)\](.*)$", re.DOTALL)
-
-
 def route_com1_line(line: str, sf: SessionFiles):
-    """Route a line from COM1 (kernel log) to all.txt and the appropriate core file."""
     sf.write(sf.all_f, f"{line}")
     print(f"{line}", flush=True)
 
@@ -95,7 +81,6 @@ def route_com1_line(line: str, sf: SessionFiles):
 
 
 def route_com2_line(line: str, sf: SessionFiles):
-    """Route a line from COM2 (userspace output) to all.txt and the pid file."""
     # COM2 lines are prefixed by the kernel with [pid=N] before the payload.
     # Strip all [pid=N] tags from the line
     cleaned = re.sub(r'\[pid=\d+\]', '', line).strip()
@@ -112,12 +97,9 @@ def route_com2_line(line: str, sf: SessionFiles):
         print(f"[?] {line}", flush=True)
 
 
-# ── socket reader ─────────────────────────────────────────────────────────────
-
 def socket_lines(sock_path: str, timeout_s: float = 5.0):
     """
     Connect to a QEMU Unix socket and yield decoded lines.
-
     QEMU creates the socket when using  -serial unix:<path>,server
     (blocking) or  ,server,nowait.  We retry for `timeout_s` seconds
     so the script can be started before or concurrently with QEMU.
@@ -158,8 +140,6 @@ def stdin_lines():
         yield line.rstrip("\r\n")
 
 
-# ── entry point ───────────────────────────────────────────────────────────────
-
 def main():
     ts = make_timestamp()
     session_dir = LOGS_ROOT / ts
@@ -167,7 +147,6 @@ def main():
 
     print(f"[log_splitter] Session:   {ts}")
     print(f"[log_splitter] Log dir:   {session_dir}/")
-    print(f"[log_splitter] ──────────────────────────────────────────")
 
     if len(sys.argv) >= 3:
         # Two-socket mode: COM1 + COM2

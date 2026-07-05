@@ -1,22 +1,23 @@
-use core::sync::atomic::AtomicU64;
-
 use crate::data_structures::dequeue::Dequeue;
 use crate::data_structures::vector::Vec;
 use crate::process::execution::jump_to_userspace;
 use crate::process::process::INVALID_PID;
 use crate::process::process_manager::PROCESS_MANAGER;
+use crate::process::{CORE_POOL, PID, Process};
+use crate::util::cpuinfo::get_current_core_id;
+use crate::{MAX_CORES, serial_println, serial_println_core};
 /// Scheduler - Priority-based, preemptive scheduler with per-core queues
 ///
 /// Uses the One-to-One threading model where each process is assigned a kernel thread
 /// that runs on a dedicated CPU core. Each core has its own scheduler queue.
-use crate::process::{CORE_POOL, PID, Process};
-use crate::util::cpuinfo::get_current_core_id;
-use crate::{MAX_CORES, serial_println, serial_println_core};
+use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 use spin::Mutex;
 use x86_64::PhysAddr;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::PhysFrame;
+
+const RUN_A_PROCESS: bool = true;
 
 lazy_static::lazy_static! {
     pub static ref SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
@@ -40,17 +41,17 @@ pub fn mark_core_idle(core_id: u8) {
     CORE_POOL.lock().mark_available(core_id);
 }
 
-/// Per-core scheduler queue with priority support
+const MAX_PRIORITY: usize = 7;
+
 pub struct CoreScheduler {
-    /// CPU core ID this scheduler manages
     core_id: u8,
     /// Ready queue organized by priority (8 levels: 0=lowest, 7=highest)
     /// Threads with same priority use round-robin within the level
-    ready_queues: [Dequeue<PID>; 8],
+    ready_queues: [Dequeue<PID>; MAX_PRIORITY + 1],
     /// Blocked/waiting threads (waiting for I/O or events)
     blocked_queue: Dequeue<PID>,
-    /// Currently running thread on this core (if any)
-    current_thread: Option<PID>,
+    /// Currently running thread on this core
+    current_thread: PID,
 }
 
 impl CoreScheduler {
@@ -59,31 +60,36 @@ impl CoreScheduler {
             core_id,
             ready_queues: Default::default(),
             blocked_queue: Dequeue::new(),
-            current_thread: None,
+            current_thread: INVALID_PID,
         }
     }
 
     /// Enqueue a thread in the appropriate priority queue
     pub fn enqueue_ready(&mut self, pid: PID, priority: u8) {
-        let queue_idx = (priority as usize).min(7); // Clamp to valid range
+        debug_assert!(
+            priority <= MAX_PRIORITY as u8,
+            "Priority must be between 0 and {}",
+            MAX_PRIORITY
+        );
+        let queue_idx = priority as usize;
         self.ready_queues[queue_idx].push_back(pid);
     }
 
     /// Dequeue next thread to run (picks highest priority ready thread)
-    pub fn dequeue_next(&mut self) -> Option<PID> {
+    pub fn dequeue_next(&mut self) -> (PID, u8) {
         // Search from highest to lowest priority
-        for queue in self.ready_queues.iter_mut().rev() {
+        for (priority, queue) in self.ready_queues.iter_mut().enumerate().rev() {
             if queue.len() > 0 {
-                return Some(queue.pop_front());
+                return (queue.pop_front(), priority as u8);
             }
         }
-        None
+        (INVALID_PID, 0)
     }
 
     /// Move thread to blocked queue
     pub fn block_thread(&mut self, pid: PID) {
-        if self.current_thread == Some(pid) {
-            self.current_thread = None;
+        if self.current_thread == pid {
+            self.current_thread = INVALID_PID;
         }
         self.blocked_queue.push_back(pid);
     }
@@ -109,27 +115,22 @@ impl CoreScheduler {
         found
     }
 
-    /// Set the currently running thread
     pub fn set_current_running(&mut self, pid: PID) {
-        self.current_thread = Some(pid);
+        self.current_thread = pid;
     }
 
-    /// Get current running thread
-    pub fn current_running(&self) -> Option<PID> {
+    pub fn current_running(&self) -> PID {
         self.current_thread
     }
 
-    /// Check if any threads are ready to run
     pub fn has_ready_threads(&self) -> bool {
         self.ready_queues.iter().any(|q| !q.is_empty())
     }
 
-    /// Count total ready threads
     pub fn ready_count(&self) -> usize {
         self.ready_queues.iter().map(|q| q.len()).sum()
     }
 
-    /// Count total blocked threads
     pub fn blocked_count(&self) -> usize {
         self.blocked_queue.len()
     }
@@ -149,7 +150,6 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new() -> Self {
-        // Default to 1 core; will be updated when core count is detected
         let mut per_core = Vec::new();
         per_core.push(CoreScheduler::new(0));
 
@@ -159,9 +159,8 @@ impl Scheduler {
         }
     }
 
-    /// Initialize scheduler with detected core count
     pub fn init_with_core_count(&mut self, core_count: u8) {
-        if core_count == 0 || core_count > 64 {
+        if core_count == 0 || core_count > MAX_CORES {
             serial_println!("ERROR: Invalid core count for scheduler: {}", core_count);
             return;
         }
@@ -175,93 +174,71 @@ impl Scheduler {
         serial_println!("Scheduler initialized with {} cores", core_count);
     }
 
-    /// Get mutable reference to a specific core's scheduler
-    fn get_core_scheduler_mut(&mut self, core_id: u8) -> Option<&mut CoreScheduler> {
-        let idx = core_id as usize;
-        if idx < self.per_core.len() {
-            // Access via slice to get the reference safely
-            Some(&mut self.per_core.as_mut_slice()[idx])
-        } else {
-            None
-        }
+    fn get_core_scheduler_mut(&mut self, core_id: u8) -> &mut CoreScheduler {
+        let idx: usize = core_id as usize;
+        debug_assert!(idx < self.per_core.len());
+        &mut self.per_core.as_mut_slice()[idx]
     }
 
-    /// Get immutable reference to a specific core's scheduler
-    fn get_core_scheduler(&self, core_id: u8) -> Option<&CoreScheduler> {
-        let idx = core_id as usize;
-        if idx < self.per_core.len() {
-            // Access via slice to get the reference safely
-            Some(&self.per_core.as_slice()[idx])
-        } else {
-            None
-        }
+    fn get_core_scheduler(&self, core_id: u8) -> &CoreScheduler {
+        let idx: usize = core_id as usize;
+        debug_assert!(idx < self.per_core.len());
+        &self.per_core.as_slice()[idx]
     }
 
     pub fn on_timer_tick(&mut self, core_id: u8) {
-        if let Some(scheduler) = self.get_core_scheduler_mut(core_id) {
-            let curr = scheduler.current_running();
-
-            // serial_println!(
-            //     "Core {}: Timer tick - Current PID: {:?}",
-            //     core_id,
-            //     curr,
-            // );
-        }
+        let scheduler = self.get_core_scheduler_mut(core_id);
+        let curr = scheduler.current_running();
+        // serial_println!(
+        //     "Core {}: Timer tick - Current PID: {:?}",
     }
 
-    /// Enqueue a thread to a specific core's scheduler
+    pub fn on_timer_tick(&mut self, core_id: u8) {
+        let scheduler = self.get_core_scheduler_mut(core_id);
+        let curr = scheduler.current_running();
+        // serial_println!(
+        //     "Core {}: Timer tick - Current PID: {:?}",
+        //     core_id,
+        //     curr,
+        // );
+    }
+
     pub fn enqueue_on_core(&mut self, core_id: u8, pid: PID, priority: u8) {
-        if let Some(scheduler) = self.get_core_scheduler_mut(core_id) {
-            scheduler.enqueue_ready(pid, priority);
-        }
+        let scheduler = self.get_core_scheduler_mut(core_id);
+        scheduler.enqueue_ready(pid, priority);
     }
 
-    /// Get next thread to run on a specific core
-    pub fn get_next_on_core(&mut self, core_id: u8) -> Option<PID> {
-        if let Some(scheduler) = self.get_core_scheduler_mut(core_id) {
-            scheduler.dequeue_next()
-        } else {
-            None
-        }
+    pub fn get_next_on_core(&mut self, core_id: u8) -> (PID, u8) {
+        let scheduler = self.get_core_scheduler_mut(core_id);
+        scheduler.dequeue_next()
     }
 
-    /// Block a thread on a specific core
     pub fn block_on_core(&mut self, core_id: u8, pid: PID) {
-        if let Some(scheduler) = self.get_core_scheduler_mut(core_id) {
-            scheduler.block_thread(pid);
-        }
+        let scheduler = self.get_core_scheduler_mut(core_id);
+        scheduler.block_thread(pid);
     }
 
-    /// Unblock a thread on a specific core
     pub fn unblock_on_core(&mut self, core_id: u8, pid: PID, priority: u8) -> bool {
-        if let Some(scheduler) = self.get_core_scheduler_mut(core_id) {
-            scheduler.unblock_thread(pid, priority)
-        } else {
-            false
-        }
+        let scheduler = self.get_core_scheduler_mut(core_id);
+        scheduler.unblock_thread(pid, priority)
     }
 
-    /// Set current running thread on a core
     pub fn set_current_on_core(&mut self, core_id: u8, pid: PID) {
-        if let Some(scheduler) = self.get_core_scheduler_mut(core_id) {
-            scheduler.set_current_running(pid);
-        }
+        let scheduler = self.get_core_scheduler_mut(core_id);
+        scheduler.set_current_running(pid);
     }
 
-    /// Get current running thread on a core
-    pub fn current_on_core(&self, core_id: u8) -> Option<PID> {
+    pub fn current_on_core(&self, core_id: u8) -> PID {
         self.get_core_scheduler(core_id)
             .and_then(|s| s.current_running())
     }
 
-    /// Check if a core has ready threads
     pub fn has_ready_threads_on_core(&self, core_id: u8) -> bool {
         self.get_core_scheduler(core_id)
             .map(|s| s.has_ready_threads())
             .unwrap_or(false)
     }
 
-    /// Get global scheduler statistics
     pub fn get_stats(&self) -> SchedulerStats {
         let mut total_ready = 0;
         let mut total_blocked = 0;
@@ -278,8 +255,6 @@ impl Scheduler {
         }
     }
 }
-
-const SCHEDULER_ACTUALLY_RUN_A_PROCESS: bool = true;
 
 #[repr(C)]
 struct KernelContext {
@@ -351,8 +326,6 @@ fn restore_kernel_context(ctx: &KernelContext) {
     }
 }
 
-/// Execute a process in userspace
-/// This function returns when the process is preempted or makes a syscall
 pub fn execute_process(process: &Process) {
     let pid = process.pid;
     let core_id = get_current_core_id();
@@ -372,15 +345,12 @@ pub fn execute_process(process: &Process) {
     }
 
     // Jump to userspace
-    // The process will come back via:
-    // 1. Syscall (handled by syscall_handler)
-    // 2. Timer interrupt (handled by timer_interrupt_handler)
-    // 3. Page fault or other exception
     unsafe {
         jump_to_userspace(process.execution_context.rip, process.execution_context.rsp);
     }
-    serial_println_core!("returned");
-    // When we get back (via sysret or iret in interrupt handler):
+
+    serial_println_core!("Returned from userspace");
+
     // Restore kernel page table
     unsafe {
         let (frame, flags) = old_page_table;
@@ -391,8 +361,6 @@ pub fn execute_process(process: &Process) {
     restore_kernel_context(&kernel_context);
 }
 
-/// The main scheduler loop for each core
-/// This function runs forever on each core
 pub fn run_on_core_loop(core_id: u8) -> ! {
     serial_println_core!("Entering scheduler loop");
 
@@ -407,9 +375,10 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
             scheduler.get_next_on_core(core_id)
         };
 
-        serial_println_core!("got next on core");
+        serial_println_core!("Got next process");
 
-        if let Some(pid) = next_pid {
+        let (pid, priority) = next_pid;
+        if pid != INVALID_PID {
             {
                 let mut scheduler = SCHEDULER.lock();
                 scheduler.set_current_on_core(core_id, pid);
@@ -420,20 +389,10 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
             // Re-enable interrupts before running the process
             x86_64::instructions::interrupts::enable();
 
-            // SWITCH TO THE PROCESS
-            // This is where you'd do a context switch
-            // For now, just signal that we'd run it
-            let process_priority = 4;
-
+            // Context switch to the proecss
             serial_println_core!("set current on core");
 
-            if SCHEDULER_ACTUALLY_RUN_A_PROCESS {
-                // Extract the execution context while holding the PM lock, then
-                // drop the lock BEFORE jumping to userspace.  jump_to_userspace
-                // is `-> !` (it never returns here), so any lock held across it
-                // is held forever.  When the process makes a syscall (e.g. exit)
-                // the syscall handler tries to acquire PROCESS_MANAGER — which
-                // would deadlock if we still held it here.
+            if RUN_A_PROCESS {
                 let exec_ctx = {
                     let pm = PROCESS_MANAGER.lock();
                     match pm.get_process(pid) {
@@ -445,7 +404,6 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
                         )),
                         Err(_) => None,
                     }
-                    // pm lock is released here
                 };
 
                 if let Some((proc_pid, rip, rsp, cr3)) = exec_ctx {
@@ -468,7 +426,7 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
 
             {
                 let mut scheduler = SCHEDULER.lock();
-                scheduler.enqueue_on_core(core_id, pid, process_priority);
+                scheduler.enqueue_on_core(core_id, pid, priority);
             }
         } else {
             // No process available - enable interrupts and halt
@@ -476,12 +434,6 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
             x86_64::instructions::hlt();
         }
     }
-}
-
-/// Mark a core as ready to receive work
-pub fn core_ready(core_id: u8) {
-    serial_println!("Core {}: Marked as ready", core_id);
-    // Any additional initialization for the core in scheduler
 }
 
 #[derive(Debug, Clone, Copy)]
