@@ -3,21 +3,15 @@ use crate::data_structures::vector::Vec;
 use crate::process::execution::jump_to_userspace;
 use crate::process::process::INVALID_PID;
 use crate::process::process_manager::PROCESS_MANAGER;
-use crate::process::{CORE_POOL, PID, Process};
+use crate::process::{CORE_POOL, PID};
 use crate::util::cpuinfo::get_current_core_id;
 use crate::{MAX_CORES, serial_println, serial_println_core};
 /// Scheduler - Priority-based, preemptive scheduler with per-core queues
 ///
 /// Uses the One-to-One threading model where each process is assigned a kernel thread
 /// that runs on a dedicated CPU core. Each core has its own scheduler queue.
-use core::sync::atomic::AtomicU64;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
-use x86_64::PhysAddr;
-use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::structures::paging::PhysFrame;
-
-const RUN_A_PROCESS: bool = true;
 
 lazy_static::lazy_static! {
     pub static ref SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
@@ -39,6 +33,28 @@ pub fn get_current_process_for_core(core_id: u8) -> PID {
 pub fn mark_core_idle(core_id: u8) {
     CURRENT_PROCESS_ON_CORE[core_id as usize].store(INVALID_PID as u64, Ordering::SeqCst);
     CORE_POOL.lock().mark_available(core_id);
+}
+
+// Saved kernel RSP for each core, set just before jump_to_userspace.
+// sys_exit restores this to unwind back into run_on_core_loop.
+// Must be in writable memory (.data / static mut) — the asm writes via raw ptr.
+static mut KERNEL_RSP_ON_CORE: [u64; MAX_CORES as usize] = [0u64; MAX_CORES as usize];
+
+/// Called by sys_exit to resume the scheduler loop on the current core.
+/// Restores the kernel RSP saved before jump_to_userspace and returns into
+/// run_on_core_loop at the instruction after the save point.
+pub fn return_to_scheduler() -> ! {
+    let core_id = get_current_core_id();
+    let kernel_rsp = unsafe { KERNEL_RSP_ON_CORE[core_id as usize] };
+    debug_assert!(kernel_rsp != 0, "return_to_scheduler: no saved RSP for core {}", core_id);
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {rsp}",
+            "ret",
+            rsp = in(reg) kernel_rsp,
+            options(noreturn, nostack)
+        );
+    }
 }
 
 const MAX_PRIORITY: usize = 7;
@@ -71,6 +87,7 @@ impl CoreScheduler {
             "Priority must be between 0 and {}",
             MAX_PRIORITY
         );
+        //serial_println_core!("Scheduler: Enqueuing PID {} on core {} with priority {}", pid, self.core_id, priority);
         let queue_idx = priority as usize;
         self.ready_queues[queue_idx].push_back(pid);
     }
@@ -243,182 +260,101 @@ impl Scheduler {
     }
 }
 
-#[repr(C)]
-struct KernelContext {
-    rsp: u64,
-    rbp: u64,
-    rbx: u64,
-    r12: u64,
-    r13: u64,
-    r14: u64,
-    r15: u64,
-}
-
-/// Save the current kernel context
-fn save_kernel_context() -> KernelContext {
-    let mut ctx = KernelContext {
-        rsp: 0,
-        rbp: 0,
-        rbx: 0,
-        r12: 0,
-        r13: 0,
-        r14: 0,
-        r15: 0,
-    };
-
+pub fn run_on_core_loop(core_id: u8) -> ! {
+    // Switch to a dedicated per-core scheduler stack before doing anything
+    // that touches the stack. The Limine AP boot stack is small and not
+    // guaranteed to have enough space for the scheduler loop's call depth.
+    let scheduler_stack_top = crate::gdt::get_scheduler_stack_top(core_id);
     unsafe {
         core::arch::asm!(
-            "mov {rsp}, rsp",
-            "mov {rbp}, rbp",
-            "mov {rbx}, rbx",
-            "mov {r12}, r12",
-            "mov {r13}, r13",
-            "mov {r14}, r14",
-            "mov {r15}, r15",
-            "2:",
-            rsp = out(reg) ctx.rsp,
-            rbp = out(reg) ctx.rbp,
-            rbx = out(reg) ctx.rbx,
-            r12 = out(reg) ctx.r12,
-            r13 = out(reg) ctx.r13,
-            r14 = out(reg) ctx.r14,
-            r15 = out(reg) ctx.r15,
+            "mov rsp, {top}",
+            top = in(reg) scheduler_stack_top,
             options(nostack)
         );
     }
 
-    ctx
-}
-
-/// Restore kernel context (called after returning from userspace)
-fn restore_kernel_context(ctx: &KernelContext) {
-    unsafe {
-        core::arch::asm!(
-            "mov rsp, {rsp}",
-            "mov rbp, {rbp}",
-            "mov rbx, {rbx}",
-            "mov r12, {r12}",
-            "mov r13, {r13}",
-            "mov r14, {r14}",
-            "mov r15, {r15}",
-            rsp = in(reg) ctx.rsp,
-            rbp = in(reg) ctx.rbp,
-            rbx = in(reg) ctx.rbx,
-            r12 = in(reg) ctx.r12,
-            r13 = in(reg) ctx.r13,
-            r14 = in(reg) ctx.r14,
-            r15 = in(reg) ctx.r15,
-            options(noreturn, nostack)
-        );
-    }
-}
-
-pub fn execute_process(process: &Process) {
-    let pid = process.pid;
-    let core_id = get_current_core_id();
-
-    set_current_process_for_core(core_id, pid);
-
-    // Save current kernel context
-    let kernel_context = save_kernel_context();
-
-    // Switch to the process's page table
-    let page_table_frame = PhysFrame::containing_address(PhysAddr::new(
-        process.execution_context.page_table_base_phys,
-    ));
-    let old_page_table = Cr3::read();
-    unsafe {
-        Cr3::write(page_table_frame, Cr3Flags::empty());
-    }
-
-    // Jump to userspace
-    unsafe {
-        jump_to_userspace(process.execution_context.rip, process.execution_context.rsp);
-    }
-
-    serial_println_core!("Returned from userspace");
-
-    // Restore kernel page table
-    unsafe {
-        let (frame, flags) = old_page_table;
-        Cr3::write(frame, flags);
-    }
-
-    // Restore kernel context
-    restore_kernel_context(&kernel_context);
-}
-
-pub fn run_on_core_loop(core_id: u8) -> ! {
     serial_println_core!("Entering scheduler loop");
 
     loop {
-        // Disable interrupts for atomic scheduler check
         x86_64::instructions::interrupts::disable();
-        //serial_println_core!("disabled interrupts");
 
-        // Get next process for this core
-        let next_pid = {
+        let (pid, priority) = {
             let mut scheduler = SCHEDULER.lock();
             scheduler.get_next_on_core(core_id)
         };
 
-        serial_println_core!("Got next process");
-
-        let (pid, priority) = next_pid;
-        if pid != INVALID_PID {
-            {
-                let mut scheduler = SCHEDULER.lock();
-                scheduler.set_current_on_core(core_id, pid);
-            }
-
-            serial_println_core!("Start running PID {}", pid);
-
-            // Re-enable interrupts before running the process
-            x86_64::instructions::interrupts::enable();
-
-            // Context switch to the proecss
-            serial_println_core!("set current on core");
-
-            if RUN_A_PROCESS {
-                let exec_ctx = {
-                    let pm = PROCESS_MANAGER.lock();
-                    match pm.get_process(pid) {
-                        Ok(process) => Some((
-                            process.pid,
-                            process.execution_context.rip,
-                            process.execution_context.rsp,
-                            process.execution_context.page_table_base_phys,
-                        )),
-                        Err(_) => None,
-                    }
-                };
-
-                if let Some((proc_pid, rip, rsp, cr3)) = exec_ctx {
-                    set_current_process_for_core(core_id, proc_pid);
-
-                    let page_table_frame = PhysFrame::containing_address(PhysAddr::new(cr3));
-                    unsafe {
-                        Cr3::write(page_table_frame, Cr3Flags::empty());
-                    }
-
-                    unsafe {
-                        jump_to_userspace(rip, rsp);
-                    }
-                }
-            } else {
-                serial_println!("Would run PID {}", pid);
-            }
-
-            mark_core_idle(core_id);
-
-            {
-                let mut scheduler = SCHEDULER.lock();
-                scheduler.enqueue_on_core(core_id, pid, priority);
-            }
-        } else {
-            // No process available - enable interrupts and halt
+        if pid == INVALID_PID {
             x86_64::instructions::interrupts::enable();
             x86_64::instructions::hlt();
+            continue;
+        }
+
+        {
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.set_current_on_core(core_id, pid);
+        }
+
+        serial_println_core!("Running PID {}", pid);
+
+        let exec_ctx = {
+            let pm = PROCESS_MANAGER.lock();
+            pm.get_process(pid).ok().map(|p| (
+                p.execution_context.rip,
+                p.execution_context.rsp,
+                p.execution_context.page_table_base_phys,
+            ))
+        };
+
+        if let Some((rip, rsp, cr3)) = exec_ctx {
+            set_current_process_for_core(core_id, pid);
+
+            x86_64::instructions::interrupts::enable();
+            // All five steps must be in one asm block so the forward label "2:"
+            // is visible to the lea. The CR3 write is inside the block so the
+            // RSP save happens while the kernel page table is still active.
+            unsafe {
+                core::arch::asm!(
+                    // push return address while still on the kernel page table
+                    "lea rax, [rip + 2f]",
+                    "push rax",
+                    // save RSP (kernel page table still active here)
+                    "mov [{slot}], rsp",
+                    // switch to user page table
+                    "mov cr3, {cr3}",
+                    // jump to userspace — iretq, never returns normally
+                    "jmp {jump}",
+                    // return_to_scheduler() ret lands here
+                    "2:",
+                    slot = in(reg) &raw mut KERNEL_RSP_ON_CORE[core_id as usize] as u64,
+                    cr3  = in(reg) cr3,
+                    jump = sym jump_to_userspace,
+                    in("rdi") rip,
+                    in("rsi") rsp,
+                    lateout("rax") _,
+                    options(nostack)
+                );
+            }
+        }
+
+        // Process exited or was not found. Clean up for this iteration.
+        // Disable interrupts immediately — we're back on the kernel stack and
+        // about to acquire locks. The timer handler also acquires SCHEDULER,
+        // so leaving interrupts on here causes a deadlock.
+        x86_64::instructions::interrupts::disable();
+        mark_core_idle(core_id);
+
+        // Re-enqueue only if the process is still alive (not terminated by sys_exit).
+        let is_terminated = {
+            let pm = PROCESS_MANAGER.lock();
+            pm.get_process(pid)
+                .map(|p| p.state == crate::process::process::ProcessState::Terminated)
+                .unwrap_or(true)
+        };
+        if !is_terminated {
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.enqueue_on_core(core_id, pid, priority);
+        } else {
+            serial_println_core!("PID {} terminated, not re-enqueueing", pid);
         }
     }
 }

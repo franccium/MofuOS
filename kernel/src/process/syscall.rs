@@ -2,7 +2,6 @@ use crate::serial_println;
 use crate::util::msr::msr_write;
 use crate::{
     process::{
-        SCHEDULER,
         process::INVALID_PID,
         process_manager::{ARCHE_PID, PROCESS_MANAGER},
         scheduler,
@@ -351,27 +350,16 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
         }
         999 => {
             let exit_code = frame.arg1;
-            serial_println_core!("Process exited with code: {}", exit_code);
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
-            serial_println_core!("Exiting process' PID: {}", pid);
+            serial_println_core!("sys_exit: PID {} exiting with code {}", pid, exit_code);
 
             {
                 let mut pm = PROCESS_MANAGER.lock();
                 pm.terminate_process(pid, exit_code as i32, false);
             }
 
-            {
-                //let mut scheduler = SCHEDULER.lock();
-                //TODO: remove from here as well?
-            }
-
-            //TODO: return to scheduler
-
-            loop {
-                x86_64::instructions::hlt();
-            }
-            exit_code
+            scheduler::return_to_scheduler();
         }
         _ => u64::MAX,
     }

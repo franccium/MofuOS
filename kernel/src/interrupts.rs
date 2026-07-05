@@ -966,6 +966,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 
         let mut scheduler = SCHEDULER.lock();
         scheduler.on_timer_tick(core_id);
+        drop(scheduler);
 
         interrupt_over();
     }
