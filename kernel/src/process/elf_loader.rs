@@ -16,10 +16,16 @@ pub struct ElfLoadInfo {
 pub struct LoadSegment {
     pub vaddr: u64,
     pub in_file_size: u64,
-    pub in_memory_size: u64, // includes the bss section
-    /// Raw ELF p_flags: PF_X=1, PF_W=2, PF_R=4
+    pub in_memory_size: u64,
     pub flags: u32,
     pub data: Vec<u8>,
+}
+
+#[repr(u32)]
+pub enum ElfLoadFlags {
+    Executable = 1,
+    Writable = 2,
+    Readable = 4,
 }
 
 #[derive(Debug)]

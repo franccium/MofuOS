@@ -1,6 +1,9 @@
 use crate::{
     data_structures::vector::Vec,
-    process::{ElfLoadInfo, KernelThread, ThreadState, process_mem::ProcessMemoryLayout},
+    process::{
+        ElfLoadInfo, KernelThread, ThreadState, elf_loader::ElfLoadFlags,
+        process_mem::ProcessMemoryLayout,
+    },
     serial_println,
 };
 use alloc::string::String;
@@ -171,9 +174,7 @@ impl Process {
         stack_top: u64,
         page_table_base_phys: u64,
     ) -> Result<Self, MapToError<Size4KiB>> {
-        // Caller provides a fully-constructed memory layout so that this
-        // constructor does not silently allocate (and potentially leak) a PML4
-        // frame that the caller would then ignore.
+        // The caller has to provide a fully-constructed memory layout
         let memory_layout = crate::process::process_mem::ProcessMemoryLayout {
             top_page_table_phys: x86_64::PhysAddr::new(page_table_base_phys),
             stack_top: x86_64::VirtAddr::new(stack_top),
@@ -217,14 +218,11 @@ impl Process {
             let vaddr = VirtAddr::new(segment.vaddr);
             let in_memory_size = segment.in_memory_size as u64;
 
-            // Parse ELF p_flags: PF_X=1, PF_W=2, PF_R=4
-            const PF_X: u32 = 0x1;
-            const PF_W: u32 = 0x2;
             let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-            if segment.flags & PF_W != 0 {
+            if segment.flags & ElfLoadFlags::Writable != 0 {
                 flags |= PageTableFlags::WRITABLE;
             }
-            if segment.flags & PF_X == 0 {
+            if segment.flags & ElfLoadFlags::Executable == 0 {
                 flags |= PageTableFlags::NO_EXECUTE;
             }
 
@@ -268,16 +266,12 @@ impl Process {
                 }
                 bytes_copied += bytes_in_page;
             }
-            serial_println!(
-                "  Copied {} bytes to {:#x}",
-                file_size,
-                vaddr.as_u64()
-            );
+            serial_println!("  Copied {} bytes to {:#x}", file_size, vaddr.as_u64());
 
             // Zero-fill the BSS (in-memory > in-file) via HHDM, page by page.
             if segment.in_memory_size > segment.in_file_size {
                 let bss_offset = segment.in_file_size as u64;
-                let bss_size   = (segment.in_memory_size - segment.in_file_size) as u64;
+                let bss_size = (segment.in_memory_size - segment.in_file_size) as u64;
                 let mut bytes_zeroed: u64 = 0;
 
                 while bytes_zeroed < bss_size {
