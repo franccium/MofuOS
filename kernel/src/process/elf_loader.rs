@@ -2,7 +2,7 @@ use crate::serial_println;
 use alloc::vec::Vec;
 use elf::ElfBytes;
 
-pub const TEST_ELF: &[u8] = include_bytes!("../../../user/programs/first/first");
+pub const TEST_ELF: &[u8] = include_bytes!("../../../user/programs/test/test");
 
 #[derive(Debug)]
 pub struct ElfLoadInfo {

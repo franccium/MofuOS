@@ -400,7 +400,7 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
     loop {
         // Disable interrupts for atomic scheduler check
         x86_64::instructions::interrupts::disable();
-        serial_println_core!("disabled interrupts");
+        //serial_println_core!("disabled interrupts");
 
         // Get next process for this core
         let next_pid = {
@@ -415,6 +415,8 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
                 let mut scheduler = SCHEDULER.lock();
                 scheduler.set_current_on_core(core_id, pid);
             }
+
+            serial_println_core!("Start running PID {}", pid);
 
             // Re-enable interrupts before running the process
             x86_64::instructions::interrupts::enable();

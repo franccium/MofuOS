@@ -106,6 +106,41 @@ serial_println!("LAPIC PML4 entry {}: {:?}", lapic_pml4_idx, pml4[lapic_pml4_idx
         Some(PhysAddr::new(pt_entry.addr().as_u64() + page_offset))
     }
 
+    /// Read the PageTableFlags of an already-mapped page by walking the page
+    /// table manually.  Returns empty flags if the page is not mapped.
+    fn get_page_flags(&self, pml4_table_phys: PhysAddr, page: Page<Size4KiB>) -> PageTableFlags {
+        let vaddr = page.start_address();
+        let pml4_virt = VirtAddr::new(pml4_table_phys.as_u64() + self.phys_offset);
+        let pml4 = unsafe { &*(pml4_virt.as_u64() as *const PageTable) };
+
+        let pml4_entry = &pml4[((vaddr.as_u64() >> 39) & 0x1FF) as usize];
+        if !pml4_entry.flags().contains(PageTableFlags::PRESENT) {
+            return PageTableFlags::empty();
+        }
+        let pdpt = unsafe {
+            &*(VirtAddr::new(pml4_entry.addr().as_u64() + self.phys_offset).as_u64() as *const PageTable)
+        };
+
+        let pdpt_entry = &pdpt[((vaddr.as_u64() >> 30) & 0x1FF) as usize];
+        if !pdpt_entry.flags().contains(PageTableFlags::PRESENT) {
+            return PageTableFlags::empty();
+        }
+        let pd = unsafe {
+            &*(VirtAddr::new(pdpt_entry.addr().as_u64() + self.phys_offset).as_u64() as *const PageTable)
+        };
+
+        let pd_entry = &pd[((vaddr.as_u64() >> 21) & 0x1FF) as usize];
+        if !pd_entry.flags().contains(PageTableFlags::PRESENT) {
+            return PageTableFlags::empty();
+        }
+        let pt = unsafe {
+            &*(VirtAddr::new(pd_entry.addr().as_u64() + self.phys_offset).as_u64() as *const PageTable)
+        };
+
+        let pt_entry = &pt[((vaddr.as_u64() >> 12) & 0x1FF) as usize];
+        pt_entry.flags()
+    }
+
     pub fn map_virt_mem_region(&self, pml4_table_phys: PhysAddr, virt_addr: VirtAddr, size_bytes: u64, protection_flags: PageTableFlags, frame_allocator: &mut MemoryMapFrameAllocator) -> Result<(), MapToError<Size4KiB>> {
         serial_println!("UserMemoryManager: map_virt_mem_region: mapping vaddr: {:#x}, bytes: {}", virt_addr.as_u64(), size_bytes);
         let new_table_pml4_virt = VirtAddr::new(pml4_table_phys.as_u64() + self.phys_offset);
@@ -122,7 +157,52 @@ serial_println!("LAPIC PML4 entry {}: {:?}", lapic_pml4_idx, pml4[lapic_pml4_idx
         for page in Page::range_inclusive(start_page, end_page) {
             let phys_frame = frame_allocator.allocate_frame().ok_or(MapToError::FrameAllocationFailed)?;
             unsafe {
-                user_page_mapper.map_to(page, phys_frame, user_flags, frame_allocator)?.flush();
+                match user_page_mapper.map_to(page, phys_frame, user_flags, frame_allocator) {
+                    Ok(flush) => { flush.flush(); }
+                    Err(MapToError::PageAlreadyMapped(_existing_frame)) => {
+                        // This page was already mapped by a previous segment whose
+                        // virtual range overlaps ours at a page boundary.
+                        //
+                        // Capability flags (PRESENT, WRITABLE, USER_ACCESSIBLE) are
+                        // unioned: grant the permission if either segment needs it.
+                        //
+                        // NO_EXECUTE is a restriction flag — it must only be set
+                        // when ALL segments that touch this page agree it is
+                        // non-executable.  So we AND it: if the existing mapping
+                        // does not have NO_EXECUTE (page is executable), the merged
+                        // result must also not have NO_EXECUTE, regardless of what
+                        // the new segment requests.
+                        let existing_flags = self.get_page_flags(pml4_table_phys, page);
+
+                        // OR all bits together first, then fix up NO_EXECUTE.
+                        let mut merged_flags = existing_flags | user_flags;
+
+                        // Only keep NO_EXECUTE if BOTH sides had it set.
+                        let both_nx = existing_flags.contains(PageTableFlags::NO_EXECUTE)
+                            && user_flags.contains(PageTableFlags::NO_EXECUTE);
+                        if !both_nx {
+                            merged_flags.remove(PageTableFlags::NO_EXECUTE);
+                        }
+
+                        match user_page_mapper.update_flags(page, merged_flags) {
+                            Ok(flush) => {
+                                flush.flush();
+                                serial_println!(
+                                    "  map_virt_mem_region: page {:#x} already mapped, merged flags {:?} | {:?} -> {:?}",
+                                    page.start_address().as_u64(),
+                                    existing_flags, user_flags, merged_flags,
+                                );
+                            }
+                            Err(e) => {
+                                serial_println!(
+                                    "  map_virt_mem_region: page {:#x} already mapped, update_flags failed: {:?}",
+                                    page.start_address().as_u64(), e,
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
 

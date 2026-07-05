@@ -297,7 +297,7 @@ fn main() -> ! {
                 time_elapsed += dt;
                 serial_println_core!("Loop time: {} ns; {} ms", dt, dt as f32 / 1_000_000.0);
             } else {
-                serial_println_core!("loop");
+                //serial_println_core!("loop");
                 //hlt();
             }
         }

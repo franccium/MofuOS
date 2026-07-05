@@ -9,8 +9,25 @@ use crate::{MAX_CORES, serial_println, serial_println_core};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
-const PER_CORE_STACK_SIZE: u64 = 8 * 4096;
-const STACK_BASE: u64 = 0xFFFF_FFFF_FF00_0000;
+// Stack size for each per-core stack (RSP0 and double-fault IST).
+// 32 KiB is enough for deeply-nested kernel frames.
+const PER_CORE_STACK_SIZE: usize = 8 * 4096; // 32 KiB
+
+// Backing storage for per-core kernel stacks.
+// These live in .bss, are automatically mapped by the bootloader, and stay
+// alive for the lifetime of the kernel — exactly what the TSS raw pointers need.
+//
+// Layout per core:
+//   [0..PER_CORE_STACK_SIZE]              → RSP0 stack  (ring 0 interrupt stack)
+//   [PER_CORE_STACK_SIZE..2*STACK_SIZE]   → IST[0] stack (double-fault stack)
+#[repr(align(16))]
+struct KernelStack([u8; PER_CORE_STACK_SIZE]);
+
+static mut RSP0_STACKS: [KernelStack; MAX_CORES as usize] =
+    [const { KernelStack([0u8; PER_CORE_STACK_SIZE]) }; MAX_CORES as usize];
+
+static mut IST0_STACKS: [KernelStack; MAX_CORES as usize] =
+    [const { KernelStack([0u8; PER_CORE_STACK_SIZE]) }; MAX_CORES as usize];
 
 static mut PER_CORE_GDT: [Gdt; MAX_CORES as usize] = {
     const EMPTY: Gdt = Gdt::empty();
@@ -49,10 +66,32 @@ impl Gdt {
     }
 
     fn new(core_id: u8) -> Self {
-        let tss = unsafe { &mut *PER_CORE_TSS[core_id as usize].get() };
+        let idx = core_id as usize;
+        let tss = unsafe { &mut *PER_CORE_TSS[idx].get() };
 
-        let ist_stack_addr = allocate_per_core_stack(core_id);
-        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(ist_stack_addr);
+        // RSP0: used by the CPU on any ring-3→ring-0 transition (interrupts,
+        // exceptions, syscalls via INT).  Without this, the hardware tries to
+        // switch to stack address 0x0, which is unmapped → immediate triple fault.
+        let rsp0_top = unsafe {
+            let stack = &RSP0_STACKS[idx].0;
+            // Stack grows downward; top = one-past-end of the array.
+            stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64
+        };
+        tss.privilege_stack_table[0] = VirtAddr::new(rsp0_top);
+
+        // IST[0]: dedicated stack for the double-fault handler.  Without this
+        // the double-fault handler runs on whatever (possibly corrupt) RSP it
+        // inherited, which immediately causes another fault → triple fault.
+        let ist0_top = unsafe {
+            let stack = &IST0_STACKS[idx].0;
+            stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64
+        };
+        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(ist0_top);
+
+        serial_println!(
+            "Core {}: TSS RSP0={:#x}  IST0={:#x}",
+            core_id, rsp0_top, ist0_top
+        );
 
         let mut table = GlobalDescriptorTable::new();
         let kernel_code_selector = table.append(Descriptor::kernel_code_segment());
@@ -70,11 +109,6 @@ impl Gdt {
             tss_selector,
         }
     }
-}
-
-/// Returns the top of the stack
-fn allocate_per_core_stack(core_id: u8) -> u64 {
-    STACK_BASE + ((core_id as u64 + 1) * PER_CORE_STACK_SIZE)
 }
 
 pub unsafe fn init_core_gdt(core_id: u8) {
