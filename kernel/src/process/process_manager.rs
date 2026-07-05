@@ -121,11 +121,6 @@ impl ProcessManager {
         // Create thread group
         let thread_group = ThreadGroup::new(new_pid, kernel_thread);
 
-        // Enqueue thread in scheduler for its assigned core
-        let mut scheduler = SCHEDULER.lock();
-        scheduler.enqueue_on_core(core_id, new_pid, priority);
-        drop(scheduler);
-
         // Create process structure
         let new_process = Process {
             pid: new_pid,
@@ -153,8 +148,17 @@ impl ProcessManager {
             },
         };
 
+        // Store process and thread group BEFORE making the PID visible to the
+        // scheduler — same ordering guarantee as create_process_from_elf.
         self.processes.push(new_process);
         self.thread_groups.push(thread_group);
+
+        // Enqueue thread in scheduler for its assigned core only after the
+        // process is fully stored and visible via get_process().
+        {
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.enqueue_on_core(core_id, new_pid, priority);
+        }
 
         serial_println!(
             "Created process {} (PID {}) on core {} with priority {}",
@@ -220,17 +224,25 @@ impl ProcessManager {
 
         // Create thread group
         let thread_group = ThreadGroup::new(new_pid, kernel_thread);
-        
-        // Enqueue thread in scheduler for its assigned core
-        let mut scheduler = SCHEDULER.lock();
-        scheduler.enqueue_on_core(core_id, new_pid, priority);
-        drop(scheduler);
 
-        serial_println!("create_process_from_elf: enqueued process PID {} on core {}; priority: {}", new_pid, core_id, priority);
-
-        // Store process and thread group
+        // Store process and thread group BEFORE enqueuing to the scheduler.
+        // Core 1's scheduler loop can pick up the PID the instant it appears in
+        // the scheduler queue and will immediately call get_process(pid).  If we
+        // enqueue first (old order), get_process returns Err(ProcessNotFound)
+        // because processes.push hasn't run yet, causing a race that can corrupt
+        // memory when core 1 jumps to userspace while core 0 is still setting up
+        // the same process's page tables.
         self.processes.push(process);
         self.thread_groups.push(thread_group);
+
+        // Only now make the process visible to the scheduler — it is fully
+        // constructed and stored at this point.
+        {
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.enqueue_on_core(core_id, new_pid, priority);
+        }
+
+        serial_println!("create_process_from_elf: enqueued process PID {} on core {}; priority: {}", new_pid, core_id, priority);
 
         serial_println!(
             "Created userspace process {} (PID {}) from ELF on core {} with priority {}",
