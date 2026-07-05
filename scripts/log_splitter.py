@@ -29,11 +29,16 @@ MAX_CORES = 16
 
 LOGS_ROOT = Path(__file__).parent.parent / "logs"
 
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def make_timestamp() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
+def strip_ansi(line: str) -> str:
+    """Remove ANSI escape sequences from a line."""
+    return _ANSI_RE.sub('', line)
 
 class SessionFiles:
     """Holds all open log file handles for a single boot session."""
@@ -92,13 +97,15 @@ def route_com1_line(line: str, sf: SessionFiles):
 def route_com2_line(line: str, sf: SessionFiles):
     """Route a line from COM2 (userspace output) to all.txt and the pid file."""
     # COM2 lines are prefixed by the kernel with [pid=N] before the payload.
-    m = _PID_RE.match(line)
-    if m:
-        pid  = int(m.group(1))
-        text = m.group(2)
-        sf.write(sf.all_f, f"[pid={pid}] {text}")
-        sf.write(sf.pid_file(pid), text)
-        print(f"[pid={pid}] {text}", end="", flush=True)
+    # Strip all [pid=N] tags from the line
+    cleaned = re.sub(r'\[pid=\d+\]', '', line).strip()
+    
+    pid_match = re.search(r'\[pid=(\d+)\]', line)
+    if pid_match:
+        pid = int(pid_match.group(1))
+        sf.write(sf.all_f, cleaned)
+        sf.write(sf.pid_file(pid), cleaned)
+        print(cleaned, flush=True)
     else:
         # Untagged COM2 line (shouldn't happen, but don't lose it).
         sf.write(sf.all_f, f"[?] {line}")
@@ -171,6 +178,7 @@ def main():
 
         def read_com2():
             for line in socket_lines(com2_path, timeout_s=30.0):
+                line = strip_ansi(line)
                 route_com2_line(line, sf)
             done.set()
 
@@ -179,6 +187,7 @@ def main():
 
         try:
             for line in socket_lines(com1_path, timeout_s=10.0):
+                line = strip_ansi(line)
                 route_com1_line(line, sf)
         except KeyboardInterrupt:
             pass
