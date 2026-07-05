@@ -1,2 +1,2 @@
-pub mod vector;
 pub mod dequeue;
+pub mod vector;

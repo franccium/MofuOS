@@ -5,8 +5,8 @@ use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
 use crate::process::kernel_thread::{KernelThread, ThreadGroup, ThreadState};
 use crate::process::process::{INVALID_PID, MAX_PRIORITY, Process, ProcessState};
-use crate::process::scheduler::SCHEDULER;
 use crate::process::process_mem::MappedMemoryRegion;
+use crate::process::scheduler::SCHEDULER;
 use crate::serial_println;
 use alloc::string::String;
 use spin::Mutex;
@@ -220,7 +220,12 @@ impl ProcessManager {
         );
         kernel_thread.assign_to_core(core_id);
 
-        serial_println!("create_process_from_elf: assigned kernel thread to Core ID: {} for process name: {}, pid: {}", core_id, kernel_thread.name, kernel_thread.pid);
+        serial_println!(
+            "create_process_from_elf: assigned kernel thread to Core ID: {} for process name: {}, pid: {}",
+            core_id,
+            kernel_thread.name,
+            kernel_thread.pid
+        );
 
         // Create thread group
         let thread_group = ThreadGroup::new(new_pid, kernel_thread);
@@ -242,11 +247,19 @@ impl ProcessManager {
             scheduler.enqueue_on_core(core_id, new_pid, priority);
         }
 
-        serial_println!("create_process_from_elf: enqueued process PID {} on core {}; priority: {}", new_pid, core_id, priority);
+        serial_println!(
+            "create_process_from_elf: enqueued process PID {} on core {}; priority: {}",
+            new_pid,
+            core_id,
+            priority
+        );
 
         serial_println!(
             "Created userspace process {} (PID {}) from ELF on core {} with priority {}",
-            name, new_pid, core_id, priority
+            name,
+            new_pid,
+            core_id,
+            priority
         );
 
         Ok(new_pid)

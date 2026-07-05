@@ -27,8 +27,13 @@ run-hdd: run-hdd-$(KARCH)
 .PHONY: fat32-image
 fat32-image: test_disk_image.fat32.img
 
+SOCKET1 := /tmp/mofuos_com1.sock
+SOCKET2 := /tmp/mofuos_com2.sock
 .PHONY: run-x86_64
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
+	@mkdir -p logs
+	@rm -f $(SOCKET1) $(SOCKET2)
+	@python3 scripts/log_splitter.py $(SOCKET1) $(SOCKET2) & \
 	qemu-system-$(KARCH) \
 		-M q35 \
 		-accel kvm \
@@ -38,10 +43,27 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-serial stdio \
+		-serial unix:$(SOCKET1),server \
+		-serial unix:$(SOCKET2),server,nowait \
 		-no-reboot \
 		-monitor telnet:127.0.0.1:1234,server,nowait \
 		$(QEMUFLAGS)
+
+.PHONY: run-nologs
+run-nologs: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
+	qemu-system-$(KARCH) \
+		-M q35 \
+		-accel kvm \
+		-smp cores=2,threads=1 \
+		-cpu qemu64,+tsc-deadline,+apic \
+		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
+		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
+		-cdrom $(IMAGE_NAME).iso \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		-no-reboot \
+		-monitor telnet:127.0.0.1:1234,server,nowait \
+		$(QEMUFLAGS); \
+	wait
 
 .PHONY: run-fast-x86_64
 run-fast-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso

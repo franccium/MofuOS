@@ -1,3 +1,3 @@
+pub mod apic;
 pub mod cpuinfo;
 pub mod msr;
-pub mod apic;

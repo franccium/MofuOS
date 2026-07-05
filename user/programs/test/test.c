@@ -1,4 +1,4 @@
-#include "../../libc/syscall.h"
+#include"../../libc/syscall.h"
 
 /* ── minimal helpers (no libc) ───────────────────────────────────────────── */
 
@@ -43,7 +43,7 @@ static int tests_failed = 0;
 static void test_pass(const char *name) {
     tests_run++;
     tests_passed++;
-    print("  [PASS] ");
+    print("[PASS]");
     print(name);
     print("\n");
 }
@@ -51,11 +51,11 @@ static void test_pass(const char *name) {
 static void test_fail(const char *name, long expected, long got) {
     tests_run++;
     tests_failed++;
-    print("  [FAIL] ");
+    print("[FAIL]");
     print(name);
-    print(" -- expected ");
+    print(" -- expected");
     print_num(expected);
-    print("         got ");
+    print("       got");
     print_num(got);
 }
 
@@ -72,8 +72,8 @@ static void test_fail(const char *name, long expected, long got) {
         if (_got != (long)(unexpected)) test_pass(name); \
         else { \
             tests_run++; tests_failed++; \
-            print("  [FAIL] "); print(name); \
-            print(" -- got unexpected value "); print_num(_got); \
+            print("[FAIL]"); print(name); \
+            print(" -- got unexpected value"); print_num(_got); \
         } \
     } while (0)
 
@@ -86,42 +86,41 @@ static void test_fail(const char *name, long expected, long got) {
  * syscall returns the byte count we passed and doesn't crash.
  */
 static void suite_write(void) {
-    print("\n[Suite] sys_write\n");
+    print("\n[CTests] sys_write\n");
 
     /* Writing an empty buffer should return 0 bytes. */
     EXPECT_EQ("write 0 bytes returns 0",
               0,
-              sys_write(1, "", 0));
+              sys_write(1,"", 0));
 
     /* Writing a known string should return exactly its length. */
-    const char *msg = "hello from MofuOS\n";
+    const char *msg ="hello from MofuOS\n";
     size_t      len = strlen(msg);
     EXPECT_EQ("write N bytes returns N",
               (long)len,
               sys_write(1, msg, len));
 
     /* A second write should also return its exact length. */
-    const char *msg2 = "second write\n";
+    const char *msg2 ="second write\n";
     EXPECT_EQ("second write returns correct length",
               (long)strlen(msg2),
               sys_write(1, msg2, strlen(msg2)));
 }
 
 /*
- * Suite 2 — syscall 997  (echo: returns arg1 + 4)
+ * Suite 2 — syscall 997  (echo: returns arg1)
  *
- * This is the only in-kernel arithmetic echo we have. It lets us verify
- * that argument passing through the syscall ABI works correctly for several
- * values.
+ * lets us verify that argument passing through the syscall ABI works 
+ * correctly for several values.
  */
 static void suite_echo_math(void) {
-    print("\n[Suite] syscall 997 (arg + 4)\n");
+    print("\n[CTests] syscall 997 (arg)\n");
 
-    EXPECT_EQ("0 + 4 == 4",   4,  syscall6(997, 0,  0,0,0,0,0));
-    EXPECT_EQ("1 + 4 == 5",   5,  syscall6(997, 1,  0,0,0,0,0));
-    EXPECT_EQ("10 + 4 == 14", 14, syscall6(997, 10, 0,0,0,0,0));
-    EXPECT_EQ("96 + 4 == 100",100,syscall6(997, 96, 0,0,0,0,0));
-    EXPECT_EQ("-1 + 4 == 3",  3,  syscall6(997, -1, 0,0,0,0,0));
+    EXPECT_EQ("0 == 0", 0,  syscall6(997, 0,  0,0,0,0,0));
+    EXPECT_EQ("1 == 1", 1,  syscall6(997, 1,  0,0,0,0,0));
+    EXPECT_EQ("-1 == -1", -1, syscall6(997, -1, 0,0,0,0,0));
+    EXPECT_EQ("u64_max == u64_max", 0xFFFFFFFFFFFFFFFF, syscall6(997, 0xFFFFFFFFFFFFFFFF, 0,0,0,0,0));
+    EXPECT_EQ("124 == 124", 124,  syscall6(997, 124, 0,0,0,0,0));
 }
 
 /*
@@ -132,7 +131,7 @@ static void suite_echo_math(void) {
  * doesn't crash on unknown syscall numbers and returns a sentinel value.
  */
 static void suite_unimplemented(void) {
-    print("\n[Suite] unimplemented syscalls return -1\n");
+    print("\n[CTests] unimplemented syscalls return -1\n");
 
     /* Pick a handful of numbers that have no handler yet. */
     EXPECT_EQ("syscall 3  (read)    -> -1",   -1L, syscall6(3,  0,0,0,0,0,0));
@@ -149,7 +148,7 @@ static void suite_unimplemented(void) {
  * trust any syscall-based result.
  */
 static void suite_userspace_logic(void) {
-    print("\n[Suite] userspace logic (no syscalls)\n");
+    print("\n[CTests] userspace logic (no syscalls)\n");
 
     /* strlen */
     EXPECT_EQ("strlen empty",   0, (long)strlen(""));
@@ -194,7 +193,7 @@ static void suite_userspace_logic(void) {
  * doesn't corrupt state across repeated syscalls.
  */
 static void suite_write_stress(void) {
-    print("\n[Suite] write stress (20 sequential writes)\n");
+    print("\n[CTests] write stress (20 sequential writes)\n");
 
     int ok = 1;
     for (int i = 0; i < 20; i++) {
@@ -202,7 +201,7 @@ static void suite_write_stress(void) {
         long r = sys_write(1, ch, 2);
         if (r != 2) { ok = 0; break; }
     }
-    sys_write(1, "\n", 1);
+    sys_write(1,"\n", 1);
 
     EXPECT_EQ("all 20 writes returned 2", 1, (long)ok);
 }
@@ -213,7 +212,7 @@ int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
     print("============================================================\n");
-    print("  MofuOS userspace test suite\n");
+    print("MofuOS userspace test suite\n");
     print("============================================================\n");
 
     suite_userspace_logic();
@@ -223,22 +222,21 @@ int main(int argc, char **argv) {
     suite_write_stress();
 
     print("\n============================================================\n");
-    print("  Results: ");
+    print("Results:");
     print_num(tests_passed);
-    print("  passed / ");
+    print("passed /");
     print_num(tests_run);
-    print("  total\n");
+    print("total\n");
 
     if (tests_failed == 0) {
-        print("  ALL TESTS PASSED\n");
+        print("ALL TESTS PASSED\n");
         sys_exit(0);
     } else {
-        print("  FAILURES: ");
+        print("FAILURES:");
         print_num(tests_failed);
         print("\n");
         sys_exit(1);
     }
 
-    /* unreachable — sys_exit diverges via __builtin_unreachable() */
     return 0;
 }

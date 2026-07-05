@@ -90,7 +90,9 @@ impl Gdt {
 
         serial_println!(
             "Core {}: TSS RSP0={:#x}  IST0={:#x}",
-            core_id, rsp0_top, ist0_top
+            core_id,
+            rsp0_top,
+            ist0_top
         );
 
         let mut table = GlobalDescriptorTable::new();
@@ -112,7 +114,6 @@ impl Gdt {
 }
 
 pub unsafe fn init_core_gdt(core_id: u8) {
-
     let gdt = Gdt::new(core_id);
 
     let idx = core_id as usize;
@@ -148,7 +149,6 @@ pub unsafe fn init_core_gdt(core_id: u8) {
         // Load TSS
         x86_64::instructions::tables::load_tss(gdt_ref.tss_selector);
     }
-
 }
 
 pub fn get_kernel_code_selector() -> SegmentSelector {

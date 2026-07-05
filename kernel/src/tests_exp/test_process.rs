@@ -1,9 +1,12 @@
-use crate::{process::{
-    process_manager::PROCESS_MANAGER,
-    syscall::{SystemCall, handle_syscall},
-    Process,
-    elf_loader::{ElfLoadInfo, TEST_ELF},
-}, serial_println};
+use crate::{
+    process::{
+        Process,
+        elf_loader::{ElfLoadInfo, TEST_ELF},
+        process_manager::PROCESS_MANAGER,
+        syscall::{SystemCall, handle_syscall},
+    },
+    serial_println,
+};
 
 pub fn test_process_system() {
     {
@@ -80,8 +83,6 @@ pub fn test_process_system() {
         serial_println!("Failed to create processes");
     }
 }
-
-
 
 pub fn create_init_process() {
     serial_println!("Creating init process");

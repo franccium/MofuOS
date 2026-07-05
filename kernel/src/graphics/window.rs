@@ -1,16 +1,16 @@
+use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
+use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb, xrgb_to_rgba};
+use crate::memory::memory::{PAGE_SIZE, align_down, align_up};
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use embedded_graphics::Pixel;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::{Dimensions, DrawTarget, OriginDimensions, Point, Size};
 use embedded_graphics::primitives::Rectangle;
-use core::cell::UnsafeCell;
-use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use alloc::boxed::Box;
-use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
-use crate::memory::memory::{align_up, align_down, PAGE_SIZE};
-use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb, xrgb_to_rgba};
 
 pub type WindowID = u32;
 pub const INVALID_WINDOW_ID: WindowID = u32::MAX;
@@ -25,7 +25,6 @@ pub struct Window {
     pub buffer: Arc<WindowBuffer>,
 }
 
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Rect {
@@ -37,7 +36,12 @@ pub struct Rect {
 
 impl Rect {
     pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn contains(&self, px: u32, py: u32) -> bool {
@@ -45,8 +49,10 @@ impl Rect {
     }
 
     pub fn intersects(&self, other: &Rect) -> bool {
-        self.x < other.x + other.width && self.x + self.width > other.x &&
-        self.y < other.y + other.height && self.y + self.height > other.y
+        self.x < other.x + other.width
+            && self.x + self.width > other.x
+            && self.y < other.y + other.height
+            && self.y + self.height > other.y
     }
 
     pub fn get_intersection_rect(&self, other: &Rect) -> Option<Rect> {
@@ -55,7 +61,11 @@ impl Rect {
         let other_right = other.x + other.width;
         let other_bottom = other.y + other.height;
 
-        if self_right <= other.x || self.x >= other_right || self_bottom <= other.y || self.y >= other_bottom {
+        if self_right <= other.x
+            || self.x >= other_right
+            || self_bottom <= other.y
+            || self.y >= other_bottom
+        {
             return None;
         }
 
@@ -115,8 +125,12 @@ impl WindowBuffer {
             height,
             x,
             y,
-            back_buffer: UnsafeCell::new(NonNull::new(back_buffer_ptr).expect("Failed to allocate back buffer")),
-            front_buffer: UnsafeCell::new(NonNull::new(front_buffer_ptr).expect("Failed to allocate front buffer")),
+            back_buffer: UnsafeCell::new(
+                NonNull::new(back_buffer_ptr).expect("Failed to allocate back buffer"),
+            ),
+            front_buffer: UnsafeCell::new(
+                NonNull::new(front_buffer_ptr).expect("Failed to allocate front buffer"),
+            ),
             needs_swap: AtomicBool::new(false),
             swap_count: AtomicU32::new(0),
         }
@@ -180,7 +194,9 @@ impl<'a> WindowBackBuffer<'a> {
         if x < self.window.width && y < self.window.height {
             let offset = (y * self.window.width + x) as usize;
             let xrgb = rgba_to_xrgb(color);
-            unsafe { *self.window.back_buffer_ptr().add(offset) = xrgb; }
+            unsafe {
+                *self.window.back_buffer_ptr().add(offset) = xrgb;
+            }
             self.window.needs_swap.store(true, Ordering::Release);
         }
     }
@@ -188,7 +204,9 @@ impl<'a> WindowBackBuffer<'a> {
     pub unsafe fn write_pixel_unchecked(&mut self, x: u32, y: u32, color: Rgba8888UNORM) {
         let offset = (y * self.window.width + x) as usize;
         let xrgb = rgba_to_xrgb(color);
-        unsafe { *self.window.back_buffer_ptr().add(offset) = xrgb; }
+        unsafe {
+            *self.window.back_buffer_ptr().add(offset) = xrgb;
+        }
         self.window.needs_swap.store(true, Ordering::Release);
     }
 
@@ -196,7 +214,9 @@ impl<'a> WindowBackBuffer<'a> {
         let xrgb = rgba_to_xrgb(color);
         let pixel_count = (self.window.width * self.window.height) as usize;
         for i in 0..pixel_count {
-            unsafe { *self.window.back_buffer_ptr().add(i) = xrgb; }
+            unsafe {
+                *self.window.back_buffer_ptr().add(i) = xrgb;
+            }
         }
         self.window.needs_swap.store(true, Ordering::Release);
     }
@@ -205,7 +225,7 @@ impl<'a> WindowBackBuffer<'a> {
         unsafe {
             core::slice::from_raw_parts_mut(
                 self.window.back_buffer_ptr(),
-                (self.window.width * self.window.height) as usize
+                (self.window.width * self.window.height) as usize,
             )
         }
     }
@@ -232,7 +252,7 @@ impl<'a> WindowPresentBuffer<'a> {
         unsafe {
             core::slice::from_raw_parts(
                 self.window.front_buffer_ptr(),
-                (self.window.width * self.window.height) as usize
+                (self.window.width * self.window.height) as usize,
             )
         }
     }
@@ -287,6 +307,9 @@ impl<'a> DrawTarget for WindowBackBuffer<'a> {
 
 impl<'a> Dimensions for WindowBackBuffer<'a> {
     fn bounding_box(&self) -> Rectangle {
-        Rectangle::new(Point::new(self.window.x, self.window.y), Size::new(self.window.width, self.window.height))
+        Rectangle::new(
+            Point::new(self.window.x, self.window.y),
+            Size::new(self.window.width, self.window.height),
+        )
     }
 }

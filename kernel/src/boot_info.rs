@@ -1,8 +1,6 @@
 use limine::framebuffer::Framebuffer;
 use spin::{Mutex, Once};
 
-
-
 pub struct BootInfo {
     pub hhdm_offset: u64,
     //pub framebuffer: Mutex<Framebuffer>,

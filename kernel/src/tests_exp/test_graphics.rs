@@ -47,7 +47,10 @@ pub fn draw_shapes(framebuffer_target: &mut FrameBufferTarget) {
     }
 }
 
-pub fn render_shaders_2d_textured(window_buffer: &Arc<WindowBuffer>, render_target: &mut RenderTarget<'_>) {
+pub fn render_shaders_2d_textured(
+    window_buffer: &Arc<WindowBuffer>,
+    render_target: &mut RenderTarget<'_>,
+) {
     let mut ctx = RenderContext::new();
     const SIZE: u32 = 120;
     let texture_data = Vec::from(
@@ -143,7 +146,7 @@ pub fn render_shaders_2d_textured(window_buffer: &Arc<WindowBuffer>, render_targ
 pub fn render_shaders_2d(window_buffer: &Arc<WindowBuffer>, render_target: &mut RenderTarget<'_>) {
     let mut ctx = RenderContext::new();
     const SIZE: u32 = 120;
-    
+
     let pipeline = PipelineState {
         vs: Box::new(PassThroughVS),
         ps: Box::new(UVDebugPS),
@@ -257,54 +260,44 @@ pub fn render_shaders_3d(window_buffer: &Arc<WindowBuffer>) {
 
     let vertices = alloc::vec![
         // Front face
-        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 0.0,  0.0, 0.0, 1.0),
-        Vertex3D::new( s, -s,  s, 1.0,  1.0, 0.0,  0.0, 0.0, 1.0),
-        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  0.0, 0.0, 1.0),
-        Vertex3D::new(-s,  s,  s, 1.0,  0.0, 1.0,  0.0, 0.0, 1.0),
+        Vertex3D::new(-s, -s, s, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        Vertex3D::new(s, -s, s, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        Vertex3D::new(s, s, s, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0),
+        Vertex3D::new(-s, s, s, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0),
         // Back face
-        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  0.0, 0.0, -1.0),
-        Vertex3D::new( s, -s, -s, 1.0,  1.0, 0.0,  0.0, 0.0, -1.0),
-        Vertex3D::new( s,  s, -s, 1.0,  1.0, 1.0,  0.0, 0.0, -1.0),
-        Vertex3D::new(-s,  s, -s, 1.0,  0.0, 1.0,  0.0, 0.0, -1.0),
+        Vertex3D::new(-s, -s, -s, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0),
+        Vertex3D::new(s, -s, -s, 1.0, 1.0, 0.0, 0.0, 0.0, -1.0),
+        Vertex3D::new(s, s, -s, 1.0, 1.0, 1.0, 0.0, 0.0, -1.0),
+        Vertex3D::new(-s, s, -s, 1.0, 0.0, 1.0, 0.0, 0.0, -1.0),
         // Top face
-        Vertex3D::new(-s,  s, -s, 1.0,  0.0, 0.0,  0.0, 1.0, 0.0),
-        Vertex3D::new( s,  s, -s, 1.0,  1.0, 0.0,  0.0, 1.0, 0.0),
-        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  0.0, 1.0, 0.0),
-        Vertex3D::new(-s,  s,  s, 1.0,  0.0, 1.0,  0.0, 1.0, 0.0),
+        Vertex3D::new(-s, s, -s, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+        Vertex3D::new(s, s, -s, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0),
+        Vertex3D::new(s, s, s, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0),
+        Vertex3D::new(-s, s, s, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0),
         // Bottom face
-        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  0.0, -1.0, 0.0),
-        Vertex3D::new( s, -s, -s, 1.0,  1.0, 0.0,  0.0, -1.0, 0.0),
-        Vertex3D::new( s, -s,  s, 1.0,  1.0, 1.0,  0.0, -1.0, 0.0),
-        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 1.0,  0.0, -1.0, 0.0),
+        Vertex3D::new(-s, -s, -s, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0),
+        Vertex3D::new(s, -s, -s, 1.0, 1.0, 0.0, 0.0, -1.0, 0.0),
+        Vertex3D::new(s, -s, s, 1.0, 1.0, 1.0, 0.0, -1.0, 0.0),
+        Vertex3D::new(-s, -s, s, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0),
         // Right face
-        Vertex3D::new( s, -s, -s, 1.0,  0.0, 0.0,  1.0, 0.0, 0.0),
-        Vertex3D::new( s,  s, -s, 1.0,  1.0, 0.0,  1.0, 0.0, 0.0),
-        Vertex3D::new( s,  s,  s, 1.0,  1.0, 1.0,  1.0, 0.0, 0.0),
-        Vertex3D::new( s, -s,  s, 1.0,  0.0, 1.0,  1.0, 0.0, 0.0),
+        Vertex3D::new(s, -s, -s, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+        Vertex3D::new(s, s, -s, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0),
+        Vertex3D::new(s, s, s, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0),
+        Vertex3D::new(s, -s, s, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0),
         // Left face
-        Vertex3D::new(-s, -s, -s, 1.0,  0.0, 0.0,  -1.0, 0.0, 0.0),
-        Vertex3D::new(-s,  s, -s, 1.0,  1.0, 0.0,  -1.0, 0.0, 0.0),
-        Vertex3D::new(-s,  s,  s, 1.0,  1.0, 1.0,  -1.0, 0.0, 0.0),
-        Vertex3D::new(-s, -s,  s, 1.0,  0.0, 1.0,  -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, -s, -s, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, s, -s, 1.0, 1.0, 0.0, -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, s, s, 1.0, 1.0, 1.0, -1.0, 0.0, 0.0),
+        Vertex3D::new(-s, -s, s, 1.0, 0.0, 1.0, -1.0, 0.0, 0.0),
     ];
 
     let indices = alloc::vec![
         // Front (+Z)
-        0, 1, 2, 0, 2, 3,
-
-        // Back (-Z)
-        4, 6, 5, 4, 7, 6,
-
-        // Top (+Y)
-        8, 10, 9, 8, 11, 10,
-
-        // Bottom (-Y)
-        12, 13, 14, 12, 14, 15,
-
-        // Right (+X)
-        16, 17, 18, 16, 18, 19,
-
-        // Left (-X)
+        0, 1, 2, 0, 2, 3, // Back (-Z)
+        4, 6, 5, 4, 7, 6, // Top (+Y)
+        8, 10, 9, 8, 11, 10, // Bottom (-Y)
+        12, 13, 14, 12, 14, 15, // Right (+X)
+        16, 17, 18, 16, 18, 19, // Left (-X)
         20, 22, 21, 20, 23, 22,
     ];
 
@@ -328,7 +321,8 @@ pub fn render_shaders_3d(window_buffer: &Arc<WindowBuffer>) {
 }
 
 pub fn render_shaders_3d_loop(
-    window_buffer: &Arc<WindowBuffer>, render_target: &mut RenderTarget<'_>,
+    window_buffer: &Arc<WindowBuffer>,
+    render_target: &mut RenderTarget<'_>,
     ctx: &mut RenderContext,
     x: f32,
     y: f32,
@@ -361,16 +355,20 @@ pub fn render_shaders_3d_loop(
         // vs: Box::new(Basic3DVS {
         //     model_view_proj: mvp,
         // }),
-        vs: Box::new(BlinnPhongVS { model_view_proj: mvp, model_world: model }),
+        vs: Box::new(BlinnPhongVS {
+            model_view_proj: mvp,
+            model_world: model,
+        }),
 
         //ps: Box::new(TextureSamplePS { texture_slot: 0 }),
 
         //ps: Box::new(BlinnPhongPS { light_dir_intensity: f32x4::from_array([0.0, 0.5, 0.5, 1.0]), albedo: Rgba8888F::RED }),
 
-        // ps: Box::new(BlinnPhongPS { light_dir_intensity: f32x4::from_array([0.3, -0.5, -1.0, 1.0]), albedo: Rgba8888F::from_rgbf32(1.0, 0.0, 0.0), specular_color: Rgba8888F::WHITE, 
+        // ps: Box::new(BlinnPhongPS { light_dir_intensity: f32x4::from_array([0.3, -0.5, -1.0, 1.0]), albedo: Rgba8888F::from_rgbf32(1.0, 0.0, 0.0), specular_color: Rgba8888F::WHITE,
         //    shininess: 16.0, ambient_color: Rgba8888F::from_rgbf32(0.1, 0.1, 0.1), camera_pos: camera_pos }),
-
-        ps: Box::new(FlatColorPS { color: Rgba8888UNORM::from_rgbf32(0.8, 0.2, 0.2) }),
+        ps: Box::new(FlatColorPS {
+            color: Rgba8888UNORM::from_rgbf32(0.8, 0.2, 0.2),
+        }),
 
         vertex_layout: VertexLayout::new_3d(),
         rasterizer_state: RasterizerState {

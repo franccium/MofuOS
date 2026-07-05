@@ -1,8 +1,8 @@
 use alloc::format;
 use alloc::string::String;
 
-use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
 use crate::process::elf_loader::TEST_ELF;
+use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
 use crate::serial_println;
 
 pub fn create_init_process() {
@@ -22,7 +22,10 @@ pub fn create_init_process() {
     let mut pm = PROCESS_MANAGER.lock();
     match pm.create_process_from_elf(0, &elf_info, "proc1", 5) {
         Ok(init_pid) => {
-            serial_println!("Init process created (PID {}), added to scheduler", init_pid);
+            serial_println!(
+                "Init process created (PID {}), added to scheduler",
+                init_pid
+            );
         }
         Err(e) => {
             serial_println!("ERROR: Failed to create init process: {:?}", e);
@@ -40,10 +43,16 @@ pub fn create_userspace_process(
         .map_err(|e| format!("Failed to parse ELF: {:?}", e))?;
 
     let mut pm = PROCESS_MANAGER.lock();
-    let pid = pm.create_process_from_elf(parent_pid, &elf_info, name, priority)
+    let pid = pm
+        .create_process_from_elf(parent_pid, &elf_info, name, priority)
         .map_err(|e| format!("Failed to create process: {:?}", e))?;
 
-    serial_println!("Created userspace process '{}' (PID {}) with priority {}", name, pid, priority);
+    serial_println!(
+        "Created userspace process '{}' (PID {}) with priority {}",
+        name,
+        pid,
+        priority
+    );
     Ok(pid)
 }
 

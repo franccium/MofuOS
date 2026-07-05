@@ -45,7 +45,6 @@ impl From<elf::ParseError> for ElfLoadError {
     }
 }
 
-
 fn merge_segments(segments: Vec<LoadSegment>) -> Vec<LoadSegment> {
     let mut merged = Vec::<LoadSegment>::with_capacity(segments.len());
     let mut sorted = segments;
@@ -75,15 +74,14 @@ fn merge_segments(segments: Vec<LoadSegment>) -> Vec<LoadSegment> {
             if file_end > curr_seg.vaddr + curr_seg.in_file_size {
                 curr_seg.in_file_size = file_end - curr_seg.vaddr;
             }
-        }
-        else {
+        } else {
             merged.push(curr_seg);
             curr_seg = next;
         }
     }
 
     merged.push(curr_seg);
-    
+
     merged
 }
 
@@ -129,7 +127,7 @@ impl ElfLoadInfo {
                     in_memory_size,
                     segment.p_flags,
                 );
-                
+
                 min_vaddr = core::cmp::min(vaddr, min_vaddr);
                 max_vaddr = core::cmp::max(vaddr + in_memory_size, max_vaddr);
 

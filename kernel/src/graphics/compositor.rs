@@ -1,14 +1,14 @@
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
-use core::sync::atomic::{AtomicU32, Ordering};
-use spin::{Mutex, RwLock};
-use embedded_graphics::pixelcolor::Rgb888;
+use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use crate::graphics::framebuffer::FrameBufferTarget;
 use crate::graphics::window::{INVALID_WINDOW_ID, Window, WindowBuffer, WindowID};
-use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::serial_println;
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
+use embedded_graphics::pixelcolor::Rgb888;
+use spin::{Mutex, RwLock};
 
 const NORMALIZE_Z_INDEX_THRESHOLD: u8 = 250;
 
@@ -22,7 +22,6 @@ pub struct Compositor {
     windows: RwLock<Vec<Window>>,
 }
 
-
 impl Compositor {
     pub fn new(framebuffer_width: u32, framebuffer_height: u32) -> Self {
         Self {
@@ -35,7 +34,13 @@ impl Compositor {
         }
     }
 
-    pub fn create_window(&self, width: u32, height: u32, x: i32, y: i32) -> (WindowID, Arc<WindowBuffer>) {
+    pub fn create_window(
+        &self,
+        width: u32,
+        height: u32,
+        x: i32,
+        y: i32,
+    ) -> (WindowID, Arc<WindowBuffer>) {
         let buffer = Arc::new(WindowBuffer::new(width, height, x, y));
         let id = if let Some(free_id) = self.free_window_ids.lock().pop() {
             free_id
@@ -84,10 +89,8 @@ impl Compositor {
                 *focused_window = window_id;
 
                 if max_z_index > NORMALIZE_Z_INDEX_THRESHOLD {
-                    let mut visible: Vec<&mut Window> = windows
-                        .iter_mut()
-                        .filter(|w| w.is_visible)
-                        .collect();
+                    let mut visible: Vec<&mut Window> =
+                        windows.iter_mut().filter(|w| w.is_visible).collect();
                     visible.sort_by_key(|w| w.z_index);
 
                     for (i, window) in visible.iter_mut().enumerate() {
@@ -135,8 +138,10 @@ impl Compositor {
 
                 let start_x = window.x.max(0) as u32;
                 let start_y = window.y.max(0) as u32;
-                let end_x = (window.x + window.buffer.width as i32).min(framebuffer_width as i32) as u32;
-                let end_y = (window.y + window.buffer.height as i32).min(framebuffer_height as i32) as u32;
+                let end_x =
+                    (window.x + window.buffer.width as i32).min(framebuffer_width as i32) as u32;
+                let end_y =
+                    (window.y + window.buffer.height as i32).min(framebuffer_height as i32) as u32;
 
                 if start_x >= end_x || start_y >= end_y {
                     //serial_println!("Skipping window ID {} - out of bounds", window.id);
@@ -155,7 +160,9 @@ impl Compositor {
 
                 for y in 0..copy_height {
                     let src_offset = ((src_y + y) * window.buffer.width + src_x) as usize;
-                    let dst_offset = ((start_y + y) * framebuffer_pitch as u32 + start_x * FRAMEBUFFER_BYTES_PER_PIXEL) as usize;
+                    let dst_offset = ((start_y + y) * framebuffer_pitch as u32
+                        + start_x * FRAMEBUFFER_BYTES_PER_PIXEL)
+                        as usize;
 
                     unsafe {
                         let dst_ptr = framebuffer_ptr.add(dst_offset).cast::<u32>();

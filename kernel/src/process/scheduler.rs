@@ -12,11 +12,11 @@ use crate::process::process_manager::PROCESS_MANAGER;
 use crate::process::{CORE_POOL, PID, Process};
 use crate::util::cpuinfo::get_current_core_id;
 use crate::{MAX_CORES, serial_println, serial_println_core};
+use core::sync::atomic::Ordering;
 use spin::Mutex;
 use x86_64::PhysAddr;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::PhysFrame;
-use core::sync::atomic::Ordering;
 
 lazy_static::lazy_static! {
     pub static ref SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
@@ -28,8 +28,7 @@ static CURRENT_PROCESS_ON_CORE: [AtomicU64; MAX_CORES as usize] = {
 };
 
 pub fn set_current_process_for_core(core_id: u8, pid: PID) {
-    CURRENT_PROCESS_ON_CORE[core_id as usize]
-        .store(pid as u64, Ordering::SeqCst);
+    CURRENT_PROCESS_ON_CORE[core_id as usize].store(pid as u64, Ordering::SeqCst);
 }
 
 pub fn get_current_process_for_core(core_id: u8) -> PID {
@@ -452,9 +451,7 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
                 if let Some((proc_pid, rip, rsp, cr3)) = exec_ctx {
                     set_current_process_for_core(core_id, proc_pid);
 
-                    let page_table_frame = PhysFrame::containing_address(
-                        PhysAddr::new(cr3)
-                    );
+                    let page_table_frame = PhysFrame::containing_address(PhysAddr::new(cr3));
                     unsafe {
                         Cr3::write(page_table_frame, Cr3Flags::empty());
                     }

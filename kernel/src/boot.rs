@@ -1,6 +1,11 @@
 use crate::main;
 use kernel::{
-    boot_info::{BOOT_INFO, BootInfo}, gdt::init_core_gdt, interrupts, memory::{self, allocator}, serial_println, serial_println_core, util::cpuinfo::init_cpu_info
+    boot_info::{BOOT_INFO, BootInfo},
+    gdt::init_core_gdt,
+    interrupts,
+    memory::{self, allocator},
+    serial_println, serial_println_core,
+    util::cpuinfo::init_cpu_info,
 };
 use kernel::{
     interrupts::map_local_apic_for_current_core,
@@ -148,11 +153,11 @@ unsafe extern "C" fn kmain() -> ! {
         active_pml4_frame.start_address().as_u64()
     );
     // unsafe { map_local_apic_for_current_core(&mut mapper, &mut frame_allocator) };
-    
+
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
     serial_println!("Heap initialized");
-    
+
     // NOTE: has to be called after heap is initialized, AcpiPlatform uses heap
     unsafe {
         interrupts::init_acpi(
@@ -162,9 +167,9 @@ unsafe extern "C" fn kmain() -> ! {
             &mut frame_allocator,
         )
     };
-    
+
     let mp_response = MP_REQUEST.response().expect("Failed to get MP response");
-    
+
     serial_println!("MP Response received");
     serial_println!("BSP LAPIC ID: {}", mp_response.bsp_lapic_id);
     serial_println!(
@@ -175,11 +180,11 @@ unsafe extern "C" fn kmain() -> ! {
     let cpus = mp_response.cpus();
     let core_count = cpus.len();
     let bsp_lapic_id = mp_response.bsp_lapic_id;
-    
+
     serial_println!("MP Info:");
     serial_println!("  Total cores: {}", core_count);
     serial_println!("  BSP LAPIC ID: {}", bsp_lapic_id);
-    
+
     unsafe { init_cpu_info() };
     for (i, cpu) in cpus.iter().enumerate() {
         serial_println!(
@@ -189,8 +194,7 @@ unsafe extern "C" fn kmain() -> ! {
             cpu.processor_id
         );
     }
-    
-    
+
     unsafe { init_cpu_infos(&cpus) };
     serial_println!("Mapping lapic for core 0");
     unsafe { interrupts::init_lapic_for_current_core(0) };
@@ -203,12 +207,12 @@ unsafe extern "C" fn kmain() -> ! {
     drop(scheduler);
 
     interrupts::disable_interrupts();
-    
+
     let (kernel_page_table_frame, _) = x86_64::registers::control::Cr3::read();
     let kernel_page_table_phys = kernel_page_table_frame.start_address();
     let user_memory_manager =
         memory::usermem::UserMemoryManager::new(kernel_page_table_phys, hhdm_offset);
-        serial_println_core!("Global memory managers initialized");
+    serial_println_core!("Global memory managers initialized");
 
     memory::init_memory_globals(frame_allocator, user_memory_manager);
 
@@ -229,7 +233,6 @@ unsafe extern "C" fn kmain() -> ! {
 
     serial_println_core!("ENABLING INTERRUPTS");
     interrupts::enable_interrupts();
-
 
     main()
 }

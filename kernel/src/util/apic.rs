@@ -5,7 +5,7 @@
 pub enum APICOffset {
     R0x00 = 0x0,      // --reserved--
     R0x10 = 0x10,     // --reserved--
-    IDr = 0x20,        // ID Register
+    IDr = 0x20,       // ID Register
     Vr = 0x30,        // Version Register
     R0x40 = 0x40,     // --reserved--
     R0x50 = 0x50,     // --reserved--
@@ -58,7 +58,7 @@ pub enum APICOffset {
     LvtPmcr = 0x340,  // LVT Performance Monitoring Counters Register
     LvtLint0 = 0x350, // LVT LINT0 Register
     LvtLint1 = 0x360, // LVT LINT1 Register
-    LvtErr = 0x370,     // LVT Error Register
+    LvtErr = 0x370,   // LVT Error Register
     Ticr = 0x380,     // Initial Count Register (for Timer)
     Tccr = 0x390,     // Current Count Register (for Timer)
     R0x3A0 = 0x3A0,   // --reserved--
@@ -68,4 +68,3 @@ pub enum APICOffset {
     Tdcr = 0x3E0,     // Divide Configuration Register (for Timer)
     R0x3F0 = 0x3F0,   // --reserved--
 }
-

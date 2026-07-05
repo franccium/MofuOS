@@ -1,5 +1,5 @@
 use crate::memory::memory::{MemoryMapFrameAllocator, PAGE_SIZE};
-use crate::memory::usermem::{UserMemoryManager};
+use crate::memory::usermem::UserMemoryManager;
 use crate::serial_println;
 use alloc::vec::Vec;
 use spin::MutexGuard;
@@ -33,7 +33,8 @@ impl ProcessMemoryLayout {
         address_space_manager: &UserMemoryManager,
         frame_allocator: &mut MemoryMapFrameAllocator,
     ) -> Result<Self, MapToError<Size4KiB>> {
-        let top_page_table_phys = address_space_manager.allocate_new_address_space(frame_allocator)?;
+        let top_page_table_phys =
+            address_space_manager.allocate_new_address_space(frame_allocator)?;
 
         Ok(Self {
             top_page_table_phys,
@@ -72,7 +73,11 @@ impl ProcessMemoryLayout {
                     protection_flags,
                     frame_allocator,
                 )?;
-                self.mapped_regions.push(MappedMemoryRegion { start_virt: self.heap_end, size_bytes: grow_by, page_flags: protection_flags });
+                self.mapped_regions.push(MappedMemoryRegion {
+                    start_virt: self.heap_end,
+                    size_bytes: grow_by,
+                    page_flags: protection_flags,
+                });
                 self.heap_end += grow_by;
 
                 serial_println!(

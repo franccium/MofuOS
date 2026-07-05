@@ -1,5 +1,5 @@
-use crate::process::process::{PID, ExecutionContext};
 use crate::data_structures::vector::Vec;
+use crate::process::process::{ExecutionContext, PID};
 use alloc::string::String;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -104,11 +104,18 @@ impl ThreadGroup {
 
     /// Count of runnable threads (those with core assigned and in Ready state)
     pub fn runnable_count(&self) -> usize {
-        self.threads.as_slice().iter().filter(|t| t.is_runnable()).count()
+        self.threads
+            .as_slice()
+            .iter()
+            .filter(|t| t.is_runnable())
+            .count()
     }
 
     /// All threads have terminated
     pub fn all_terminated(&self) -> bool {
-        self.threads.as_slice().iter().all(|t| t.state == ThreadState::Terminated)
+        self.threads
+            .as_slice()
+            .iter()
+            .all(|t| t.state == ThreadState::Terminated)
     }
 }
