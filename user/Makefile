@@ -34,7 +34,7 @@ libc.a: $(LIBC_OBJS)
 	$(AR) rcs $@ $^
 
 # Build user programs
-PROGRAMS = programs/first/first
+PROGRAMS = programs/first/first programs/test/test
 
 all: $(PROGRAMS)
 
@@ -43,6 +43,9 @@ all: $(PROGRAMS)
 
 programs/first/first: programs/first/first.o crt0.o libc.a
 	$(LD) $(LDFLAGS) -o $@ crt0.o programs/first/first.o libc.a
+
+programs/test/test: programs/test/test.o crt0.o libc.a
+	$(LD) $(LDFLAGS) -o $@ crt0.o programs/test/test.o libc.a
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

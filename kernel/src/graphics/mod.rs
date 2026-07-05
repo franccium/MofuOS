@@ -1,11 +1,11 @@
 pub mod color;
-pub mod framebuffer;
 pub mod compositor;
-pub mod window;
-pub mod resources;
+pub mod framebuffer;
 pub mod pipeline;
 pub mod renderer;
-pub mod transform;
+pub mod resources;
 pub mod shaders;
+pub mod transform;
+pub mod window;
 
 pub const FRAMEBUFFER_BYTES_PER_PIXEL: u32 = 4;

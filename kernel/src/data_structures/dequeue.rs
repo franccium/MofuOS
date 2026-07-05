@@ -2,9 +2,9 @@ extern crate alloc;
 use crate::memory::allocator::ALLOCATOR;
 use crate::serial_println;
 use alloc::alloc::{GlobalAlloc, Layout};
+use core::fmt;
 use core::ops::{Index, IndexMut};
 use core::ptr::{self, NonNull};
-use core::fmt;
 
 pub struct Dequeue<T> {
     head: usize,
@@ -26,11 +26,14 @@ impl<T> Dequeue<T> {
             capacity.next_power_of_two()
         };
         assert!(capacity > 0);
-        
+
         let layout = Layout::array::<T>(capacity).expect("Cant create layout");
         let ptr = unsafe { ALLOCATOR.alloc(layout).cast::<T>() };
         if ptr.is_null() {
-            serial_println!("ERROR: Cant create dequeue - alloc of size {} failed", layout.size());
+            serial_println!(
+                "ERROR: Cant create dequeue - alloc of size {} failed",
+                layout.size()
+            );
             panic!();
         }
 
@@ -52,7 +55,10 @@ impl<T> Dequeue<T> {
         let layout = Layout::array::<T>(new_capacity).expect("Cant create layout");
         let new_data_ptr = unsafe { ALLOCATOR.alloc(layout).cast::<T>() };
         if new_data_ptr.is_null() {
-            serial_println!("ERROR: Cant expand dequeue - alloc of size {} failed", layout.size());
+            serial_println!(
+                "ERROR: Cant expand dequeue - alloc of size {} failed",
+                layout.size()
+            );
             panic!();
         }
 
@@ -69,7 +75,7 @@ impl<T> Dequeue<T> {
         self.head = 0;
         self.tail = self.size;
         self.capacity = new_capacity;
-        self.data = unsafe {NonNull::new_unchecked(new_data_ptr)};
+        self.data = unsafe { NonNull::new_unchecked(new_data_ptr) };
     }
 
     // wrap index to the beginning when it gets larger than capacity; capacity is always power of 2
@@ -91,10 +97,9 @@ impl<T> Dequeue<T> {
         unsafe {
             ptr::write(self.data.as_ptr().add(self.tail), value);
         }
-        
+
         self.tail = self.wrap_index(self.tail + 1);
         self.size += 1;
-        serial_println!("push_back: New tail: {}, size: {}", self.tail, self.size);
     }
 
     pub fn push_front(&mut self, value: T) {
@@ -103,11 +108,11 @@ impl<T> Dequeue<T> {
         }
 
         self.head = self.wrap_index(self.head.wrapping_sub(1));
-        
+
         unsafe {
             ptr::write(self.data.as_ptr().add(self.head), value);
         }
-        
+
         self.size += 1;
         serial_println!("push_front: New head: {}, size: {}", self.head, self.size);
     }
@@ -117,7 +122,7 @@ impl<T> Dequeue<T> {
 
         self.tail = self.wrap_index(self.tail.wrapping_sub(1));
 
-        let value = unsafe { ptr::read(self.data.as_ptr().add(self.tail))};
+        let value = unsafe { ptr::read(self.data.as_ptr().add(self.tail)) };
         self.size -= 1;
         serial_println!("pop_back: New tail: {}, size: {}", self.tail, self.size);
 
@@ -127,7 +132,7 @@ impl<T> Dequeue<T> {
     pub fn pop_front(&mut self) -> T {
         assert!(self.size > 0);
 
-        let value = unsafe { ptr::read(self.data.as_ptr().add(self.head))};
+        let value = unsafe { ptr::read(self.data.as_ptr().add(self.head)) };
         self.head = self.wrap_index(self.head + 1);
         self.size -= 1;
         serial_println!("pop_front: New head: {}, size: {}", self.head, self.size);
@@ -138,7 +143,7 @@ impl<T> Dequeue<T> {
     pub fn front(&self) -> &T {
         assert!(self.size > 0);
         unsafe { &*self.data.as_ptr().add(self.head) }
-    } 
+    }
 
     pub fn front_mut(&mut self) -> &mut T {
         assert!(self.size > 0);
@@ -191,25 +196,16 @@ impl<T> Dequeue<T> {
     }
 
     pub fn iter(&self) -> Iter<'_, T> {
-        Iter {
-            dq: self,
-            index: 0,
-        }
+        Iter { dq: self, index: 0 }
     }
 
     pub fn iter_mut(&mut self) -> IterMut<'_, T> {
-        IterMut {
-            dq: self,
-            index: 0,
-        }
+        IterMut { dq: self, index: 0 }
     }
 
     // iterate and consume
     pub fn drain(&mut self) -> Drain<'_, T> {
-        Drain {
-            dq: self,
-            index: 0,
-        }
+        Drain { dq: self, index: 0 }
     }
 }
 
@@ -242,9 +238,7 @@ impl<'a, T: 'a> Iterator for IterMut<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index < self.dq.len() {
-            let item = unsafe { 
-                &mut *self.dq.get_ptr_at(self.index) 
-            };
+            let item = unsafe { &mut *self.dq.get_ptr_at(self.index) };
             self.index += 1;
             Some(item)
         } else {

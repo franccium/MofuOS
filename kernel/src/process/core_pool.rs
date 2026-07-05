@@ -1,14 +1,13 @@
 use crate::data_structures::vector::Vec;
-use crate::serial_println;
+use crate::process::process::{INVALID_PID, PID};
+use crate::{MAX_CORES, serial_println};
+use limine::mp::{MpGotoFunction, MpInfo};
 use spin::Mutex;
-use crate::process::process::{PID, INVALID_PID};
-use limine::mp::{MpInfo, MpGotoFunction};
 
 lazy_static::lazy_static! {
     pub static ref CORE_POOL: Mutex<CorePool> = Mutex::new(CorePool::new());
 }
 
-pub const MAX_CORES: u8 = 64; // Limit to 64 cores for the availability bitmap
 pub const CORE_IS_AVAILABLE: u64 = 1;
 pub const CORE_IS_USED: u64 = 0;
 
@@ -53,8 +52,8 @@ impl CorePool {
         self.available_cores &= !1;
 
         for i in 0..core_count {
-             self.core_assignments[i as usize] = INVALID_PID;
-             self.lapic_ids[i as usize] = cpus[i as usize].lapic_id as u8;
+            self.core_assignments[i as usize] = INVALID_PID;
+            self.lapic_ids[i as usize] = cpus[i as usize].lapic_id as u8;
         }
 
         serial_println!("CorePool initialized with {} cores", core_count);

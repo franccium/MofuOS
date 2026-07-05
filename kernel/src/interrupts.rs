@@ -6,6 +6,7 @@ use crate::process::{
     process::INVALID_PID,
     process_manager::{ARCHE_PID, PROCESS_MANAGER},
 };
+use crate::serial_println_core;
 use crate::util::apic::APICOffset;
 use crate::util::cpuinfo::get_current_core_id;
 use crate::util::msr::{msr_read, msr_write};
@@ -28,10 +29,11 @@ use acpi::{
     },
 };
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
 use core::arch::x86_64::__rdtscp;
+use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
+use x86_64::structures::paging::frame;
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::rflags::RFlags,
@@ -45,15 +47,134 @@ const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
 
-pub const TSC_MOCK_FREQUENCY: u64 = 2400000000u64;
+/// TSC frequency measured at boot via PIT calibration.
+/// Written once by core 0 before any AP is started.
+/// All cores read this after it is set.
+static TSC_FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
+
+/// TSC value at the moment core 0 finished basic init (just before APs start).
+/// Used as the zero-point for log timestamps.
+static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
+
 pub const TIMER_TICK_INTERVAL_MS: u64 = 10;
 pub const TIMER_TICK_FREQ_HZ: u64 = 1000 / TIMER_TICK_INTERVAL_MS;
-pub const TSC_CYCLES_PER_TICK: u64 = TSC_MOCK_FREQUENCY / TIMER_TICK_FREQ_HZ;
+
 const MSR_IA32_TSC_DEADLINE: u32 = 0x6E0;
 
 static SYSTEM_TICKS: AtomicU64 = AtomicU64::new(0);
-pub const TICK_DURATION_NS: u64 = 1_000_000_000 /  TIMER_TICK_FREQ_HZ;
-pub const TICK_DURATION_US: u64 = 1_000_000 /  TIMER_TICK_FREQ_HZ;
+pub const TICK_DURATION_NS: u64 = 1_000_000_000 / TIMER_TICK_FREQ_HZ;
+pub const TICK_DURATION_US: u64 = 1_000_000 / TIMER_TICK_FREQ_HZ;
+
+const LAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_0000_0000;
+const IOAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_FF00_0000;
+
+// PIT port constants (channel 2, used for calibration only — no IRQ involved)
+const PIT_CHANNEL2_DATA: u16 = 0x42;
+const PIT_CMD: u16 = 0x43;
+const PIT_PC_SPEAKER: u16 = 0x61;
+const PIT_BASE_HZ: u64 = 1_193_182; // fixed hardware frequency
+
+/// Measure the TSC frequency by counting cycles over a PIT-timed interval.
+/// Must be called with interrupts disabled.
+pub unsafe fn measure_tsc_frequency_via_pit() -> u64 {
+    // We count down from 65535 ticks of the PIT (around 54.9 ms).
+    // Actual elapsed time = count / PIT_BASE_HZ seconds.
+    const PIT_COUNT: u16 = 0xFFFF;
+    const PIT_MODE_ONE_SHOT_CH2: u8 = 0b1011_0000; // channel 2, lo/hi, mode 1
+
+    unsafe {
+        use x86_64::instructions::port::Port;
+
+        let mut cmd_port: Port<u8> = Port::new(PIT_CMD);
+        let mut ch2_port: Port<u8> = Port::new(PIT_CHANNEL2_DATA);
+        let mut speaker_port: Port<u8> = Port::new(PIT_PC_SPEAKER);
+
+        // Disable the PC speaker gate so the PIT runs silently.
+        let old_speaker = speaker_port.read();
+        // Bit 0 = gate input to channel 2; bit 1 = speaker output enable.
+        // Set gate (bit 0), clear speaker (bit 1).
+        speaker_port.write((old_speaker & !0x02) | 0x01);
+
+        // Program channel 2 as one-shot.
+        cmd_port.write(PIT_MODE_ONE_SHOT_CH2);
+
+        // Load the count (LSB first, then MSB).
+        ch2_port.write((PIT_COUNT & 0xFF) as u8);
+        ch2_port.write((PIT_COUNT >> 8) as u8);
+
+        // Read TSC right as we start.
+        let tsc_start = tsc_read();
+
+        // Poll bit 5 of port 0x61 (OUT2 status) until PIT reaches zero.
+        // OUT2 goes high when the count expires.
+        loop {
+            let status = speaker_port.read();
+            if status & 0x20 != 0 {
+                break;
+            }
+        }
+
+        let tsc_end = tsc_read();
+
+        // Restore speaker port.
+        speaker_port.write(old_speaker);
+
+        // tsc_cycles elapsed over PIT_COUNT PIT ticks.
+        let tsc_cycles = tsc_end - tsc_start;
+
+        // TSC Hz = tsc_cycles * PIT_BASE_HZ / PIT_COUNT
+        let freq = tsc_cycles * PIT_BASE_HZ / PIT_COUNT as u64;
+
+        serial_println!(
+            "TSC calibration: {} cycles over {} PIT ticks -> {} Hz ({} MHz)",
+            tsc_cycles,
+            PIT_COUNT,
+            freq,
+            freq / 1_000_000
+        );
+
+        freq
+    }
+}
+
+/// Initialise the global TSC frequency and boot epoch.
+/// Have to call this on core 0 once, before starting APs, with interrupts disabled.
+pub unsafe fn init_tsc_globals() {
+    let freq = unsafe { measure_tsc_frequency_via_pit() };
+    TSC_FREQUENCY_HZ.store(freq, Ordering::SeqCst);
+    // Record the epoch *after* calibration so t=0 is close to the point
+    // where meaningful kernel work begins.
+    BOOT_TSC.store(unsafe { tsc_read() }, Ordering::SeqCst);
+    serial_println!(
+        "TSC globals: freq={} Hz, boot_tsc={}",
+        freq,
+        BOOT_TSC.load(Ordering::Relaxed)
+    );
+}
+
+/// Microseconds since `init_tsc_globals` was called on core 0.
+/// Safe to call from any core.
+#[inline]
+pub fn tsc_timestamp_us() -> u64 {
+    let freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
+    if freq == 0 {
+        return 0;
+    }
+    let boot = BOOT_TSC.load(Ordering::Relaxed);
+    let now = unsafe { tsc_read() };
+    now.saturating_sub(boot) / (freq / 1_000_000)
+}
+
+/// TSC cycles per timer tick, computed from the measured frequency.
+/// Falls back to a sane default until `init_tsc_globals` is called.
+pub fn tsc_cycles_per_tick() -> u64 {
+    let freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
+    if freq == 0 {
+        // Fallback before calibration: assume 2 GHz, 10 ms tick
+        return 2_000_000_000 / TIMER_TICK_FREQ_HZ;
+    }
+    freq / TIMER_TICK_FREQ_HZ
+}
 
 pub fn system_uptime_ns() -> u64 {
     SYSTEM_TICKS.load(core::sync::atomic::Ordering::Relaxed) * TICK_DURATION_NS
@@ -77,8 +198,8 @@ lazy_static! {
     });
 }
 
-pub fn init_idt() {
-    //serial_println!("init_idt");
+pub fn load_idt() {
+    //serial_println!("load_idt");
     IDT.load();
 }
 
@@ -98,13 +219,39 @@ pub unsafe fn interrupt_over() {
     }
 }
 
-unsafe fn map_apic_mem(
+unsafe fn map_apic_mem_identity(
     phys_address: u32,
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> VirtAddr {
     let physical_address = PhysAddr::new(phys_address as u64);
     let page = Page::containing_address(VirtAddr::new(physical_address.as_u64()));
+    let frame = PhysFrame::containing_address(physical_address);
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
+
+    serial_println!(
+        "Mapping: phys {:#x}, virt: {:#x}",
+        physical_address,
+        page.start_address()
+    );
+    unsafe {
+        mapper
+            .map_to(page, frame, flags, frame_allocator)
+            .expect("Mapping failed")
+            .flush();
+    }
+
+    page.start_address()
+}
+
+unsafe fn map_apic_mem(
+    phys_address: u32,
+    base_virt_address: u64,
+    mapper: &mut impl Mapper<Size4KiB>,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) -> VirtAddr {
+    let physical_address = PhysAddr::new(phys_address as u64);
+    let page = Page::containing_address(VirtAddr::new(base_virt_address));
     let frame = PhysFrame::containing_address(physical_address);
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
 
@@ -130,7 +277,8 @@ unsafe fn init_io_apic(
 ) {
     serial_println!("Mapping IO APIC");
 
-    let virt_addr = unsafe { map_apic_mem(phys_address, mapper, frame_allocator) };
+    let virt_addr =
+        unsafe { map_apic_mem(phys_address, IOAPIC_VIRT_BASE, mapper, frame_allocator) };
 
     let io_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
@@ -142,6 +290,87 @@ unsafe fn init_io_apic(
     }
 }
 
+pub unsafe fn init_lapic_for_current_core(core_id: u8) {
+    let lapic_ptr = get_lapic_base_addr();
+
+    serial_println!("Core {}: Initializing Local APIC...", core_id);
+
+    // 1. Enable the APIC by setting the Spurious Interrupt Vector Register
+    // Bit 8 = APIC Software Enable/Disable
+    // Bits 0-7 = Spurious vector (typically 0xFF)
+    let svr = lapic_ptr.offset(APICOffset::Svr as isize / 4);
+    let current_svr = svr.read_volatile();
+    svr.write_volatile(current_svr | (1 << 8) | 0xFF);
+    serial_println!(
+        "Core {}: APIC enabled (SVR = {:#x})",
+        core_id,
+        current_svr | (1 << 8) | 0xFF
+    );
+
+    // 2. Mask all LVT entries initially
+    // LVT Timer
+    lapic_ptr
+        .offset(APICOffset::LvtT as isize / 4)
+        .write_volatile(0x10000); // Masked
+    // LVT LINT0
+    lapic_ptr
+        .offset(APICOffset::LvtLint0 as isize / 4)
+        .write_volatile(0x10000);
+    // LVT LINT1
+    lapic_ptr
+        .offset(APICOffset::LvtLint1 as isize / 4)
+        .write_volatile(0x10000);
+    // LVT Error
+    lapic_ptr
+        .offset(APICOffset::LvtErr as isize / 4)
+        .write_volatile(0x10000);
+    // LVT Performance Counter
+    lapic_ptr
+        .offset(APICOffset::LvtPmcr as isize / 4)
+        .write_volatile(0x10000);
+    // LVT Thermal Sensor
+    lapic_ptr
+        .offset(APICOffset::LvtTsr as isize / 4)
+        .write_volatile(0x10000);
+    serial_println!("Core {}: LVT entries masked", core_id);
+
+    // 3. Clear any pending errors
+    lapic_ptr
+        .offset(APICOffset::Esr as isize / 4)
+        .write_volatile(0);
+    lapic_ptr
+        .offset(APICOffset::Esr as isize / 4)
+        .write_volatile(0); // Write twice to clear
+
+    // 4. Send EOI to clear any pending interrupts
+    lapic_ptr
+        .offset(APICOffset::Eoi as isize / 4)
+        .write_volatile(0);
+
+    // 5. Set Task Priority to 0 (accept all interrupts)
+    lapic_ptr
+        .offset(APICOffset::Tpr as isize / 4)
+        .write_volatile(0);
+
+    // 6. Set Logical Destination Register
+    lapic_ptr
+        .offset(APICOffset::Ldr as isize / 4)
+        .write_volatile(
+            (lapic_ptr
+                .offset(APICOffset::Ldr as isize / 4)
+                .read_volatile()
+                & 0xFFFFFF00)
+                | 1,
+        );
+
+    // 7. Set Destination Format Register for flat model
+    lapic_ptr
+        .offset(APICOffset::Dfr as isize / 4)
+        .write_volatile(0xFFFFFFFF);
+
+    serial_println!("Core {}: APIC initialization complete", core_id);
+}
+
 unsafe fn init_local_apic(
     phys_address: u32,
     mapper: &mut impl Mapper<Size4KiB>,
@@ -149,11 +378,15 @@ unsafe fn init_local_apic(
 ) {
     serial_println!("Mapping Local APIC");
 
-    let virt_addr = unsafe { map_apic_mem(phys_address, mapper, frame_allocator) };
+    let virt_addr = unsafe { map_apic_mem(phys_address, LAPIC_VIRT_BASE, mapper, frame_allocator) };
 
     let local_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
     LAPIC_ADDRESS.lock().address = local_apic_ptr;
+    //unsafe { map_local_apic_for_current_core(mapper, frame_allocator) };
+    // let virt_addr = LAPIC_VIRT_ADDR.lock();
+    // let virt_
+    // let local_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
     unsafe {
         //init_timer(local_apic_ptr);
@@ -177,8 +410,9 @@ unsafe fn tsc_read() -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
-unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32) {
-    let tsc_freq = TSC_MOCK_FREQUENCY;
+unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32, core_id: u8) {
+    let tsc_freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
+    serial_println!("Core {}: Setting up TSC-Deadline mode", core_id);
     serial_println!("TSC Frequency: {} Hz", tsc_freq);
 
     unsafe {
@@ -213,6 +447,7 @@ unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32) {
         let svr = local_apic_ptr.offset(APICOffset::Svr as isize / 4);
         let current_svr = svr.read_volatile();
         svr.write_volatile(current_svr | (1 << 8) | 0xFF);
+        serial_println!("Core {}: apic enabled", core_id);
 
         // Set divider to 16
         tdcr.write_volatile(0x3);
@@ -222,63 +457,8 @@ unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32) {
         // set tick rate
         ticr.write_volatile(ticks_needed);
 
-        serial_println!("Timer configured in periodic mode:");
-        serial_println!("  APIC Bus frequency: {} Hz", apic_bus_freq);
-        serial_println!("  APIC timer frequency: {} Hz", apic_timer_freq);
-        serial_println!(
-            "  Ticks per interrupt: {} (set tick frequency: {} Hz)",
-            ticks_needed,
-            tick_freq
-        );
-    }
-
-
-}
-
-
-unsafe fn init_timer_tsc_deadline_mode_per_core(local_apic: *mut u32, core_id: u8) {
-    serial_println!("Core {}: Setting up TSC-Deadline mode", core_id);
-
-    unsafe {
-        //set_tsc_aux(core_id);
-
-        let svr = local_apic.offset(APICOffset::Svr as isize / 4);
-        let current_svr = svr.read_volatile();
-        svr.write_volatile(current_svr | (1 << 8) | 0xFF);
-        serial_println!("Core {}: APIC enabled", core_id);
-
-        let lvt_timer = local_apic.offset(APICOffset::LvtT as isize / 4);
-        const LVTT_TSC_DEADLINE_MODE: u32 = 1 << 18;
-        const LVTT_MASKED: u32 = 1 << 16;
-
-        lvt_timer.write_volatile((InterruptIndex::Timer as u32) | LVTT_TSC_DEADLINE_MODE);
-        serial_println!("Core {}: LVT Timer configured for TSC-Deadline", core_id);
-
-        core::arch::x86_64::_mm_mfence();
-
-        let tsc_freq = TSC_MOCK_FREQUENCY;
-        serial_println!("TSC Frequency: {}", tsc_freq);
-        let ticks_per_ms = tsc_freq / TIMER_TICK_FREQ_DIVIDER;
-        let tsc_deadline = tsc_read() + ticks_per_ms;
-
-        //let mut aux: u32 = 0;
-        //let current_tsc = __rdtscp(&mut aux);
-        //serial_println!("Current TSC: {} aux: {}", current_tsc, aux);
-        let current_tsc = tsc_read();
-        serial_println!("Current TSC: {:#x}", current_tsc);
-        let first_deadline = current_tsc + ticks_per_ms;
-
-        msr_write(MSR_IA32_TSC_DEADLINE, first_deadline);
-
-        serial_println!("Core {}: Timer configured in TSC-Deadline mode:", core_id);
-        serial_println!("  TSC Frequency: {} Hz", tsc_freq);
-        serial_println!("  Timer Frequency: {} Hz", TIMER_TICK_FREQ_DIVIDER);
-        serial_println!(
-            "  First deadline: {} (current: {}, +{} ticks)",
-            first_deadline,
-            current_tsc,
-            ticks_per_ms
-        );
+        serial_print!("Core {}: Timer configured in periodic mode:\n  APIC Bus frequency: {} Hz\n  APIC timer frequency: 
+            {} Hz\n  Ticks per interrupt: {} (set tick frequency: {} Hz)", core_id, apic_bus_freq, apic_timer_freq, ticks_needed, tick_freq);
     }
 }
 
@@ -304,35 +484,22 @@ pub unsafe fn init_timer_for_core(core_id: u8) {
         return;
     }
 
-    serial_println!("Initializing timer for Core {}", core_id);
+    serial_println_core!("Initializing timer for Core {}", core_id);
 
     let cpu_info = get_cpu_info_for_core(core_id);
     let lapic_addr = get_lapic_base_addr();
 
     if !cpu_info.features.contains(CpuFeatureFlags::TSC_DEADLINE) {
-        serial_println!("TSC-Deadline mode not supported, falling back to periodic mode");
-        unsafe { init_timer_periodic_mode(lapic_addr) };
+        serial_println_core!("TSC-Deadline mode not supported, falling back to periodic mode");
+        unsafe { init_timer_periodic_mode(lapic_addr, core_id) };
         return;
     }
 
-    unsafe { init_timer_tsc_deadline_mode_per_core(lapic_addr, core_id) };
+    unsafe { init_timer_tsc(lapic_addr, core_id) };
 }
 
-pub unsafe fn init_timer(local_apic_ptr: *mut u32) {
-    if !TIMER_ENABLED {
-        return;
-    }
-
-    if !get_cpu_info()
-        .features
-        .contains(CpuFeatureFlags::TSC_DEADLINE)
-    {
-        serial_println!("TSC-Deadline mode not supported, falling back to periodic mode");
-        unsafe { init_timer_periodic_mode(local_apic_ptr) };
-        return;
-    }
-
-    serial_println!("TSC-Deadline mode supported, using for timer");
+pub unsafe fn init_timer_tsc(local_apic_ptr: *mut u32, core_id: u8) {
+    serial_println_core!("TSC-Deadline mode supported, using for timer");
 
     unsafe {
         let svr = local_apic_ptr.offset(APICOffset::Svr as isize / 4);
@@ -346,9 +513,9 @@ pub unsafe fn init_timer(local_apic_ptr: *mut u32) {
         use core::arch::x86_64::_mm_mfence;
         _mm_mfence();
 
-        let tsc_freq = TSC_MOCK_FREQUENCY;
-        serial_println!("TSC Frequency: {}", tsc_freq);
-        let tsc_deadline = tsc_read() + TSC_CYCLES_PER_TICK;
+        let tsc_freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
+        serial_println!("TSC Frequency: {} Hz", tsc_freq);
+        let tsc_deadline = tsc_read() + tsc_cycles_per_tick();
 
         // write the deadline to the MSR to arm it
         msr_write(MSR_IA32_TSC_DEADLINE, tsc_deadline);
@@ -365,10 +532,10 @@ unsafe fn init_keyboard(local_apic_ptr: *mut u32) {
 }
 
 pub fn enable_interrupts() {
-    serial_println!("Enabling interrupts");
+    serial_println_core!("Enabling interrupts");
     // Enable interrupts on the CPU
     x86_64::instructions::interrupts::enable();
-    serial_println!("Interrupts enabled");
+    serial_println_core!("Interrupts enabled");
 }
 
 pub fn disable_interrupts() {
@@ -387,7 +554,10 @@ pub unsafe fn map_local_apic_for_current_core(
     let lapic_phys = get_lapic_base_addr_phys();
     use x86_64::registers::control::Cr3;
     let (active_pml4_frame, _) = Cr3::read();
-    serial_println!("2 Active PML4 frame: {:#x}", active_pml4_frame.start_address().as_u64());
+    serial_println!(
+        "2 Active PML4 frame: {:#x}",
+        active_pml4_frame.start_address().as_u64()
+    );
 
     serial_println!("map_local_apic_for_current_core: {:#x}", lapic_phys);
 
@@ -398,7 +568,8 @@ pub unsafe fn map_local_apic_for_current_core(
 
     // Option 2: Map it explicitly (safer, works without HHDM)
     // We'll map it to a known virtual address range for APIC
-    let apic_virt_base = 0xFFFF_8000_0000_0000 + 0xfee00000; // Example: high canonical address
+    //let apic_virt_base = 0xFFFF_8000_0000_0000 + lapic_phys; // Example: high canonical address
+    let apic_virt_base = LAPIC_VIRT_BASE + lapic_phys;
     let page = Page::containing_address(VirtAddr::new(apic_virt_base));
     let phys_frame = PhysFrame::containing_address(PhysAddr::new(lapic_phys));
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
@@ -434,17 +605,22 @@ pub fn get_lapic_base_addr_phys() -> u64 {
     }
 }
 
+// /// Get the virtual address of the Local APIC (after mapping)
+// pub fn get_lapic_base_addr() -> *mut u32 {
+//     if let Some(addr) = *LAPIC_VIRT_ADDR.lock() {
+//         addr.as_mut_ptr::<u32>()
+//     } else {
+//         panic!("Local APIC not mapped yet! Call map_local_apic_for_current_core first.");
+//     }
+//     // pub const LOCAL_APIC_PHYS_BASE: u64 = 0xFEE00000;
+//     // let hhdm_offset = crate::boot_info::boot_info().hhdm_offset;
+//     // let virt_addr = LOCAL_APIC_PHYS_BASE + hhdm_offset;
+//     // virt_addr as *mut u32
+// }
 /// Get the virtual address of the Local APIC (after mapping)
 pub fn get_lapic_base_addr() -> *mut u32 {
-    if let Some(addr) = *LAPIC_VIRT_ADDR.lock() {
-        addr.as_mut_ptr::<u32>()
-    } else {
-        panic!("Local APIC not mapped yet! Call map_local_apic_for_current_core first.");
-    }
-    // pub const LOCAL_APIC_PHYS_BASE: u64 = 0xFEE00000;
-    // let hhdm_offset = crate::boot_info::boot_info().hhdm_offset;
-    // let virt_addr = LOCAL_APIC_PHYS_BASE + hhdm_offset;
-    // virt_addr as *mut u32
+    let addr = LAPIC_ADDRESS.lock().address;
+    addr
 }
 
 pub unsafe fn init_acpi(
@@ -469,6 +645,8 @@ pub unsafe fn init_acpi(
     let mut lapic_addr: u32 = 0;
     let mut io_apic_addr: u32 = 0;
     let mut got_apic_addr = false;
+
+    serial_println!("AcpiPlatform created");
 
     match acpi_platform.interrupt_model {
         InterruptModel::Apic(apic) => {
@@ -571,8 +749,6 @@ pub unsafe fn init_acpi(
         serial_println!("ERROR: Cannot find IO apic");
     }
 
-    init_syscall();
-
     disable_pic();
 }
 
@@ -618,40 +794,40 @@ lazy_static! {
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
+    serial_println_core!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn divide_by_zero_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("EXCEPTION: DIVIDE BY ZERO\n{:#?}", stack_frame);
+    serial_println_core!("EXCEPTION: DIVIDE BY ZERO\n{:#?}", stack_frame);
     hlt_loop();
 }
 
 extern "x86-interrupt" fn debug_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("EXCEPTION: DEBUG\n{:#?}", stack_frame);
+    serial_println_core!("EXCEPTION: DEBUG\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn nmi_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("EXCEPTION: NON-MASKABLE INTERRUPT\n{:#?}", stack_frame);
+    serial_println_core!("EXCEPTION: NON-MASKABLE INTERRUPT\n{:#?}", stack_frame);
     hlt_loop();
 }
 
 extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("EXCEPTION: OVERFLOW\n{:#?}", stack_frame);
+    serial_println_core!("EXCEPTION: OVERFLOW\n{:#?}", stack_frame);
     hlt_loop();
 }
 
 extern "x86-interrupt" fn bound_range_exceeded_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("EXCEPTION: BOUND RANGE EXCEEDED\n{:#?}", stack_frame);
+    serial_println_core!("EXCEPTION: BOUND RANGE EXCEEDED\n{:#?}", stack_frame);
     hlt_loop();
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
+    serial_println_core!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
     hlt_loop();
 }
 
 extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("EXCEPTION: DEVICE NOT AVAILABLE\n{:#?}", stack_frame);
+    serial_println_core!("EXCEPTION: DEVICE NOT AVAILABLE\n{:#?}", stack_frame);
     hlt_loop();
 }
 
@@ -659,7 +835,7 @@ extern "x86-interrupt" fn alignment_check_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    serial_println!(
+    serial_println_core!(
         "EXCEPTION: ALIGNMENT CHECK\nError Code: {}\n{:#?}",
         error_code,
         stack_frame
@@ -668,7 +844,7 @@ extern "x86-interrupt" fn alignment_check_handler(
 }
 
 extern "x86-interrupt" fn invalid_tss_handler(stack_frame: InterruptStackFrame, error_code: u64) {
-    serial_println!(
+    serial_println_core!(
         "EXCEPTION: INVALID TSS\nError Code: {}\n{:#?}",
         error_code,
         stack_frame
@@ -680,7 +856,7 @@ extern "x86-interrupt" fn segment_not_present_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    serial_println!(
+    serial_println_core!(
         "EXCEPTION: SEGMENT NOT PRESENT\nError Code: {}\n{:#?}",
         error_code,
         stack_frame
@@ -692,7 +868,7 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    serial_println!(
+    serial_println_core!(
         "EXCEPTION: STACK SEGMENT FAULT\nError Code: {}\n{:#?}",
         error_code,
         stack_frame
@@ -704,21 +880,65 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    serial_println!(
+    serial_println_core!(
         "EXCEPTION: GENERAL PROTECTION FAULT\nError Code: {}\n{:#?}",
         error_code,
         stack_frame
     );
+
+    serial_println!("EXCEPTION: GENERAL PROTECTION FAULT");
+    serial_println!("Error Code: {}", error_code);
+    serial_println!("RIP: {:#x}", stack_frame.instruction_pointer);
+    serial_println!("CS: {:?}", stack_frame.code_segment);
+    serial_println!("RFLAGS: {:?}", stack_frame.cpu_flags);
+    serial_println!("RSP: {:#x}", stack_frame.stack_pointer);
+    serial_println!("SS: {:?}", stack_frame.stack_segment);
+
+    // Read the values that iretq would pop
+    unsafe {
+        let rsp = stack_frame.stack_pointer.as_u64() as *const u64;
+        serial_println!("Stack contents for iretq:");
+        serial_println!("  RIP: {:#x}", *rsp);
+        serial_println!("  CS: {:#x}", *rsp.add(1));
+        serial_println!("  RFLAGS: {:#x}", *rsp.add(2));
+        serial_println!("  RSP: {:#x}", *rsp.add(3));
+        serial_println!("  SS: {:#x}", *rsp.add(4));
+    }
+
+    // Try to read the instruction that caused the fault
+    let rip = stack_frame.instruction_pointer.as_u64();
+    serial_println!("Faulting instruction at: {:#x}", rip);
+
+    // Read the bytes at RIP to identify the instruction
+    unsafe {
+        let instr_ptr = rip as *const u8;
+        serial_println!(
+            "Instruction bytes: {:02x} {:02x} {:02x} {:02x} {:02x}",
+            *instr_ptr,
+            *instr_ptr.add(1),
+            *instr_ptr.add(2),
+            *instr_ptr.add(3),
+            *instr_ptr.add(4)
+        );
+    }
+
     hlt_loop();
 }
 
 extern "x86-interrupt" fn simd_floating_point_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("EXCEPTION: SIMD FLOATING POINT\n{:#?}", stack_frame);
+    serial_println_core!("EXCEPTION: SIMD FLOATING POINT\n{:#?}", stack_frame);
     hlt_loop();
 }
 
-extern "x86-interrupt" fn security_exception_handler(stack_frame: InterruptStackFrame, error_code: u64) {
-    serial_println!("EXCEPTION: SECURITY EXCEPTION\nError Code: {}\n{:#?}", error_code, stack_frame);
+extern "x86-interrupt" fn security_exception_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    serial_println_core!(
+        "EXCEPTION: SECURITY EXCEPTION\nError Code: {}\n{:#?}",
+        error_code,
+        stack_frame
+    );
     hlt_loop();
 }
 
@@ -737,10 +957,12 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     }
 
     unsafe {
+        //TODO: this only supports TSC mode
+
         SYSTEM_TICKS.fetch_add(1, Ordering::Relaxed);
 
         // re-arm the timer for the next tick
-        let next_deadline = tsc_read() + TSC_CYCLES_PER_TICK;
+        let next_deadline = tsc_read() + tsc_cycles_per_tick();
         msr_write(MSR_IA32_TSC_DEADLINE, next_deadline);
 
         let mut scheduler = SCHEDULER.lock();
@@ -793,10 +1015,10 @@ extern "x86-interrupt" fn pagefault_handler(
 ) {
     use x86_64::registers::control::Cr2;
 
-    serial_println!("EXCEPTION: PAGE FAULT");
-    serial_println!("Accessed Address: {:?}", Cr2::read());
-    serial_println!("Error Code: {:?}", error_code);
-    serial_println!("{:#?}", stack_frame);
+    serial_println_core!("EXCEPTION: PAGE FAULT");
+    serial_println_core!("Accessed Address: {:?}", Cr2::read());
+    serial_println_core!("Error Code: {:?}", error_code);
+    serial_println_core!("{:#?}", stack_frame);
     hlt_loop();
 }
 

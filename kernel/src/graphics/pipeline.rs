@@ -250,10 +250,10 @@ impl VSOut {
 
 #[derive(Clone, Debug)]
 pub struct VSOut3D {
-    pub position: f32x4,   // [x, y, z, w] - homogeneous position
-    pub world_position: f32x4,   // [x, y, z, w]
-    pub attributes: f32x4, // up to 4 interpolated attributes (u, v, ...)
-    pub extra: f32x4,      // up to 4 interpolated attributes
+    pub position: f32x4,       // [x, y, z, w] - homogeneous position
+    pub world_position: f32x4, // [x, y, z, w]
+    pub attributes: f32x4,     // up to 4 interpolated attributes (u, v, ...)
+    pub extra: f32x4,          // up to 4 interpolated attributes
 }
 
 impl VSOut3D {

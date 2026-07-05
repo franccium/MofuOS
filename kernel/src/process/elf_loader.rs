@@ -2,7 +2,7 @@ use crate::serial_println;
 use alloc::vec::Vec;
 use elf::ElfBytes;
 
-pub const TEST_ELF: &[u8] = include_bytes!("../../../user/programs/first/first");
+pub const TEST_ELF: &[u8] = include_bytes!("../../../user/programs/test/test");
 
 #[derive(Debug)]
 pub struct ElfLoadInfo {
@@ -16,8 +16,16 @@ pub struct ElfLoadInfo {
 pub struct LoadSegment {
     pub vaddr: u64,
     pub in_file_size: u64,
-    pub in_memory_size: u64, // includes the bss section
+    pub in_memory_size: u64,
+    pub flags: u32,
     pub data: Vec<u8>,
+}
+
+#[repr(u32)]
+pub enum ElfLoadFlags {
+    Executable = 1,
+    Writable = 2,
+    Readable = 4,
 }
 
 #[derive(Debug)]
@@ -37,7 +45,6 @@ impl From<elf::ParseError> for ElfLoadError {
     }
 }
 
-
 fn merge_segments(segments: Vec<LoadSegment>) -> Vec<LoadSegment> {
     let mut merged = Vec::<LoadSegment>::with_capacity(segments.len());
     let mut sorted = segments;
@@ -51,7 +58,8 @@ fn merge_segments(segments: Vec<LoadSegment>) -> Vec<LoadSegment> {
         if next.vaddr <= curr_end {
             let next_end = next.vaddr + next.in_memory_size;
             let new_end = core::cmp::max(next_end, curr_end);
-            curr_seg.in_memory_size = new_end - curr_end;
+            curr_seg.in_memory_size = new_end - curr_seg.vaddr;
+            curr_seg.flags |= next.flags;
 
             if next.in_file_size > 0 {
                 let offset_in_curr = (next.vaddr - curr_seg.vaddr) as usize;
@@ -66,15 +74,14 @@ fn merge_segments(segments: Vec<LoadSegment>) -> Vec<LoadSegment> {
             if file_end > curr_seg.vaddr + curr_seg.in_file_size {
                 curr_seg.in_file_size = file_end - curr_seg.vaddr;
             }
-        }
-        else {
+        } else {
             merged.push(curr_seg);
             curr_seg = next;
         }
     }
 
     merged.push(curr_seg);
-    
+
     merged
 }
 
@@ -114,12 +121,13 @@ impl ElfLoadInfo {
                 let offset = segment.p_offset;
 
                 serial_println!(
-                    "ELF: Found LOAD segment: vaddr={:#x}, in_file_size={}, in_memory_size={}",
+                    "ELF: Found LOAD segment: vaddr={:#x}, in_file_size={}, in_memory_size={}, flags={:#x}",
                     vaddr,
                     in_file_size,
-                    in_memory_size
+                    in_memory_size,
+                    segment.p_flags,
                 );
-                
+
                 min_vaddr = core::cmp::min(vaddr, min_vaddr);
                 max_vaddr = core::cmp::max(vaddr + in_memory_size, max_vaddr);
 
@@ -140,6 +148,7 @@ impl ElfLoadInfo {
                     vaddr,
                     in_file_size,
                     in_memory_size,
+                    flags: segment.p_flags,
                     data: segment_data,
                 });
             }

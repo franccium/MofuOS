@@ -200,7 +200,12 @@ impl Sirius {
         let (parent_path, name) = self.split_path(path)?;
         let parent = self.resolve_path(parent_path.as_str())?;
 
-        serial_println!("Sirius: create_file: path: {}, parent_path: {}, name: {}", path, parent_path, name);
+        serial_println!(
+            "Sirius: create_file: path: {}, parent_path: {}, name: {}",
+            path,
+            parent_path,
+            name
+        );
 
         if parent.file_type != FileType::Directory {
             serial_println!("Error: Sirius: create_file: parent is not a directory");
@@ -217,7 +222,12 @@ impl Sirius {
         let (parent_path, name) = self.split_path(path)?;
         let parent = self.resolve_path(parent_path.as_str())?;
 
-        serial_println!("Sirius: create_directory: path: {}, parent_path: {}, name: {}", path, parent_path, name);
+        serial_println!(
+            "Sirius: create_directory: path: {}, parent_path: {}, name: {}",
+            path,
+            parent_path,
+            name
+        );
 
         if parent.file_type != FileType::Directory {
             return Err(FileSystemError::NotDirectory);
@@ -226,7 +236,10 @@ impl Sirius {
         let node_id = self
             .driver
             .create_directory(parent.node_id, name.as_str())?;
-        serial_println!("Sirius: create_directory: created directory: {:#x}", node_id);
+        serial_println!(
+            "Sirius: create_directory: created directory: {:#x}",
+            node_id
+        );
 
         self.driver.get_node(node_id)
     }
@@ -235,7 +248,11 @@ impl Sirius {
         serial_println!("Sirius: delete: looking for path: {}", path);
         let node = self.resolve_path(path)?;
 
-        serial_println!("Sirius: delete: path: {}, resolved node: {}", path, node.name);
+        serial_println!(
+            "Sirius: delete: path: {}, resolved node: {}",
+            path,
+            node.name
+        );
 
         self.driver.delete(node.node_id)
     }

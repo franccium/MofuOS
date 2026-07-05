@@ -12,8 +12,7 @@ use x86_64::{
     },
 };
 
-
-const ALLOC_DEBUG: bool = false; 
+const ALLOC_DEBUG: bool = false;
 macro_rules! alloc_debug {
     ($($arg:tt)*) => {
         if ALLOC_DEBUG {

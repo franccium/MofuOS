@@ -1,9 +1,11 @@
-use crate::{filesystem::{
-    FileType, fat32::test_data::create_fat32_image, init_filesystem, sirius::get_sirius
-}, serial_println};
+use crate::{
+    filesystem::{
+        FileType, fat32::test_data::create_fat32_image, init_filesystem, sirius::get_sirius,
+    },
+    serial_println,
+};
 
 pub fn test_filesystem() {
-
     serial_println!("\nTesting Filesystem");
 
     let fat32_image_data = create_fat32_image();

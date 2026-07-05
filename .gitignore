@@ -11,3 +11,5 @@ todo.md
 os_disk_fat32
 
 kernel/kernel
+logs
+scripts/__pycache__
