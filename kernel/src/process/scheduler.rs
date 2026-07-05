@@ -46,7 +46,11 @@ static mut KERNEL_RSP_ON_CORE: [u64; MAX_CORES as usize] = [0u64; MAX_CORES as u
 pub fn return_to_scheduler() -> ! {
     let core_id = get_current_core_id();
     let kernel_rsp = unsafe { KERNEL_RSP_ON_CORE[core_id as usize] };
-    debug_assert!(kernel_rsp != 0, "return_to_scheduler: no saved RSP for core {}", core_id);
+    debug_assert!(
+        kernel_rsp != 0,
+        "return_to_scheduler: no saved RSP for core {}",
+        core_id
+    );
     unsafe {
         core::arch::asm!(
             "mov rsp, {rsp}",
@@ -70,12 +74,14 @@ pub struct CoreScheduler {
     current_thread: PID,
 }
 
+const QUEUE_INITIAL_CAPACITY: usize = 8;
+
 impl CoreScheduler {
     pub fn new(core_id: u8) -> Self {
         Self {
             core_id,
-            ready_queues: Default::default(),
-            blocked_queue: Dequeue::new(),
+            ready_queues: core::array::from_fn(|_| Dequeue::with_capacity(QUEUE_INITIAL_CAPACITY)),
+            blocked_queue: Dequeue::with_capacity(QUEUE_INITIAL_CAPACITY),
             current_thread: INVALID_PID,
         }
     }
@@ -87,7 +93,12 @@ impl CoreScheduler {
             "Priority must be between 0 and {}",
             MAX_PRIORITY
         );
-        //serial_println_core!("Scheduler: Enqueuing PID {} on core {} with priority {}", pid, self.core_id, priority);
+        serial_println_core!(
+            "Scheduler: Enqueuing PID {} on core {} with priority {}",
+            pid,
+            self.core_id,
+            priority
+        );
         let queue_idx = priority as usize;
         self.ready_queues[queue_idx].push_back(pid);
     }
@@ -95,7 +106,13 @@ impl CoreScheduler {
     /// Dequeue next thread to run (picks highest priority ready thread)
     pub fn dequeue_next(&mut self) -> (PID, u8) {
         // Search from highest to lowest priority
+        serial_println_core!("Scheduler: Dequeuing next thread on core {}", self.core_id);
         for (priority, queue) in self.ready_queues.iter_mut().enumerate().rev() {
+            serial_println_core!(
+                "Scheduler: Checking priority {} queue (len={})",
+                priority,
+                queue.len()
+            );
             if queue.len() > 0 {
                 return (queue.pop_front(), priority as u8);
             }
@@ -264,16 +281,24 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
     // Switch to a dedicated per-core scheduler stack before doing anything
     // that touches the stack. The Limine AP boot stack is small and not
     // guaranteed to have enough space for the scheduler loop's call depth.
+    serial_println_core!(
+        "run_on_core_loop: switching to per-core scheduler stack (core_id={})",
+        core_id
+    );
     let scheduler_stack_top = crate::gdt::get_scheduler_stack_top(core_id);
+    let core_id_saved: u64;
     unsafe {
         core::arch::asm!(
+            "mov {saved}, {id}",
             "mov rsp, {top}",
+            saved = out(reg) core_id_saved,
+            id = in(reg) core_id as u64,
             top = in(reg) scheduler_stack_top,
             options(nostack)
         );
     }
-
-    serial_println_core!("Entering scheduler loop");
+    let core_id = core_id_saved as u8;
+    serial_println_core!("Entering scheduler loop (core_id={})", core_id);
 
     loop {
         x86_64::instructions::interrupts::disable();
@@ -298,11 +323,13 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
 
         let exec_ctx = {
             let pm = PROCESS_MANAGER.lock();
-            pm.get_process(pid).ok().map(|p| (
-                p.execution_context.rip,
-                p.execution_context.rsp,
-                p.execution_context.page_table_base_phys,
-            ))
+            pm.get_process(pid).ok().map(|p| {
+                (
+                    p.execution_context.rip,
+                    p.execution_context.rsp,
+                    p.execution_context.page_table_base_phys,
+                )
+            })
         };
 
         if let Some((rip, rsp, cr3)) = exec_ctx {

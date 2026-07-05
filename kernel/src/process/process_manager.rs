@@ -10,6 +10,7 @@ use crate::process::scheduler::SCHEDULER;
 use crate::serial_println;
 use alloc::string::String;
 use spin::Mutex;
+use x86_64::instructions::interrupts;
 
 pub const ARCHE_PID: usize = 0;
 
@@ -156,8 +157,11 @@ impl ProcessManager {
         // Enqueue thread in scheduler for its assigned core only after the
         // process is fully stored and visible via get_process().
         {
+            x86_64::instructions::interrupts::disable();
             let mut scheduler = SCHEDULER.lock();
             scheduler.enqueue_on_core(core_id, new_pid, priority);
+            drop(scheduler);
+            x86_64::instructions::interrupts::enable();
         }
 
         serial_println!(
@@ -242,9 +246,14 @@ impl ProcessManager {
 
         // Only now make the process visible to the scheduler — it is fully
         // constructed and stored at this point.
+        // Disable interrupts: push_back may call expand() -> ALLOCATOR.lock(),
+        // and a timer interrupt mid-lock would try SCHEDULER again -> deadlock.
         {
+            x86_64::instructions::interrupts::disable();
             let mut scheduler = SCHEDULER.lock();
             scheduler.enqueue_on_core(core_id, new_pid, priority);
+            drop(scheduler);
+            x86_64::instructions::interrupts::enable();
         }
 
         serial_println!(
