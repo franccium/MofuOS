@@ -4,6 +4,7 @@ use crate::interrupts::{
     map_local_apic_for_current_core,
 };
 use crate::memory::{FRAME_ALLOCATOR, get_frame_allocator};
+use crate::process::process::INVALID_PID;
 use crate::process::{self, CORE_POOL, SCHEDULER};
 use crate::util::apic::APICOffset;
 use crate::util::msr::msr_read;
@@ -419,40 +420,6 @@ const WRITTEN_CR3_OFFSET: u64 = 0x9020;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::VirtAddr;
 
-/// Scheduler loop for AP cores
-fn ap_core_scheduler_loop(core_id: u8) -> ! {
-    serial_println!("Core {}: Entering scheduler loop", core_id);
-
-    loop {
-        let next_thread = {
-            let mut scheduler = SCHEDULER.lock();
-            scheduler.get_next_on_core(core_id)
-        };
-
-        match next_thread {
-            Some(pid) => {
-                serial_println!("Core {}: Running process {}", core_id, pid);
-
-                // Set as current and run
-                {
-                    let mut scheduler = SCHEDULER.lock();
-                    scheduler.set_current_on_core(core_id, pid);
-                }
-
-                // Restore and run the process
-                //restore_thread_context(pid);
-            }
-            None => {
-                // No work, halt until interrupt
-                unsafe {
-                    asm!("hlt", options(nomem, nostack));
-                }
-            }
-        }
-    }
-}
-
-/// PRITNING
 use alloc::string::String;
 impl CpuFeatureFlags {
     pub fn to_feature_names(&self) -> Vec<&'static str> {

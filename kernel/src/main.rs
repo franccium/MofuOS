@@ -67,8 +67,6 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 fn main() -> ! {
     serial_println_core!("Welcome to MofuOS!");
 
-    kernel::process::syscall::init_syscall_stack();
-
     //kernel::process_start::create_init_process();
     kernel::process_start::create_userspace_processes();
     //kernel::process_start::create_and_run_init_process();

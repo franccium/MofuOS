@@ -11,11 +11,7 @@ use crate::{
     util::cpuinfo::get_current_core_id,
 };
 use core::arch::naked_asm;
-use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::{
-    VirtAddr,
-    registers::model_specific::{Efer, EferFlags},
-};
+use x86_64::registers::model_specific::{Efer, EferFlags};
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,23 +201,31 @@ pub fn handle_syscall(pid: usize, call: SystemCall) -> Result<(), SyscallError> 
     }
 }
 
-//TODO: fix stacks
-//TODO: make per-core
-const SYSCALL_STACK_SIZE: usize = 4096 * 16;
-#[repr(align(4096))]
-struct SyscallStack([u8; SYSCALL_STACK_SIZE]);
-static mut SYSCALL_STACK: SyscallStack = SyscallStack([0; SYSCALL_STACK_SIZE]);
-static STACK_TOP: AtomicU64 = AtomicU64::new(0);
+const SYSCALL_STACK_SIZE: usize = 4096 * 16; // 64 KiB per core
 
-pub fn init_syscall_stack() {
-    let top = unsafe {
-        let stack_bottom = core::ptr::addr_of!(SYSCALL_STACK).cast::<u8>();
-        let stack_top_ptr = stack_bottom.add(SYSCALL_STACK_SIZE);
-        VirtAddr::from_ptr(stack_top_ptr).as_u64()
-    };
-    STACK_TOP.store(top, Ordering::SeqCst);
-    serial_println!("Syscall stack top: {:#x}", top);
+// First field must be the stack top pointer — the naked asm reads gs:0.
+// Repr(C) guarantees field order. Align to cache line to avoid false sharing.
+#[repr(C, align(64))]
+struct PerCoreSyscallData {
+    stack_top: u64,
+    _stack: [u8; SYSCALL_STACK_SIZE],
 }
+
+impl PerCoreSyscallData {
+    const fn zeroed() -> Self {
+        Self {
+            stack_top: 0,
+            _stack: [0u8; SYSCALL_STACK_SIZE],
+        }
+    }
+}
+
+static mut PER_CORE_SYSCALL: [PerCoreSyscallData; crate::MAX_CORES as usize] = {
+    const EMPTY: PerCoreSyscallData = PerCoreSyscallData::zeroed();
+    [EMPTY; crate::MAX_CORES as usize]
+};
+
+const MSR_KERNEL_GS_BASE: u32 = 0xC0000102;
 
 #[repr(C)]
 pub struct SyscallFrame {
@@ -248,11 +252,16 @@ pub struct SyscallFrame {
 #[unsafe(naked)]
 pub unsafe extern "C" fn syscall_handler() -> ! {
     naked_asm!(
-        // save user stack
-        "mov r15, rsp",
+        // on syscall entry: CS/SS switched, interrupts off, user RIP in RCX, RFLAGS in R11
+        // GS currently holds user GS — swap to kernel GS (which holds PerCoreSyscallData ptr)
+        "swapgs",
 
-        // switch to kernel stack
-        "mov rsp, qword ptr [rip + {stack_top}]",
+        // save user RSP; load per-core kernel stack top from gs:0 (stack_top field)
+        "mov r15, rsp",
+        "mov rsp, gs:0",
+
+        // restore user GS now that we are on the kernel stack and no longer need gs:0
+        "swapgs",
 
         // save state on kernel stack
         "push r15", // user RSP
@@ -294,7 +303,6 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 
         "sysretq",
 
-        stack_top = sym STACK_TOP,
         handle_syscall = sym handle_syscall_inner,
     )
 }
@@ -370,7 +378,29 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
 }
 
 pub fn init_syscall() {
-    // enable syscall/sysret
+    let core_id = get_current_core_id() as usize;
+    debug_assert!(core_id < crate::MAX_CORES as usize);
+
+    // Compute the stack top for this core and store it in the per-core slot.
+    // Stack grows downward: top = address of byte just past the _stack array.
+    let stack_top = unsafe {
+        let slot = &mut PER_CORE_SYSCALL[core_id];
+        let stack_end_ptr = slot._stack.as_ptr().add(SYSCALL_STACK_SIZE);
+        let top = stack_end_ptr as u64;
+        slot.stack_top = top;
+        top
+    };
+
+    // Write the address of this core's PerCoreSyscallData into KERNEL_GS_BASE.
+    // On syscall entry, swapgs makes GS point here, so gs:0 == stack_top.
+    let slot_addr = unsafe { &PER_CORE_SYSCALL[core_id] as *const _ as u64 };
+    unsafe {
+        msr_write(MSR_KERNEL_GS_BASE, slot_addr);
+    }
+
+    serial_println_core!("Syscall stack top (core {}): {:#x}", core_id, stack_top);
+
+    // Enable SYSCALL/SYSRET via EFER.SCE
     unsafe {
         Efer::update(|flags| {
             flags.insert(EferFlags::SYSTEM_CALL_EXTENSIONS);
@@ -380,38 +410,18 @@ pub fn init_syscall() {
     // STAR MSR layout:
     // Bits 63:48 = User CS base for sysretq (CS = this + 16, SS = this + 8)
     // Bits 47:32 = Kernel CS base for syscall (CS = this, SS = this + 8)
-    // Bits 31:16 = Ignored in 64-bit mode
-    // Bits 15:0  = Ignored in 64-bit mode
     //
-    // With GDT:
-    //   Index 3 (0x18): User Data (SS for ring 3)
-    //   Index 4 (0x20): User Code (CS for ring 3)
+    // GDT layout:
+    //   0x08 = kernel code, 0x10 = kernel data
+    //   0x18 = user data,   0x20 = user code
     //
-    // For sysretq:
-    //   CS = (STAR[63:48] + 16) | 3 = 0x20 | 3 = 0x23
-    //   SS = (STAR[63:48] + 8) | 3  = 0x18 | 3 = 0x1B
-    //
-    // STAR[63:48] must be 0x10 (0x20 - 16 = 0x10, 0x18 - 8 = 0x10)
-
-    let user_cs_base = 0x10u64; // STAR[63:48]: sysretq CS = 0x10+16=0x20, SS = 0x10+8=0x18
-    let kernel_cs = 0x08u64; // STAR[47:32]: syscall CS = 0x08 (kernel code)
-    // Bits 31:0 are unused in 64-bit mode
-
-    let star_value = (user_cs_base << 48) | (kernel_cs << 32);
-
+    // sysretq sets CS = (STAR[63:48] + 16) | 3 = 0x23, SS = (STAR[63:48] + 8) | 3 = 0x1B
+    // so STAR[63:48] must be 0x10
+    let star_value = (0x10u64 << 48) | (0x08u64 << 32);
     unsafe {
         msr_write(0xC0000081, star_value);
-    }
-
-    // Set LSTAR to syscall handler
-    let handler_addr = syscall_handler as *const () as u64;
-    unsafe {
-        msr_write(0xC0000082, handler_addr);
-    }
-
-    // No RFLAGS masking
-    unsafe {
-        msr_write(0xC0000084, 0u64);
+        msr_write(0xC0000082, syscall_handler as *const () as u64);
+        msr_write(0xC0000084, 0u64); // no RFLAGS masking
     }
 
     serial_println_core!("Syscall MSRs initialized");

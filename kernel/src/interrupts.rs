@@ -1,6 +1,5 @@
 #![allow(unused)]
 use crate::io::serial;
-use crate::process::syscall::init_syscall;
 use crate::process::{SCHEDULER, Scheduler};
 use crate::process::{
     process::INVALID_PID,
@@ -12,7 +11,7 @@ use crate::util::cpuinfo::get_current_core_id;
 use crate::util::msr::{msr_read, msr_write};
 use crate::{
     gdt, hlt_loop,
-    memory::memory::{IdendtityAcpiHandler, MemoryMapFrameAllocator},
+    memory::memory::{IdentityAcpiHandler, MemoryMapFrameAllocator},
     serial_print, serial_println,
     util::cpuinfo::{CpuFeatureFlags, get_cpu_info, get_cpu_info_for_core},
 };
@@ -630,7 +629,7 @@ pub unsafe fn init_acpi(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) {
     serial_println!("init_acpi()");
-    let handler = IdendtityAcpiHandler {
+    let handler = IdentityAcpiHandler {
         phys_offset: phys_offset,
     };
     serial_println!("creating AcpiTables");
@@ -639,7 +638,7 @@ pub unsafe fn init_acpi(
 
     serial_println!("AcpiTables initialized");
 
-    let acpi_platform: AcpiPlatform<IdendtityAcpiHandler> =
+    let acpi_platform: AcpiPlatform<IdentityAcpiHandler> =
         AcpiPlatform::new(acpi_tables, handler).expect("Cannot create AcpiPlatform");
 
     let mut lapic_addr: u32 = 0;

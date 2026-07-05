@@ -193,16 +193,6 @@ impl Scheduler {
         //     "Core {}: Timer tick - Current PID: {:?}",
     }
 
-    pub fn on_timer_tick(&mut self, core_id: u8) {
-        let scheduler = self.get_core_scheduler_mut(core_id);
-        let curr = scheduler.current_running();
-        // serial_println!(
-        //     "Core {}: Timer tick - Current PID: {:?}",
-        //     core_id,
-        //     curr,
-        // );
-    }
-
     pub fn enqueue_on_core(&mut self, core_id: u8, pid: PID, priority: u8) {
         let scheduler = self.get_core_scheduler_mut(core_id);
         scheduler.enqueue_ready(pid, priority);
@@ -229,14 +219,11 @@ impl Scheduler {
     }
 
     pub fn current_on_core(&self, core_id: u8) -> PID {
-        self.get_core_scheduler(core_id)
-            .and_then(|s| s.current_running())
+        self.get_core_scheduler(core_id).current_running()
     }
 
     pub fn has_ready_threads_on_core(&self, core_id: u8) -> bool {
-        self.get_core_scheduler(core_id)
-            .map(|s| s.has_ready_threads())
-            .unwrap_or(false)
+        self.get_core_scheduler(core_id).has_ready_threads()
     }
 
     pub fn get_stats(&self) -> SchedulerStats {

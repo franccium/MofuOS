@@ -13,7 +13,7 @@ use x86_64::{
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
 
 #[derive(Clone, Copy)]
-pub struct IdendtityAcpiHandler {
+pub struct IdentityAcpiHandler {
     pub phys_offset: u64,
 }
 
@@ -261,7 +261,7 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryMapFrameAllocator {
     }
 }
 
-impl Handler for IdendtityAcpiHandler {
+impl Handler for IdentityAcpiHandler {
     unsafe fn map_physical_region<T>(
         &self,
         phys_addr: usize,
@@ -269,7 +269,7 @@ impl Handler for IdendtityAcpiHandler {
     ) -> PhysicalMapping<Self, T> {
         let virt_addr = (phys_addr as u64 + self.phys_offset) as *mut T;
         // serial_println!(
-        //     "IdendtityAcpiHandler: mapping phys {:#x} to virt {:#x}",
+        //     "IdentityAcpiHandler: mapping phys {:#x} to virt {:#x}",
         //     phys_addr,
         //     virt_addr as u64
         // );
