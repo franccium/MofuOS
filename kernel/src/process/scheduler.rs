@@ -335,6 +335,21 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
         if let Some((rip, rsp, cr3)) = exec_ctx {
             set_current_process_for_core(core_id, pid);
 
+            // Add this before your asm block to test
+            let kernel_rsp_slot = unsafe { &mut KERNEL_RSP_ON_CORE[core_id as usize] as *mut u64 };
+            // write RSP into slot
+            let rsp_value: u64;
+            unsafe {
+                core::arch::asm!(
+                    "mov {}, rsp",
+                    out(reg) rsp_value,
+                    options(nostack, nomem)
+                );
+            }
+            serial_println_core!("Saving kernel RSP for core {}: {:#x}", core_id, rsp_value);
+            unsafe {KERNEL_RSP_ON_CORE[core_id as usize] = rsp_value};
+
+
             x86_64::instructions::interrupts::enable();
             // All five steps must be in one asm block so the forward label "2:"
             // is visible to the lea. The CR3 write is inside the block so the
@@ -345,15 +360,15 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
                     "lea rax, [rip + 2f]",
                     "push rax",
                     // save RSP (kernel page table still active here)
-                    "mov [{slot}], rsp",
+                    //"mov [{slot}], rsp", // THIS CAUSES PageFaultErrorCode(PROTECTION_VIOLATION | CAUSED_BY_WRITE)
                     // switch to user page table
                     "mov cr3, {cr3}",
                     // jump to userspace — iretq, never returns normally
                     "jmp {jump}",
                     // return_to_scheduler() ret lands here
                     "2:",
-                    slot = in(reg) &raw mut KERNEL_RSP_ON_CORE[core_id as usize] as u64,
-                    cr3  = in(reg) cr3,
+                    //slot = in(reg) kernel_rsp_slot,
+                    cr3 = in(reg) cr3,
                     jump = sym jump_to_userspace,
                     in("rdi") rip,
                     in("rsi") rsp,
@@ -363,6 +378,11 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
             }
         }
 
+        serial_println_core!(
+            "Core {}: Returned from userspace PID {}",
+            core_id,
+            pid
+        );
         // Process exited or was not found. Clean up for this iteration.
         // Disable interrupts immediately — we're back on the kernel stack and
         // about to acquire locks. The timer handler also acquires SCHEDULER,
