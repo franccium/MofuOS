@@ -7,7 +7,7 @@ use crate::process::kernel_thread::{KernelThread, ThreadGroup, ThreadState};
 use crate::process::process::{INVALID_PID, MAX_PRIORITY, Process, ProcessState};
 use crate::process::process_mem::MappedMemoryRegion;
 use crate::process::scheduler::SCHEDULER;
-use crate::serial_println;
+use crate::{serial_println, serial_println_core};
 use alloc::string::String;
 use spin::Mutex;
 use x86_64::instructions::interrupts;
@@ -207,8 +207,18 @@ impl ProcessManager {
             let mut best_core = 1u8;
             let mut best_count = usize::MAX;
             for c in 1..total_cores {
-                let queued = scheduler.ready_count_on_core(c as u8);
+                let queued = scheduler.ready_count_on_core(c as u8) + scheduler.running_count_on_core(c as u8) + scheduler.blocked_count_on_core(c as u8);
+                serial_println_core!(
+                    "create_process_from_elf: core {} has {} queued processes",
+                    c,
+                    queued
+                );
                 if queued < best_count {
+                    serial_println_core!(
+                        "create_process_from_elf: core {} is the new best candidate with {} queued processes",
+                        c,
+                        queued
+                    );
                     best_count = queued;
                     best_core = c as u8;
                 }

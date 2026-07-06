@@ -164,6 +164,14 @@ impl CoreScheduler {
         self.blocked_queue.len()
     }
 
+    pub fn running_count(&self) -> usize {
+        if self.current_thread != INVALID_PID {
+            1
+        } else {
+            0
+        }
+    }
+
     pub fn core_id(&self) -> u8 {
         self.core_id
     }
@@ -257,6 +265,14 @@ impl Scheduler {
 
     pub fn ready_count_on_core(&self, core_id: u8) -> usize {
         self.get_core_scheduler(core_id).ready_count()
+    }
+
+    pub fn running_count_on_core(&self, core_id: u8) -> usize {
+        self.get_core_scheduler(core_id).running_count()
+    }
+
+    pub fn blocked_count_on_core(&self, core_id: u8) -> usize {
+        self.get_core_scheduler(core_id).blocked_count()
     }
 
     pub fn get_stats(&self) -> SchedulerStats {

@@ -577,6 +577,10 @@ pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
     gdt::init_core_gdt(proc_id);
     serial_println!("Core {}: GDT loaded", proc_id);
 
+    // Initialize per-core syscall stack and SYSCALL/SYSRET MSRs
+    process::syscall::init_syscall();
+    serial_println!("Core {}: syscall initialized", proc_id);
+
     // Load IDT
     interrupts::load_idt();
     serial_println!("Core {}: IDT loaded", proc_id);
@@ -610,6 +614,10 @@ pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
     serial_println!("Core {}: Interrupts enabled", proc_id);
 
     let mut time_elapsed = 0;
+
+    // Signal to the BSP that this AP is fully initialized and in the scheduler loop.
+    crate::AP_CORES_READY.fetch_add(1, core::sync::atomic::Ordering::Release);
+    serial_println!("Core {}: ready, entering scheduler loop", proc_id);
 
     process::scheduler::run_on_core_loop(proc_id);
     // loop {

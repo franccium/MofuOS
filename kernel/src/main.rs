@@ -5,6 +5,7 @@ mod boot;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use kernel::process::CORE_POOL;
 use core::fmt::Write;
 use embedded_graphics::Drawable;
 use embedded_graphics::geometry::{Point, Size};
@@ -266,6 +267,12 @@ fn main() -> ! {
         compositor.focus_window(0);
         compositor.compose(fb);
 
+        let core_count = CORE_POOL.lock().total_cores();
+        serial_println_core!("Waiting for {} AP cores to be ready...", core_count - 1);
+        while kernel::AP_CORES_READY.load(core::sync::atomic::Ordering::Acquire) < (core_count - 1)
+        {
+            hlt();
+        }
         kernel::process_start::create_userspace_processes();
 
         loop {

@@ -13,6 +13,11 @@ pub const MAX_CORES: u8 = 16;
 pub const AP_CORE_COUNT: u8 = MAX_CORES - 1;
 const_assert!(MAX_CORES <= 64); // NOTE: Hard limit to 64 cores for the core pool availability 64-bit long bitmap
 
+/// Each AP increments this just before entering run_on_core_loop.
+/// BSP spins on this reaching the AP count before launching userspace processes.
+pub static AP_CORES_READY: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+
 pub mod memory;
 extern crate alloc;
 pub mod asm;
