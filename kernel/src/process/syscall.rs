@@ -327,18 +327,14 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let fd = frame.arg1;
             let buf = frame.arg2 as *const u8;
             let count = frame.arg3 as usize;
-
+            // serial_println_core!("WRITE: fd={}, count={}", fd, count);
             let slice = unsafe { core::slice::from_raw_parts(buf, count) };
             if let Ok(s) = core::str::from_utf8(slice) {
                 if fd == 1 || fd == 2 {
-                    // Route userspace stdout/stderr to COM2.
-                    // Prefix each write with the PID so the log splitter can
-                    // attribute output to the correct process even under SMP.
                     let core_id = get_current_core_id();
                     let pid = scheduler::get_current_process_for_core(core_id);
                     crate::serial2_print!("[pid={}] {}", pid, s);
                 } else {
-                    // Other fds fall back to kernel log for now.
                     serial_println_core!("WRITE: fd={}, count={}: {}", fd, count, s);
                 }
             }
