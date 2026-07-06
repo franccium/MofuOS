@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use crate::process::elf_loader::TEST_ELF;
+use crate::process::elf_loader::{PING_ELF, TEST_ELF};
 use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
 use crate::serial_println;
 
@@ -60,15 +60,17 @@ pub fn create_userspace_process(
 pub fn create_userspace_processes() {
     serial_println!("Creating initial userspace processes");
 
-    serial_println!("Creating process 1");
-    if let Ok(pid) = create_userspace_process(&TEST_ELF, "proc1", 0, 4) {
-        serial_println!("Created process (PID {}) as child of 0", pid);
+    // Launch two ping instances on core 1. They share the same ELF bytes but
+    // receive independent address spaces and stacks, so they run as fully
+    // separate processes. The scheduler on core 1 runs them round-robin:
+    // each calls sys_write a few times then sys_exit, which returns to the
+    // scheduler loop and re-enqueues the other.
+    if let Ok(pid) = create_userspace_process(&PING_ELF, "ping1", 0, 4) {
+        serial_println!("Created ping1 (PID {})", pid);
     }
-
-    // serial_println!("Creating process 2");
-    // if let Ok(pid) = create_userspace_process(&TEST_ELF, "proc2", 0, 4) {
-    //     serial_println!("Created process (PID {}) as child of 0", pid);
-    // }
+    if let Ok(pid) = create_userspace_process(&PING_ELF, "ping2", 0, 4) {
+        serial_println!("Created ping2 (PID {})", pid);
+    }
 
     serial_println!("Process creation complete");
     serial_println!("All processes are now in the scheduler queues");

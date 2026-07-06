@@ -136,33 +136,6 @@ impl ExecutionContext {
 }
 
 impl Process {
-    // pub fn new(
-    //     pid: usize,
-    //     parent_pid: usize,
-    //     priority: u8,
-    //     name: String,
-    //     is_out: bool,
-    //     resources: ProcessResources,
-    //     entry_point: u64,
-    //     stack_top: u64,
-    //     page_table_base_phys: u64,
-    // ) -> Self {
-    //     Self {
-    //         pid,
-    //         parent_pid,
-    //         priority,
-    //         state: ProcessState::Ready,
-    //         name,
-    //         children: Vec::new(),
-    //         file_descriptors: Vec::new(),
-    //         resources,
-    //         exit_code: None,
-    //         is_out,
-    //         execution_context: ExecutionContext::new(entry_point, stack_top, page_table_base_phys),
-    //         memory_layout: ProcessMemoryLayout::empty()
-    //     }
-    // }
-
     pub fn new(
         pid: usize,
         parent_pid: usize,

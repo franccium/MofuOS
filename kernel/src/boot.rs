@@ -35,7 +35,6 @@ static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 
 /// Be sure to mark all limine requests with #[used], otherwise they may be removed by the compiler
 #[used]
-
 #[unsafe(link_section = ".requests")]
 static BASE_REVISION: BaseRevision = BaseRevision::with_revision(5u64);
 

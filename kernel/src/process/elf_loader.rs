@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use elf::ElfBytes;
 
 pub const TEST_ELF: &[u8] = include_bytes!("../../../user/programs/test/test");
+pub const PING_ELF: &[u8] = include_bytes!("../../../user/programs/ping/ping");
 
 #[derive(Debug)]
 pub struct ElfLoadInfo {

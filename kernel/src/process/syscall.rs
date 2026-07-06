@@ -94,6 +94,7 @@ pub enum SyscallNumber {
     UnloadFile = 9,
     CreateWindow = 10,
     GetProcessInfo = 11,
+    Yield = 998,
     Exit = 999,
 }
 
@@ -347,6 +348,24 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
         997 => {
             // serial_println_core!("997 returning: {}", frame.arg1);
             frame.arg1
+        }
+        // Voluntarily yield the CPU back to the scheduler without terminating
+        // Save the userspace return address and stack into the process's execution_context
+        998 => {
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+            serial_println_core!("sys_yield: PID {} yielding", pid);
+
+            {
+                let mut pm = PROCESS_MANAGER.lock();
+                if let Ok(proc) = pm.get_process_mut(pid) {
+                    proc.execution_context.rip = frame.user_rip;
+                    proc.execution_context.rsp = frame.user_rsp;
+                    proc.execution_context.rflags = frame.rflags;
+                }
+            }
+
+            scheduler::return_to_scheduler();
         }
         999 => {
             let exit_code = frame.arg1;

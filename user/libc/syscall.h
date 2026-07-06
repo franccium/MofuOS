@@ -17,6 +17,7 @@
 #define SYS_GET_PROCESS_INFO 11
 
 #define SYS_EXIT 999
+#define SYS_YIELD 998
 
 static inline long syscall6(
     long num,
@@ -57,6 +58,10 @@ static inline long syscall1(long num, long arg1) {
 static inline void sys_exit(int code) {
     syscall1(SYS_EXIT, code);
     __builtin_unreachable();
+}
+
+static inline void sys_yield(void) {
+    syscall1(SYS_YIELD, 0);
 }
 
 static inline long sys_write(int fd, const void *buf, size_t count) {

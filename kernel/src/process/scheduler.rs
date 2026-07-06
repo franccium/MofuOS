@@ -320,12 +320,13 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
                 (
                     p.execution_context.rip,
                     p.execution_context.rsp,
+                    p.execution_context.rflags,
                     p.execution_context.page_table_base_phys,
                 )
             })
         };
 
-        if let Some((rip, rsp, cr3)) = exec_ctx {
+        if let Some((rip, rsp, rflags, cr3)) = exec_ctx {
             set_current_process_for_core(core_id, pid);
 
             let kernel_rsp_slot = unsafe { &mut KERNEL_RSP_ON_CORE[core_id as usize] as *mut u64 };
@@ -344,30 +345,26 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
 
             x86_64::instructions::interrupts::enable();
 
-            // push return label address, switch CR3, jump to userspace
-            // rax - return label address from lea
-            // r8 - kernel_rsp_slot pointer
+            // Register assignments:
+            // rax - return label address
+            // r8  - kernel_rsp_slot pointer
             // rcx - cr3 physical address
-            // rdi - userspace entry point
-            // rsi - userspace stack pointer
+            // rdi - arg1: userspace entry point / resume RIP
+            // rsi - arg2: userspace stack pointer
+            // rdx - arg3: userspace RFLAGS
             unsafe {
                 core::arch::asm!(
-                    // compute the address of return label "2:" into rax
                     "lea rax, [rip + 2f]",
                     "push rax",
-                    // save RSP into the per-core slot while the kernel page table is still active
                     "mov [r8], rsp",
-                    // switch to the user page table
                     "mov cr3, rcx",
-                    // jump into jump_to_userspace (iretq inside)
                     "jmp {jump}",
-                    // return_to_scheduler() does: mov rsp, [slot]; ret
-                    // that ret pops the label address pushed above and lands here
                     "2:",
-                    in("r8") kernel_rsp_slot,
-                    in("rcx") cr3, // careful not to shadow rcx
+                    in("r8")  kernel_rsp_slot,
+                    in("rcx") cr3,
                     in("rdi") rip,
                     in("rsi") rsp,
+                    in("rdx") rflags,
                     jump = sym jump_to_userspace,
                     lateout("rax") _,
                     options(nostack)
