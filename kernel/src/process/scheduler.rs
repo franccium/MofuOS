@@ -335,9 +335,10 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
         if let Some((rip, rsp, cr3)) = exec_ctx {
             set_current_process_for_core(core_id, pid);
 
-            // Add this before your asm block to test
+            // Save kernel RSP into the per-core slot before the asm block.
+            // We do this in Rust so we can use serial_println_core safely,
+            // and so the slot write is clearly on the kernel page table.
             let kernel_rsp_slot = unsafe { &mut KERNEL_RSP_ON_CORE[core_id as usize] as *mut u64 };
-            // write RSP into slot
             let rsp_value: u64;
             unsafe {
                 core::arch::asm!(
@@ -347,36 +348,46 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
                 );
             }
             serial_println_core!("Saving kernel RSP for core {}: {:#x}", core_id, rsp_value);
-            unsafe {KERNEL_RSP_ON_CORE[core_id as usize] = rsp_value};
-
+            unsafe { *kernel_rsp_slot = rsp_value; }
 
             x86_64::instructions::interrupts::enable();
 
-            let rip_value = x86_64::registers::read_rip();
-            serial_println_core!("Current RIP before jump: {:#x}", rip_value.as_u64());
-            
-
-            // All five steps must be in one asm block so the forward label "2:"
-            // is visible to the lea. The CR3 write is inside the block so the
-            // RSP save happens while the kernel page table is still active.
+            // Critical asm block: push return label address, save RSP into
+            // the kernel_rsp_slot, switch CR3, jump to userspace.
+            // All in one asm! block so the forward label "2:" is in scope.
+            //
+            // Register assignments (all pinned to avoid compiler aliasing):
+            //   rax  - label address from lea (clobbered, declared lateout)
+            //   r8   - kernel_rsp_slot pointer
+            //   rcx  - cr3 physical address
+            //   rdi  - userspace entry point (arg1 of jump_to_userspace)
+            //   rsi  - userspace stack pointer (arg2 of jump_to_userspace)
+            //
+            // Order matters:
+            //   1. lea + push BEFORE slot write (push adjusts RSP first)
+            //   2. slot write BEFORE mov cr3 (slot is kernel memory, not in user PML4)
+            //   3. mov cr3 BEFORE jmp (switches page table)
             unsafe {
                 core::arch::asm!(
-                    // push return address while still on the kernel page table
+                    // compute the address of return label "2:" into rax
                     "lea rax, [rip + 2f]",
+                    // push it — now RSP points at this return address
                     "push rax",
-                    // save RSP (kernel page table still active here)
-                    //"mov [{slot}], rsp", // THIS CAUSES PageFaultErrorCode(PROTECTION_VIOLATION | CAUSED_BY_WRITE)
-                    // switch to user page table
-                    "mov cr3, {cr3}",
-                    // jump to userspace — iretq, never returns normally
+                    // save RSP into the per-core slot (r8 holds the slot ptr)
+                    // this must happen while the kernel page table is still active
+                    "mov [r8], rsp",
+                    // switch to the user page table
+                    "mov cr3, rcx",
+                    // jump into jump_to_userspace (iretq inside, noreturn normally)
                     "jmp {jump}",
-                    // return_to_scheduler() ret lands here
+                    // return_to_scheduler() does: mov rsp, [slot]; ret
+                    // that ret pops the label address pushed above and lands here
                     "2:",
-                    //slot = in(reg) kernel_rsp_slot,
-                    cr3 = in(reg) cr3,
-                    jump = sym jump_to_userspace,
+                    in("r8") kernel_rsp_slot,
+                    in("rcx") cr3,
                     in("rdi") rip,
                     in("rsi") rsp,
+                    jump = sym jump_to_userspace,
                     lateout("rax") _,
                     options(nostack)
                 );
