@@ -255,6 +255,10 @@ impl Scheduler {
         self.get_core_scheduler(core_id).has_ready_threads()
     }
 
+    pub fn ready_count_on_core(&self, core_id: u8) -> usize {
+        self.get_core_scheduler(core_id).ready_count()
+    }
+
     pub fn get_stats(&self) -> SchedulerStats {
         let mut total_ready = 0;
         let mut total_blocked = 0;

@@ -196,12 +196,25 @@ impl ProcessManager {
 
         serial_println!("create_process_from_elf: assigned pid: {}", new_pid);
 
-        // Allocate a CPU core for this process
-        let mut core_pool = CORE_POOL.lock();
-        let core_id = core_pool
-            .allocate_core(new_pid)
-            .ok_or(ProcessError::NoCoresAvailable)?;
-        drop(core_pool);
+        // Pick the target AP core for this process. Multiple processes can
+        // share the same core via the scheduler queue — the core pool's
+        // "occupied" flag only means a process is *actively executing* there,
+        // not that the queue is full. Use least-loaded scheduling over AP cores
+        // (core 0 is always BSP-reserved).
+        let total_cores = CORE_POOL.lock().total_cores() as usize;
+        let core_id = {
+            let scheduler = SCHEDULER.lock();
+            let mut best_core = 1u8;
+            let mut best_count = usize::MAX;
+            for c in 1..total_cores {
+                let queued = scheduler.ready_count_on_core(c as u8);
+                if queued < best_count {
+                    best_count = queued;
+                    best_core = c as u8;
+                }
+            }
+            best_core
+        };
 
         serial_println!("create_process_from_elf: assigned Core ID: {}", core_id);
 

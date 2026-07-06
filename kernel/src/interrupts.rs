@@ -42,7 +42,7 @@ use x86_64::{
     },
 };
 
-const TIMER_DEBUG_PRINT: bool = true;
+const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
 
@@ -952,7 +952,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
     let core_id = get_current_core_id();
 
     if TIMER_DEBUG_PRINT {
-        serial_println!("{}*", core_id);
+        serial_println_core!("*");
     }
 
     unsafe {
@@ -967,8 +967,15 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
         // stack_frame.code_segment RPL == 3 means we interrupted userspace.
         let preempt = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
 
+        // serial_println_core!(
+        //     "Core {}: Timer interrupt, preempting userspace?: {}",
+        //     core_id,
+        //     preempt
+        // );
+
         if preempt {
             let pid = crate::process::scheduler::get_current_process_for_core(core_id);
+            serial_println_core!("Core {}: Preempting process PID {}", core_id, pid);
             if pid != crate::process::process::INVALID_PID {
                 // Save the interrupted userspace context into the process so
                 // the scheduler can resume it via iretq when it runs next.
