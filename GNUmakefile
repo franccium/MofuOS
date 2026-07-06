@@ -134,8 +134,12 @@ limine/limine:
 	$(MAKE) -C limine
 
 .PHONY: kernel
-kernel:
+kernel: user-programs
 	$(MAKE) -C kernel
+
+.PHONY: user-programs
+user-programs:
+	$(MAKE) -C user
 
 
 # Clean the FAT32 image

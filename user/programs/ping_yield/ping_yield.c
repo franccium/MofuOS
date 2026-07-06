@@ -5,6 +5,7 @@ int main(int argc, char **argv) {
 
     while (1) {
         sys_write(1, msg, sizeof(msg) - 1);
+        sys_yield();
     }
 
     return 0;

@@ -42,7 +42,7 @@ use x86_64::{
     },
 };
 
-const TIMER_DEBUG_PRINT: bool = false;
+const TIMER_DEBUG_PRINT: bool = true;
 const KEYBOARD_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
 
@@ -948,7 +948,7 @@ extern "x86-interrupt" fn double_fault_handler(
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFrame) {
     let core_id = get_current_core_id();
 
     if TIMER_DEBUG_PRINT {
@@ -956,17 +956,39 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     }
 
     unsafe {
-        //TODO: this only supports TSC mode
+        if core_id == 0 {
+            SYSTEM_TICKS.fetch_add(1, Ordering::Relaxed);
+        }
 
-        SYSTEM_TICKS.fetch_add(1, Ordering::Relaxed);
-
-        // re-arm the timer for the next tick
         let next_deadline = tsc_read() + tsc_cycles_per_tick();
         msr_write(MSR_IA32_TSC_DEADLINE, next_deadline);
 
-        let mut scheduler = SCHEDULER.lock();
-        scheduler.on_timer_tick(core_id);
-        drop(scheduler);
+        // Check if a userspace process is running on this core.
+        // stack_frame.code_segment RPL == 3 means we interrupted userspace.
+        let preempt = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+
+        if preempt {
+            let pid = crate::process::scheduler::get_current_process_for_core(core_id);
+            if pid != crate::process::process::INVALID_PID {
+                // Save the interrupted userspace context into the process so
+                // the scheduler can resume it via iretq when it runs next.
+                {
+                    let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
+                    if let Ok(proc) = pm.get_process_mut(pid) {
+                        proc.execution_context.rip = stack_frame.instruction_pointer.as_u64();
+                        proc.execution_context.rsp = stack_frame.stack_pointer.as_u64();
+                        proc.execution_context.rflags = stack_frame.cpu_flags.bits();
+                    }
+                }
+
+                // EOI must be sent before return_to_scheduler() because that
+                // call never returns here — it unwinds directly to the
+                // scheduler loop, skipping the compiler-generated iretq.
+                interrupt_over();
+
+                crate::process::scheduler::return_to_scheduler();
+            }
+        }
 
         interrupt_over();
     }
