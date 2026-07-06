@@ -217,14 +217,14 @@ unsafe extern "C" fn kmain() -> ! {
     // Must happen before APs start so all cores share the same measured frequency.
     unsafe { interrupts::init_tsc_globals() };
 
-    // the address to jump to. Writing to this field will cause the core to jump to the given function.
-    // The function will receive a pointer to this structure, and it will have its own 64KiB
-    cpus[1].bootstrap(cpuinfo::ap_core_from_limine_entry_point, 0x12345678);
-    let passed = cpus[1].extra_argument();
-    serial_println_core!(
-        "Bootstrap done for AP core 1, extra argument read back: {:#x}",
-        passed
-    );
+    for i in 1..core_count {
+        let core_id = i as u8;
+        serial_println_core!("Bootstrapping AP core {}", core_id);
+        // the address to jump to. Writing to this field will cause the core to jump to the given function.
+        // The function will receive a pointer to this structure, and it will have its own 64KiB
+        let ap_bootstrap_fn: MpGotoFunction = cpuinfo::ap_core_from_limine_entry_point;
+        cpus[i].bootstrap(ap_bootstrap_fn, 0x12345678);
+    }
 
     serial_println_core!("BSP continued execution");
 

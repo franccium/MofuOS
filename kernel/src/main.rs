@@ -68,7 +68,6 @@ fn main() -> ! {
     serial_println_core!("Welcome to MofuOS!");
 
     //kernel::process_start::create_init_process();
-    kernel::process_start::create_userspace_processes();
     //kernel::process_start::create_and_run_init_process();
 
     //test_process_system();
@@ -266,6 +265,8 @@ fn main() -> ! {
 
         compositor.focus_window(0);
         compositor.compose(fb);
+
+        kernel::process_start::create_userspace_processes();
 
         loop {
             if RENDER_SHADERS {
