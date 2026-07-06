@@ -45,8 +45,8 @@ impl<T> MutexWrapper<T> {
     }
 }
 
-/// Block sizes used by the fixed-size block allocator.
-/// Also used as alignment for each block so they need to be powers of two.
+/// Block sizes used by the fixed-size block allocator
+/// Also used as alignment for each block so they need to be powers of two
 const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 
 struct AllocatorListNode {

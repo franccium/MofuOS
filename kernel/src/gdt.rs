@@ -27,12 +27,9 @@ static mut IST0_STACKS: [KernelStack; MAX_CORES as usize] =
     [const { KernelStack([0u8; PER_CORE_STACK_SIZE]) }; MAX_CORES as usize];
 
 // Dedicated stack for each core's scheduler loop.
-// The AP core boot stack from Limine is small and not suitable for the
-// scheduler loop which does push/call depth before jumping to userspace.
 static mut SCHEDULER_STACKS: [KernelStack; MAX_CORES as usize] =
     [const { KernelStack([0u8; PER_CORE_STACK_SIZE]) }; MAX_CORES as usize];
 
-/// Returns the top (highest address) of the scheduler stack for the given core.
 pub fn get_scheduler_stack_top(core_id: u8) -> u64 {
     unsafe {
         let stack = &SCHEDULER_STACKS[core_id as usize].0;

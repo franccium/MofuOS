@@ -46,13 +46,13 @@ const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
 
-/// TSC frequency measured at boot via PIT calibration.
-/// Written once by core 0 before any AP is started.
-/// All cores read this after it is set.
+/// TSC frequency measured at boot via PIT calibration
+/// Written once by core 0 before any AP is started
+/// All cores read this after it is set
 static TSC_FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
 
-/// TSC value at the moment core 0 finished basic init (just before APs start).
-/// Used as the zero-point for log timestamps.
+/// TSC value at the moment core 0 finished basic init (just before APs start)
+/// Used as the zero-point for log timestamps
 static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
 
 pub const TIMER_TICK_INTERVAL_MS: u64 = 10;
@@ -73,11 +73,11 @@ const PIT_CMD: u16 = 0x43;
 const PIT_PC_SPEAKER: u16 = 0x61;
 const PIT_BASE_HZ: u64 = 1_193_182; // fixed hardware frequency
 
-/// Measure the TSC frequency by counting cycles over a PIT-timed interval.
-/// Must be called with interrupts disabled.
+/// Measure the TSC frequency by counting cycles over a PIT-timed interval
+/// Must be called with interrupts disabled
 pub unsafe fn measure_tsc_frequency_via_pit() -> u64 {
-    // We count down from 65535 ticks of the PIT (around 54.9 ms).
-    // Actual elapsed time = count / PIT_BASE_HZ seconds.
+    // We count down from 65535 ticks of the PIT (around 54.9 ms)
+    // Actual elapsed time = count / PIT_BASE_HZ seconds
     const PIT_COUNT: u16 = 0xFFFF;
     const PIT_MODE_ONE_SHOT_CH2: u8 = 0b1011_0000; // channel 2, lo/hi, mode 1
 
@@ -136,8 +136,8 @@ pub unsafe fn measure_tsc_frequency_via_pit() -> u64 {
     }
 }
 
-/// Initialise the global TSC frequency and boot epoch.
-/// Have to call this on core 0 once, before starting APs, with interrupts disabled.
+/// Initialise the global TSC frequency and boot epoch
+/// Have to call this on core 0 once, before starting APs, with interrupts disabled
 pub unsafe fn init_tsc_globals() {
     let freq = unsafe { measure_tsc_frequency_via_pit() };
     TSC_FREQUENCY_HZ.store(freq, Ordering::SeqCst);
@@ -151,8 +151,8 @@ pub unsafe fn init_tsc_globals() {
     );
 }
 
-/// Microseconds since `init_tsc_globals` was called on core 0.
-/// Safe to call from any core.
+/// Microseconds since `init_tsc_globals` was called on core 0
+/// Safe to call from any core
 #[inline]
 pub fn tsc_timestamp_us() -> u64 {
     let freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
@@ -164,8 +164,8 @@ pub fn tsc_timestamp_us() -> u64 {
     now.saturating_sub(boot) / (freq / 1_000_000)
 }
 
-/// TSC cycles per timer tick, computed from the measured frequency.
-/// Falls back to a sane default until `init_tsc_globals` is called.
+/// TSC cycles per timer tick, computed from the measured frequency
+/// Falls back to a sane default until `init_tsc_globals` is called
 pub fn tsc_cycles_per_tick() -> u64 {
     let freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
     if freq == 0 {

@@ -6,10 +6,6 @@ use crate::process::process_manager::PROCESS_MANAGER;
 use crate::process::{CORE_POOL, PID};
 use crate::util::cpuinfo::get_current_core_id;
 use crate::{MAX_CORES, serial_println, serial_println_core};
-/// Scheduler - Priority-based, preemptive scheduler with per-core queues
-///
-/// Uses the One-to-One threading model where each process is assigned a kernel thread
-/// that runs on a dedicated CPU core. Each core has its own scheduler queue.
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -35,14 +31,13 @@ pub fn mark_core_idle(core_id: u8) {
     CORE_POOL.lock().mark_available(core_id);
 }
 
-// Saved kernel RSP for each core, set just before jump_to_userspace.
-// sys_exit restores this to unwind back into run_on_core_loop.
-// Must be in writable memory (.data / static mut) — the asm writes via raw ptr.
+// Saved kernel RSP for each core, set just before jump_to_userspace
+// restored in return_to_scheduler this to unwind back into run_on_core_loop
 static mut KERNEL_RSP_ON_CORE: [u64; MAX_CORES as usize] = [0u64; MAX_CORES as usize];
 
-/// Called by sys_exit to resume the scheduler loop on the current core.
+/// Called by sys_exit syscall handler to resume the scheduler loop on the current core
 /// Restores the kernel RSP saved before jump_to_userspace and returns into
-/// run_on_core_loop at the instruction after the save point.
+/// run_on_core_loop at the instruction after the save point
 pub fn return_to_scheduler() -> ! {
     let core_id = get_current_core_id();
     let kernel_rsp = unsafe { KERNEL_RSP_ON_CORE[core_id as usize] };
@@ -106,13 +101,13 @@ impl CoreScheduler {
     /// Dequeue next thread to run (picks highest priority ready thread)
     pub fn dequeue_next(&mut self) -> (PID, u8) {
         // Search from highest to lowest priority
-        serial_println_core!("Scheduler: Dequeuing next thread on core {}", self.core_id);
+        // serial_println_core!("Scheduler: Dequeuing next thread on core {}", self.core_id);
         for (priority, queue) in self.ready_queues.iter_mut().enumerate().rev() {
-            serial_println_core!(
-                "Scheduler: Checking priority {} queue (len={})",
-                priority,
-                queue.len()
-            );
+            // serial_println_core!(
+            //     "Scheduler: Checking priority {} queue (len={})",
+            //     priority,
+            //     queue.len()
+            // );
             if queue.len() > 0 {
                 return (queue.pop_front(), priority as u8);
             }
@@ -278,9 +273,7 @@ impl Scheduler {
 }
 
 pub fn run_on_core_loop(core_id: u8) -> ! {
-    // Switch to a dedicated per-core scheduler stack before doing anything
-    // that touches the stack. The Limine AP boot stack is small and not
-    // guaranteed to have enough space for the scheduler loop's call depth.
+    // Switch to a dedicated per-core scheduler stack
     serial_println_core!(
         "run_on_core_loop: switching to per-core scheduler stack (core_id={})",
         core_id
@@ -335,9 +328,6 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
         if let Some((rip, rsp, cr3)) = exec_ctx {
             set_current_process_for_core(core_id, pid);
 
-            // Save kernel RSP into the per-core slot before the asm block.
-            // We do this in Rust so we can use serial_println_core safely,
-            // and so the slot write is clearly on the kernel page table.
             let kernel_rsp_slot = unsafe { &mut KERNEL_RSP_ON_CORE[core_id as usize] as *mut u64 };
             let rsp_value: u64;
             unsafe {
@@ -348,43 +338,34 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
                 );
             }
             serial_println_core!("Saving kernel RSP for core {}: {:#x}", core_id, rsp_value);
-            unsafe { *kernel_rsp_slot = rsp_value; }
+            unsafe {
+                *kernel_rsp_slot = rsp_value;
+            }
 
             x86_64::instructions::interrupts::enable();
 
-            // Critical asm block: push return label address, save RSP into
-            // the kernel_rsp_slot, switch CR3, jump to userspace.
-            // All in one asm! block so the forward label "2:" is in scope.
-            //
-            // Register assignments (all pinned to avoid compiler aliasing):
-            //   rax  - label address from lea (clobbered, declared lateout)
-            //   r8   - kernel_rsp_slot pointer
-            //   rcx  - cr3 physical address
-            //   rdi  - userspace entry point (arg1 of jump_to_userspace)
-            //   rsi  - userspace stack pointer (arg2 of jump_to_userspace)
-            //
-            // Order matters:
-            //   1. lea + push BEFORE slot write (push adjusts RSP first)
-            //   2. slot write BEFORE mov cr3 (slot is kernel memory, not in user PML4)
-            //   3. mov cr3 BEFORE jmp (switches page table)
+            // push return label address, switch CR3, jump to userspace
+            // rax - return label address from lea
+            // r8 - kernel_rsp_slot pointer
+            // rcx - cr3 physical address
+            // rdi - userspace entry point
+            // rsi - userspace stack pointer
             unsafe {
                 core::arch::asm!(
                     // compute the address of return label "2:" into rax
                     "lea rax, [rip + 2f]",
-                    // push it — now RSP points at this return address
                     "push rax",
-                    // save RSP into the per-core slot (r8 holds the slot ptr)
-                    // this must happen while the kernel page table is still active
+                    // save RSP into the per-core slot while the kernel page table is still active
                     "mov [r8], rsp",
                     // switch to the user page table
                     "mov cr3, rcx",
-                    // jump into jump_to_userspace (iretq inside, noreturn normally)
+                    // jump into jump_to_userspace (iretq inside)
                     "jmp {jump}",
                     // return_to_scheduler() does: mov rsp, [slot]; ret
                     // that ret pops the label address pushed above and lands here
                     "2:",
                     in("r8") kernel_rsp_slot,
-                    in("rcx") cr3,
+                    in("rcx") cr3, // careful not to shadow rcx
                     in("rdi") rip,
                     in("rsi") rsp,
                     jump = sym jump_to_userspace,
@@ -394,19 +375,13 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
             }
         }
 
-        serial_println_core!(
-            "Core {}: Returned from userspace PID {}",
-            core_id,
-            pid
-        );
-        // Process exited or was not found. Clean up for this iteration.
-        // Disable interrupts immediately — we're back on the kernel stack and
-        // about to acquire locks. The timer handler also acquires SCHEDULER,
-        // so leaving interrupts on here causes a deadlock.
+        serial_println_core!("Core {}: Returned from userspace PID {}", core_id, pid);
+
+        // Process exited or was not found, clean up
         x86_64::instructions::interrupts::disable();
         mark_core_idle(core_id);
 
-        // Re-enqueue only if the process is still alive (not terminated by sys_exit).
+        // Re-enqueue only if the process is still alive
         let is_terminated = {
             let pm = PROCESS_MANAGER.lock();
             pm.get_process(pid)

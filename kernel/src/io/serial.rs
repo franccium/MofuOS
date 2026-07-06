@@ -30,8 +30,8 @@ pub fn _print(args: ::core::fmt::Arguments) {
     });
 }
 
-/// Write to COM2.
-/// Called from the sys_write syscall handler for fd=1 and fd=2.
+/// Write to COM2
+/// Called from the sys_write syscall handler for fd=1 and fd=2
 #[doc(hidden)]
 pub fn _print2(args: ::core::fmt::Arguments) {
     use core::fmt::Write;
@@ -45,7 +45,7 @@ pub fn _print2(args: ::core::fmt::Arguments) {
     });
 }
 
-/// Prints to the host through the serial interface.
+/// Prints to the host through the serial interface
 #[macro_export]
 macro_rules! serial_print {
     ($($arg:tt)*) => {
@@ -60,7 +60,7 @@ macro_rules! serial2_print {
     };
 }
 
-/// Prints to the host through the serial interface, appending a newline.
+/// Prints to the host through the serial interface, appending a newline
 #[macro_export]
 macro_rules! serial_println {
     () => ($crate::serial_print!("\n"));
@@ -70,7 +70,7 @@ macro_rules! serial_println {
 }
 
 /// Prints to the host through the serial interface with core ID and
-/// microsecond timestamp prepended, appending a newline.
+/// microsecond timestamp prepended, appending a newline
 #[macro_export]
 macro_rules! serial_println_core {
     () => (

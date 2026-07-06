@@ -123,8 +123,8 @@ impl UserMemoryManager {
         Some(PhysAddr::new(pt_entry.addr().as_u64() + page_offset))
     }
 
-    /// Read the PageTableFlags of an already-mapped page by walking the page
-    /// table manually.  Returns empty flags if the page is not mapped.
+    /// Read the PageTableFlags of an already-mapped page by walking the page table manually
+    /// Returns empty flags if the page is not mapped
     fn get_page_flags(&self, pml4_table_phys: PhysAddr, page: Page<Size4KiB>) -> PageTableFlags {
         let vaddr = page.start_address();
         let pml4_virt = VirtAddr::new(pml4_table_phys.as_u64() + self.phys_offset);

@@ -33,11 +33,9 @@ const MP_FLAG_NO_X2APIC: u64 = 0x0;
 #[unsafe(link_section = ".requests_start_marker")]
 static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 
-/// Sets the base revision to the latest revision supported by the crate.
-/// See specification for further info.
-/// Be sure to mark all limine requests with #[used], otherwise they may be removed by the compiler.
+/// Be sure to mark all limine requests with #[used], otherwise they may be removed by the compiler
 #[used]
-// The .requests section allows limine to find the requests faster and more safely.
+
 #[unsafe(link_section = ".requests")]
 static BASE_REVISION: BaseRevision = BaseRevision::with_revision(5u64);
 
