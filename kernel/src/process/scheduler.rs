@@ -351,6 +351,11 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
 
 
             x86_64::instructions::interrupts::enable();
+
+            let rip_value = x86_64::registers::read_rip();
+            serial_println_core!("Current RIP before jump: {:#x}", rip_value.as_u64());
+            
+
             // All five steps must be in one asm block so the forward label "2:"
             // is visible to the lea. The CR3 write is inside the block so the
             // RSP save happens while the kernel page table is still active.
