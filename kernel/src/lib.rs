@@ -7,16 +7,18 @@
 
 use static_assertions::const_assert;
 
+pub const USE_PING_PROGRAM: bool = false;
+pub const USE_TEST_PROGRAM: bool = false;
+
 pub const HHDM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
-pub const MAX_CORES: u8 = 16;
-/// Number of Application Processor (AP) cores — all cores except the BSP (core 0)
+pub const MAX_CORES: u8 = 4;
 pub const AP_CORE_COUNT: u8 = MAX_CORES - 1;
-const_assert!(MAX_CORES <= 64); // NOTE: Hard limit to 64 cores for the core pool availability 64-bit long bitmap
+// NOTE: Hard limit to 64 cores for the core pool availability 64-bit long bitmap
+const_assert!(MAX_CORES <= 64);
 
 /// Each AP increments this just before entering run_on_core_loop.
 /// BSP spins on this reaching the AP count before launching userspace processes.
-pub static AP_CORES_READY: core::sync::atomic::AtomicU8 =
-    core::sync::atomic::AtomicU8::new(0);
+pub static AP_CORES_READY: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 pub mod memory;
 extern crate alloc;

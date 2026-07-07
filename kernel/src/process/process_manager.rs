@@ -175,8 +175,6 @@ impl ProcessManager {
         Ok(new_pid)
     }
 
-    /// Create a process from ELF data, integrate with scheduler and core pool
-    /// This is the main API for creating user processes from ELF binaries
     pub fn create_process_from_elf(
         &mut self,
         parent_pid: usize,
@@ -347,7 +345,6 @@ impl ProcessManager {
         Ok(())
     }
 
-    /// Clean up dead processes (garbage collection)
     pub fn cleanup_dead(&mut self) {
         self.processes
             .retain(|p| p.state != ProcessState::Terminated);
@@ -373,7 +370,6 @@ impl ProcessManager {
             .ok_or(ProcessError::ProcessNotFound)
     }
 
-    /// Get the CPU core ID assigned to a process
     pub fn get_process_core(&self, pid: usize) -> Option<u8> {
         self.thread_groups
             .iter()
@@ -382,7 +378,6 @@ impl ProcessManager {
             .and_then(|thread| thread.core_id)
     }
 
-    /// Get reference to a kernel thread
     pub fn get_kernel_thread(&self, pid: usize) -> Option<&KernelThread> {
         self.thread_groups
             .iter()

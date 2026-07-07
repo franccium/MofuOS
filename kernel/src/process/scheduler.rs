@@ -81,7 +81,6 @@ impl CoreScheduler {
         }
     }
 
-    /// Enqueue a thread in the appropriate priority queue
     pub fn enqueue_ready(&mut self, pid: PID, priority: u8) {
         debug_assert!(
             priority <= MAX_PRIORITY as u8,
@@ -98,10 +97,7 @@ impl CoreScheduler {
         self.ready_queues[queue_idx].push_back(pid);
     }
 
-    /// Dequeue next thread to run (picks highest priority ready thread)
     pub fn dequeue_next(&mut self) -> (PID, u8) {
-        // Search from highest to lowest priority
-        // serial_println_core!("Scheduler: Dequeuing next thread on core {}", self.core_id);
         for (priority, queue) in self.ready_queues.iter_mut().enumerate().rev() {
             // serial_println_core!(
             //     "Scheduler: Checking priority {} queue (len={})",
@@ -115,7 +111,6 @@ impl CoreScheduler {
         (INVALID_PID, 0)
     }
 
-    /// Move thread to blocked queue
     pub fn block_thread(&mut self, pid: PID) {
         if self.current_thread == pid {
             self.current_thread = INVALID_PID;
@@ -123,9 +118,7 @@ impl CoreScheduler {
         self.blocked_queue.push_back(pid);
     }
 
-    /// Try to move a blocked thread back to ready queue
     pub fn unblock_thread(&mut self, pid: PID, priority: u8) -> bool {
-        // Check if thread is in blocked queue
         let mut found = false;
         let mut new_blocked = Dequeue::new();
         while self.blocked_queue.len() > 0 {

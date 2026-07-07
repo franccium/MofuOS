@@ -1,9 +1,9 @@
 use alloc::format;
 use alloc::string::String;
 
-use crate::process::elf_loader::{PING_ELF, TEST_ELF};
+use crate::process::elf_loader::{PING_ELF, SMALL_ELF, TEST_ELF};
 use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
-use crate::serial_println;
+use crate::{USE_PING_PROGRAM, USE_TEST_PROGRAM, serial_println};
 
 pub fn create_init_process() {
     serial_println!("Creating init process from ELF");
@@ -60,16 +60,23 @@ pub fn create_userspace_process(
 pub fn create_userspace_processes() {
     serial_println!("Creating initial userspace processes");
 
-    // Launch two ping instances on core 1. They share the same ELF bytes but
-    // receive independent address spaces and stacks, so they run as fully
-    // separate processes. The scheduler on core 1 runs them round-robin:
-    // each calls sys_write a few times then sys_exit, which returns to the
-    // scheduler loop and re-enqueues the other.
-    if let Ok(pid) = create_userspace_process(&PING_ELF, "ping1", 0, 4) {
-        serial_println!("Created ping1 (PID {})", pid);
-    }
-    if let Ok(pid) = create_userspace_process(&PING_ELF, "ping2", 0, 4) {
-        serial_println!("Created ping2 (PID {})", pid);
+    if USE_PING_PROGRAM {
+        if let Ok(pid) = create_userspace_process(&PING_ELF, "ping1", 0, 4) {
+            serial_println!("Created ping1 (PID {})", pid);
+        }
+        if let Ok(pid) = create_userspace_process(&PING_ELF, "ping2", 0, 4) {
+            serial_println!("Created ping2 (PID {})", pid);
+        }
+    } else {
+        if USE_TEST_PROGRAM {
+            if let Ok(pid) = create_userspace_process(&TEST_ELF, "proc1", 0, 5) {
+                serial_println!("Created proc1 (PID {})", pid);
+            }
+        } else {
+            if let Ok(pid) = create_userspace_process(&SMALL_ELF, "proc1", 0, 5) {
+                serial_println!("Created proc1 (PID {})", pid);
+            }
+        }
     }
 
     serial_println!("Process creation complete");

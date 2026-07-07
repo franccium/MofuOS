@@ -314,7 +314,6 @@ use core::arch::asm;
 
 /// Save the current CPU context into a thread's ExecutionContext
 pub unsafe fn save_thread_context(thread: &mut KernelThread) {
-    // Read current registers and save to thread context
     asm!(
         "mov {}, rsp",
         "mov {}, rbp",
@@ -353,7 +352,7 @@ pub unsafe fn save_thread_context(thread: &mut KernelThread) {
 
 /// Restore a thread's ExecutionContext to the CPU
 pub unsafe fn restore_thread_context(thread: &KernelThread) -> ! {
-    // Switch page table (CR3) if this is a user process
+    // Switch page table if this is a user process
     let cr3 = thread.context.page_table_base_phys;
     if cr3 != 0 {
         asm!(
@@ -376,7 +375,7 @@ pub unsafe fn restore_thread_context(thread: &KernelThread) -> ! {
         // Push return address and flags, then IRETQ or RET
         "push {}",
         "push {}",
-        "add rsp, 8",  // Skip the push for RIP alignment
+        "add rsp, 8", // Skip the push for RIP alignment
         "ret",
         in(reg) thread.context.rsp,
         in(reg) thread.context.rbp,
@@ -393,7 +392,6 @@ pub unsafe fn restore_thread_context(thread: &KernelThread) -> ! {
     unreachable!();
 }
 
-/// Switch between two threads (save current, restore next)
 pub unsafe fn switch_threads(current: &mut KernelThread, next: &KernelThread) {
     // Save current thread's context
     save_thread_context(current);
@@ -401,6 +399,6 @@ pub unsafe fn switch_threads(current: &mut KernelThread, next: &KernelThread) {
     // Update thread states
     current.state = ThreadState::Ready;
 
-    // Restore next thread's context (this will jump to the next thread)
+    // Restore next thread's context
     restore_thread_context(next);
 }

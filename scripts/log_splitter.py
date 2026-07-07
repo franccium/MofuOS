@@ -19,7 +19,7 @@ import threading
 from pathlib import Path
 
 # Keep in sync with kernel MAX_CORES (lib.rs).
-MAX_CORES = 16
+MAX_CORES = 4
 
 LOGS_ROOT = Path(__file__).parent.parent / "logs"
 

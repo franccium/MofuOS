@@ -22,7 +22,8 @@ pub struct KernelThread {
     pub state: ThreadState,
     pub exit_code: Option<i32>,
     pub context: ExecutionContext,
-    pub last_core_id: Option<u8>, // cache warmth tracker
+    /// cache warmth tracker
+    pub last_core_id: Option<u8>,
     /// Thread name for debugging
     pub name: String,
 }
@@ -57,12 +58,10 @@ impl KernelThread {
         self.core_id = None;
     }
 
-    /// Check if this thread is ready to run (has a core assigned and is in Ready state)
     pub fn is_runnable(&self) -> bool {
         self.core_id.is_some() && self.state == ThreadState::Ready
     }
 
-    /// Terminate this thread with an exit code
     pub fn terminate(&mut self, exit_code: i32) {
         self.state = ThreadState::Terminated;
         self.exit_code = Some(exit_code);
@@ -71,9 +70,7 @@ impl KernelThread {
 
 /// Thread group manages all threads for a single process
 pub struct ThreadGroup {
-    /// Primary thread ID (PID)
     pub pid: PID,
-    /// All kernel threads (only one initially for single-threaded processes)
     pub threads: Vec<KernelThread>,
 }
 
@@ -84,7 +81,6 @@ impl ThreadGroup {
         Self { pid, threads }
     }
 
-    /// Get mutable reference to main thread (first thread in process)
     pub fn main_thread_mut(&mut self) -> Option<&mut KernelThread> {
         if self.threads.len() > 0 {
             Some(&mut self.threads.as_mut_slice()[0])
@@ -93,7 +89,6 @@ impl ThreadGroup {
         }
     }
 
-    /// Get immutable reference to main thread
     pub fn main_thread(&self) -> Option<&KernelThread> {
         if self.threads.len() > 0 {
             Some(&self.threads.as_slice()[0])
@@ -102,7 +97,6 @@ impl ThreadGroup {
         }
     }
 
-    /// Count of runnable threads (those with core assigned and in Ready state)
     pub fn runnable_count(&self) -> usize {
         self.threads
             .as_slice()
@@ -111,7 +105,6 @@ impl ThreadGroup {
             .count()
     }
 
-    /// All threads have terminated
     pub fn all_terminated(&self) -> bool {
         self.threads
             .as_slice()
