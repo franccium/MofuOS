@@ -1,9 +1,9 @@
 use alloc::format;
 use alloc::string::String;
 
-use crate::process::elf_loader::{PING_ELF, SMALL_ELF, TEST_ELF};
+use crate::process::elf_loader::{PING_ELF, RUST_FIRST_ELF, SMALL_ELF, TEST_ELF};
 use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
-use crate::{USE_PING_PROGRAM, USE_TEST_PROGRAM, serial_println};
+use crate::{USE_PING_PROGRAM, USE_RUST_USER_PROGRAMS, USE_TEST_PROGRAM, serial_println};
 
 pub fn create_init_process() {
     serial_println!("Creating init process from ELF");
@@ -71,6 +71,10 @@ pub fn create_userspace_processes() {
         if USE_TEST_PROGRAM {
             if let Ok(pid) = create_userspace_process(&TEST_ELF, "proc1", 0, 5) {
                 serial_println!("Created proc1 (PID {})", pid);
+            }
+        } else if USE_RUST_USER_PROGRAMS {
+            if let Ok(pid) = create_userspace_process(&RUST_FIRST_ELF, "proc1", 0, 5) {
+                serial_println!("Created rust_first (PID {})", pid);
             }
         } else {
             if let Ok(pid) = create_userspace_process(&SMALL_ELF, "proc1", 0, 5) {

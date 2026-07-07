@@ -1,0 +1,14 @@
+[workspace]
+
+[package]
+name = "rustspace"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rustspace"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rust_first"
+path = "src/bin/rust_first.rs"

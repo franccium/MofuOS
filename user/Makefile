@@ -36,7 +36,13 @@ libc.a: $(LIBC_OBJS)
 # Build user programs
 PROGRAMS = programs/first/first programs/test/test programs/ping/ping programs/ping_yield/ping_yield
 
-all: $(PROGRAMS)
+RUST_PROGRAMS = rustspace/target/x86_64-user/debug/rust_first
+
+all: $(PROGRAMS) rust-programs
+
+.PHONY: rust-programs
+rust-programs:
+	cd rustspace && cargo +nightly build -Z build-std=core -Z json-target-spec --target x86_64-user.json 2>&1
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -58,5 +64,6 @@ programs/ping_yield/ping_yield: programs/ping_yield/ping_yield.o crt0.o libc.a
 
 clean:
 	rm -f crt0.o libc/*.o libc.a programs/*/*.o $(PROGRAMS)
+	cd rustspace && cargo clean
 
 .PHONY: all clean
