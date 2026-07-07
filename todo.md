@@ -15,8 +15,12 @@ fun todo:
 - thread context switching, two processes running on 1 core
 - upstream bigos compositor and terminal (no not yet, we will do userspace shell, doing it kernel mode now would couple things i dont want coupled and that would be problematic in the future) to this
 - CreateWindow syscall handling
+    writing into that window
+        direct memory access?
+        a graphics api, and batch everything somehow, give the OS a finished state in some format that it will parse and draw?
 - port the event train i did for bigos and let userspace read input from a mapped RO memory no-syscall
     make the game.rs react to input and exit on Q pressed
+- enable sse builds?
 
 - stdin/stout routing for userspace
     C programs compiled into ELF to be able to get from stdin and output to stdout. What would be the stdin stdout even - another userspace program that functions as a shell?

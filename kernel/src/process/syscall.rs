@@ -349,11 +349,15 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let height = frame.arg2 as u32;
             let x = frame.arg3 as i32;
             let y = frame.arg4 as i32;
-            let (window_id, _buffer) = crate::graphics::compositor::get_compositor()
-                .create_window(width, height, x, y);
+            let (window_id, _buffer) =
+                crate::graphics::compositor::get_compositor().create_window(width, height, x, y);
             serial_println_core!(
                 "sys_create_window: {}x{} at ({},{}) -> id={}",
-                width, height, x, y, window_id
+                width,
+                height,
+                x,
+                y,
+                window_id
             );
             window_id as u64
         }
@@ -398,6 +402,54 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             }
 
             scheduler::return_to_scheduler();
+        }
+        SyscallNumber::Allocate => {
+            let size = frame.arg1 as usize;
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+
+            let old_heap_end = {
+                let pm = PROCESS_MANAGER.lock();
+                match pm.get_process(pid) {
+                    Ok(proc) => proc.memory_layout.heap_end,
+                    Err(_) => {
+                        serial_println_core!("sys_allocate: pid={} not found", pid);
+                        return u64::MAX;
+                    }
+                }
+            };
+
+            let new_heap_end = old_heap_end + size as u64;
+            let umm = crate::memory::get_user_mem_mgr();
+            let mut fa = crate::memory::get_frame_allocator();
+
+            let result = {
+                let mut pm = PROCESS_MANAGER.lock();
+                match pm.get_process_mut(pid) {
+                    Ok(proc) => match proc.memory_layout.grow_heap(new_heap_end, umm, &mut fa) {
+                        Ok(_) => {
+                            serial_println_core!(
+                                "sys_allocate: pid={} size={} -> ptr={:#x}",
+                                pid,
+                                size,
+                                old_heap_end.as_u64()
+                            );
+                            old_heap_end.as_u64()
+                        }
+                        Err(e) => {
+                            serial_println_core!(
+                                "sys_allocate: pid={} size={} grow_heap failed: {:?}",
+                                pid,
+                                size,
+                                e
+                            );
+                            u64::MAX
+                        }
+                    },
+                    Err(_) => u64::MAX,
+                }
+            };
+            result
         }
         _ => u64::MAX,
     }

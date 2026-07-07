@@ -3,7 +3,9 @@ use alloc::string::String;
 
 use crate::process::elf_loader::{GAME_ELF, PING_ELF, RUST_FIRST_ELF, SMALL_ELF, TEST_ELF};
 use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
-use crate::{USE_GAME_PROGRAM, USE_PING_PROGRAM, USE_RUST_USER_PROGRAMS, USE_TEST_PROGRAM, serial_println};
+use crate::{
+    USE_GAME_PROGRAM, USE_PING_PROGRAM, USE_RUST_USER_PROGRAMS, USE_TEST_PROGRAM, serial_println,
+};
 
 pub fn create_init_process() {
     serial_println!("Creating init process from ELF");

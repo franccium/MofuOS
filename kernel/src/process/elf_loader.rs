@@ -5,7 +5,8 @@ use elf::ElfBytes;
 pub const SMALL_ELF: &[u8] = include_bytes!("../../../user/programs/first/first");
 pub const TEST_ELF: &[u8] = include_bytes!("../../../user/programs/test/test");
 pub const PING_ELF: &[u8] = include_bytes!("../../../user/programs/ping/ping");
-pub const RUST_FIRST_ELF: &[u8] = include_bytes!("../../../user/rustspace/target/x86_64-user/debug/rust_first");
+pub const RUST_FIRST_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/rust_first");
 pub const GAME_ELF: &[u8] = include_bytes!("../../../user/rustspace/target/x86_64-user/debug/game");
 
 #[derive(Debug)]

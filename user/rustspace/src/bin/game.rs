@@ -1,6 +1,10 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+extern crate rustspace;
+
+use alloc::format;
 use core::arch::global_asm;
 
 global_asm!(
@@ -11,46 +15,23 @@ global_asm!(
     "    ud2",
 );
 
-const MSG_CREATED: &[u8] = b"game: window created, id=";
-const MSG_NEWLINE: &[u8] = b"\n";
-const MSG_FAILED: &[u8] = b"game: create_window failed\n";
-
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_main() -> ! {
-    unsafe {
-        let window_id = rustspace::sys_create_window(320, 240, 100, 100);
+    let window_id = unsafe { rustspace::sys_create_window(320, 240, 100, 100) };
 
-        if window_id == u32::MAX {
-            rustspace::sys_write(1, MSG_FAILED.as_ptr(), MSG_FAILED.len());
-        } else {
-            rustspace::sys_write(1, MSG_CREATED.as_ptr(), MSG_CREATED.len());
-            write_u32(window_id);
-            rustspace::sys_write(1, MSG_NEWLINE.as_ptr(), MSG_NEWLINE.len());
-        }
-
-        rustspace::sys_exit(0);
-    }
-}
-
-unsafe fn write_u32(mut n: u32) {
-    let mut buf = [0u8; 10];
-    let mut pos = 10usize;
-
-    if n == 0 {
-        pos -= 1;
-        buf[pos] = b'0';
+    if window_id == u32::MAX {
+        rustspace::println!("game: create_window failed");
     } else {
-        while n > 0 {
-            pos -= 1;
-            buf[pos] = b'0' + (n % 10) as u8;
-            n /= 10;
-        }
+        let msg = format!("game: window created, id={}", window_id);
+        rustspace::println!("{}", msg);
+        rustspace::println!("formatted float: {:.9}", 1.61803398875f64);
     }
 
-    unsafe { rustspace::sys_write(1, buf.as_ptr().add(pos), 10 - pos) };
+    unsafe { rustspace::sys_exit(0) }
 }
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
+    rustspace::println!("game: panic");
     unsafe { rustspace::sys_exit(1) }
 }
