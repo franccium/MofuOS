@@ -258,6 +258,9 @@ impl<'a> WindowPresentBuffer<'a> {
     }
 }
 
+unsafe impl Send for WindowBuffer {}
+unsafe impl Sync for WindowBuffer {}
+
 impl Drop for WindowBuffer {
     fn drop(&mut self) {
         let pixel_count = (self.width * self.height) as usize;

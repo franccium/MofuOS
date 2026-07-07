@@ -8,7 +8,17 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use embedded_graphics::pixelcolor::Rgb888;
-use spin::{Mutex, RwLock};
+use spin::{Mutex, MutexGuard, Once, RwLock};
+
+static COMPOSITOR: Once<Mutex<Compositor>> = Once::new();
+
+pub fn init_compositor(width: u32, height: u32) {
+    COMPOSITOR.call_once(|| Mutex::new(Compositor::new(width, height)));
+}
+
+pub fn get_compositor() -> MutexGuard<'static, Compositor> {
+    COMPOSITOR.get().expect("compositor not initialized").lock()
+}
 
 const NORMALIZE_Z_INDEX_THRESHOLD: u8 = 250;
 

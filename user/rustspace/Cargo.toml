@@ -12,3 +12,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "rust_first"
 path = "src/bin/rust_first.rs"
+
+[[bin]]
+name = "game"
+path = "src/bin/game.rs"

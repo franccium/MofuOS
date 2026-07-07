@@ -80,7 +80,7 @@ pub enum SystemCall {
     },
 }
 
-#[repr(usize)]
+#[repr(u64)]
 pub enum SyscallNumber {
     CreateProcess = 0,
     TerminateProcess = 1,
@@ -93,7 +93,9 @@ pub enum SyscallNumber {
     LoadFile = 8,
     UnloadFile = 9,
     CreateWindow = 10,
-    GetProcessInfo = 11,
+    DestroyWindow = 11,
+    GetProcessInfo = 996,
+    GetPID = 997,
     Yield = 998,
     Exit = 999,
 }
@@ -322,8 +324,10 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
     //     frame.arg6,
     // );
 
-    match frame.syscall_num {
-        2 => {
+    let syscall = unsafe { core::mem::transmute::<u64, SyscallNumber>(frame.syscall_num) };
+
+    match syscall {
+        SyscallNumber::Write => {
             let fd = frame.arg1;
             let buf = frame.arg2 as *const u8;
             let count = frame.arg3 as usize;
@@ -340,14 +344,33 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             }
             count as u64
         }
-
-        997 => {
-            // serial_println_core!("997 returning: {}", frame.arg1);
-            frame.arg1
+        SyscallNumber::CreateWindow => {
+            let width = frame.arg1 as u32;
+            let height = frame.arg2 as u32;
+            let x = frame.arg3 as i32;
+            let y = frame.arg4 as i32;
+            let (window_id, _buffer) = crate::graphics::compositor::get_compositor()
+                .create_window(width, height, x, y);
+            serial_println_core!(
+                "sys_create_window: {}x{} at ({},{}) -> id={}",
+                width, height, x, y, window_id
+            );
+            window_id as u64
+        }
+        SyscallNumber::DestroyWindow => {
+            let window_id = frame.arg1 as u32;
+            crate::graphics::compositor::get_compositor().destroy_window(window_id);
+            serial_println_core!("sys_destroy_window: id={}", window_id);
+            0
+        }
+        SyscallNumber::GetPID => {
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+            pid as u64
         }
         // Voluntarily yield the CPU back to the scheduler without terminating
         // Save the userspace return address and stack into the process's execution_context
-        998 => {
+        SyscallNumber::Yield => {
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
             serial_println_core!("sys_yield: PID {} yielding", pid);
@@ -363,7 +386,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
 
             scheduler::return_to_scheduler();
         }
-        999 => {
+        SyscallNumber::Exit => {
             let exit_code = frame.arg1;
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);

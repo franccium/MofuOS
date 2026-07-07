@@ -11,7 +11,7 @@ pub const SYS_REMOVE_FILE: u64 = 7;
 pub const SYS_LOAD_FILE: u64 = 8;
 pub const SYS_UNLOAD_FILE: u64 = 9;
 pub const SYS_CREATE_WINDOW: u64 = 10;
-pub const SYS_GET_PROCESS_INFO: u64 = 11;
+pub const SYS_DESTROY_WINDOW: u64 = 11;
 pub const SYS_YIELD: u64 = 998;
 pub const SYS_EXIT: u64 = 999;
 
@@ -69,4 +69,24 @@ pub unsafe fn sys_yield() {
 #[inline(always)]
 pub unsafe fn sys_echo(val: u64) -> u64 {
     unsafe { syscall1(SYS_ECHO, val) }
+}
+
+#[inline(always)]
+pub unsafe fn sys_create_window(width: u32, height: u32, x: i32, y: i32) -> u32 {
+    unsafe {
+        syscall6(
+            SYS_CREATE_WINDOW,
+            width as u64,
+            height as u64,
+            x as u64,
+            y as u64,
+            0,
+            0,
+        ) as u32
+    }
+}
+
+#[inline(always)]
+pub unsafe fn sys_destroy_window(window_id: u32) {
+    unsafe { syscall1(SYS_DESTROY_WINDOW, window_id as u64) };
 }

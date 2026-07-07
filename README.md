@@ -1,5 +1,7 @@
 # MofuOS
 
+my own frankly useless operating system
+
 ## Running
 
 ### Prerequisites
