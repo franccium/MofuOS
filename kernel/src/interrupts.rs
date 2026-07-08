@@ -962,63 +962,19 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
         let next_deadline = tsc_read() + tsc_cycles_per_tick();
         msr_write(MSR_IA32_TSC_DEADLINE, next_deadline);
 
-        //TODO: why is the user_data_selector=0x1b having its privilige level cleared
-        //TODO: and thats only if i do a syscall before a timer interrupt fires during userspace execution
-        //TODO: SS=0x18 for some reason in the timer handler's iretq
-        // if stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3 {
-        //     serial_println_core!(
-        //         "timer frame: RIP={:#x} CS={:#x} RSP={:#x} SS={:#x}",
-        //         stack_frame.instruction_pointer.as_u64(),
-        //         stack_frame.code_segment.0,
-        //         stack_frame.stack_pointer.as_u64(),
-        //         stack_frame.stack_segment.0,
-        //     );
-        // }
-                if stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3 {
- 
-                    serial_println_core!("=== TIMER IRET FRAME ===");
-                serial_println_core!(
-                    "RIP:    {:#018x}",
-                    stack_frame.instruction_pointer.as_u64()
-                );
-                serial_println_core!(
-                    "CS:     {:#x} (RPL {:?})",
-                    stack_frame.code_segment.0,
-                    stack_frame.code_segment.rpl()
-                );
-                serial_println_core!(
-                    "RFLAGS: {:#018x}",
-                    stack_frame.cpu_flags.bits()
-                );
-                serial_println_core!(
-                    "RSP:    {:#018x}",
-                    stack_frame.stack_pointer.as_u64()
-                );
-                serial_println_core!(
-                    "SS:     {:#x} (RPL {:?})",
-                    stack_frame.stack_segment.0,
-                    stack_frame.stack_segment.rpl()
-                );
-                serial_println_core!("========================");
-        }
+        let in_userspace = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
 
-        // Check if a userspace process is running on this core.
-        // stack_frame.code_segment RPL == 3 means we interrupted userspace.
-        let preempt =
-            PREEMPTION_ENABLED && stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
-
-        // serial_println_core!(
-        //     "Core {}: Timer interrupt, preempting userspace?: {}",
-        //     core_id,
-        //     preempt
-        // );
-
-        if preempt {
+        if PREEMPTION_ENABLED && in_userspace {
             let pid = crate::process::scheduler::get_current_process_for_core(core_id);
-            serial_println_core!("Core {}: Preempting process PID {}", core_id, pid);
-            if pid != crate::process::process::INVALID_PID {
-                // Save the interrupted userspace context into the process so
-                // the scheduler can resume it via iretq when it runs next.
+
+            // Only preempt if another process is waiting. If the queue is empty,
+            // let the current process keep running (fall through to SS patch + iretq).
+            let has_waiting = {
+                let sched = crate::process::scheduler::SCHEDULER.lock();
+                sched.has_ready_threads_on_core(core_id)
+            };
+
+            if has_waiting && pid != crate::process::process::INVALID_PID {
                 {
                     let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
                     if let Ok(proc) = pm.get_process_mut(pid) {
@@ -1027,34 +983,23 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
                         proc.execution_context.rflags = stack_frame.cpu_flags.bits();
                     }
                 }
-
-                // EOI must be sent before return_to_scheduler() because that
-                // call never returns here, it unwinds directly to the
-                // scheduler loop, skipping the compiler-generated iretq.
+                // EOI before return_to_scheduler: unwinds directly to scheduler
+                // loop, skipping the compiler-generated iretq.
                 interrupt_over();
-
                 crate::process::scheduler::return_to_scheduler();
             }
         }
 
-        interrupt_over();
-
-        if stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3 {
-            //TODO: why is the user_data_selector=0x1b having its privilige level cleared
-            //TODO: and thats only if i do a syscall before a timer interrupt fires during userspace execution
-            //TODO: SS=0x18 for some reason in the timer handler's iretq
-            //TODO: this is a hack to wa this
-            unsafe {
-                // jump_to_userspace(
-                //     stack_frame.instruction_pointer.as_u64(),
-                //     stack_frame.stack_pointer.as_u64(),
-                //     stack_frame.cpu_flags.bits(),
-                //     core_id,
-                // );
-                let ss_slot = core::ptr::addr_of!(*stack_frame).cast::<u64>() as *mut u64;
-                unsafe { ss_slot.add(4).write_volatile(0x1b) };
-            }
+        if in_userspace {
+            // Intel sysretq sets SS = STAR[63:48]+8 without ORing RPL=3, leaving
+            // SS=0x18 (RPL=0) in the running user process. The compiler-generated
+            // iretq back to Ring3 GPFs if SS RPL != 3. Patch SS to 0x1b.
+            // CPU Ring3 interrupt frame layout: RIP, CS, RFLAGS, RSP, SS (5 x u64).
+            let ss_slot = core::ptr::addr_of!(*stack_frame) as *mut u64;
+            ss_slot.add(4).write_volatile(0x1b);
         }
+
+        interrupt_over();
     }
 }
 

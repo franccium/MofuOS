@@ -273,6 +273,7 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
         "push rcx", // user RIP
         "push r11", // user RFLAGS
 
+        "push rax",
         "push rdi",
         "push rsi",
         "push rdx",
@@ -300,7 +301,7 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
         "pop rdx",
         "pop rsi",
         "pop rdi",
-
+        "add rsp, 8", // pop rax
         //"add rsp, 7*8",
 
         "pop r11",
@@ -489,7 +490,10 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 match windows.get(window_id as usize) {
                     Some(w) if w.is_visible => alloc::sync::Arc::clone(&w.buffer),
                     _ => {
-                        serial_println_core!("sys_map_window_buffer: window_id={} not found", window_id);
+                        serial_println_core!(
+                            "sys_map_window_buffer: window_id={} not found",
+                            window_id
+                        );
                         return u64::MAX;
                     }
                 }

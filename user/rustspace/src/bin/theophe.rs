@@ -275,7 +275,7 @@ pub extern "C" fn main() -> ! {
 
         terminal.render();
         unsafe { rustspace::sys_present_window(window_id) };
-        unsafe { rustspace::sys_yield() };
+        //unsafe { rustspace::sys_yield() };
 
         frame = frame.wrapping_add(1);
         rustspace::println!("theophe: loop - end");
