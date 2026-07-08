@@ -307,16 +307,6 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
         "pop rcx",
         "pop r15",
 
-        // Restore user SS before sysretq.
-        // SYSCALL does not save/restore SS, so it still holds the kernel data selector.
-        // The timer can fire immediately after sysretq, capturing SS in the interrupt frame.
-        // iretq back to Ring3 requires SS RPL == CS RPL (Ring3), so we must fix it here.
-        // STAR[63:48] = 0x10: sysretq sets CS = 0x10+16|3 = 0x23, SS = 0x10+8|3 = 0x1b.
-        // Use r10: caller-saved arg reg, already consumed at this point.
-        // rax must not be touched here because it carries the syscall return value to userspace.
-        "mov r10d, 0x1b",
-        "mov ss, r10w",
-
         // back to user stack
         "mov rsp, r15",
 
@@ -329,6 +319,13 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 #[unsafe(no_mangle)]
 unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
     let frame = unsafe { &mut *frame };
+
+    // SFMASK masked IF on syscall entry to prevent the timer firing while SS
+    // still holds the kernel selector. Re-enable interrupts now that we are on
+    // the per-core kernel stack so the timer can preempt long-running syscalls.
+    // sysretq will restore RFLAGS from R11 (user RFLAGS, IF=1), so interrupts
+    // stay enabled on return to userspace without any extra work here.
+    x86_64::instructions::interrupts::enable();
 
     // serial_println_core!(
     //     "Syscall: num={}, arg1={:#x}, arg2={:#x}, arg3={:#x}, arg4={:#x}, arg5={:#x}, arg6={:#x}",
@@ -405,6 +402,9 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 }
             }
 
+            // Disable interrupts before unwinding to the scheduler stack.
+            // The timer must not fire between here and return_to_scheduler's ret.
+            x86_64::instructions::interrupts::disable();
             scheduler::return_to_scheduler();
         }
         SyscallNumber::Exit => {
@@ -418,6 +418,8 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 pm.terminate_process(pid, exit_code as i32, false);
             }
 
+            // Disable interrupts before unwinding to the scheduler stack.
+            x86_64::instructions::interrupts::disable();
             scheduler::return_to_scheduler();
         }
         SyscallNumber::Allocate => {
@@ -606,10 +608,17 @@ pub fn init_syscall() {
     //
     // sysretq sets CS = (STAR[63:48] + 16) | 3 = 0x23, SS = (STAR[63:48] + 8) | 3 = 0x1B
     let star_value = (0x10u64 << 48) | (0x08u64 << 32);
+    // SFMASK: mask these RFLAGS bits on syscall entry.
+    // Bit 9 (IF) must be masked so the timer cannot fire mid-syscall while SS
+    // is still the kernel selector. sysretq restores RFLAGS from R11 (saved
+    // user RFLAGS with IF=1), so interrupts re-enable automatically on return
+    // to userspace. We re-enable interrupts manually inside handle_syscall_inner
+    // for preemption of long-running syscalls.
+    let sfmask: u64 = 1 << 9; // mask IF
     unsafe {
         msr_write(0xC0000081, star_value);
         msr_write(0xC0000082, syscall_handler as *const () as u64);
-        msr_write(0xC0000084, 0u64); // no RFLAGS masking
+        msr_write(0xC0000084, sfmask);
     }
 
     serial_println_core!("Syscall MSRs initialized");
