@@ -1051,6 +1051,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
                 //     stack_frame.cpu_flags.bits(),
                 //     core_id,
                 // );
+                let ss_slot = core::ptr::addr_of!(*stack_frame).cast::<u64>() as *mut u64;
+                unsafe { ss_slot.add(4).write_volatile(0x1b) };
             }
         }
     }

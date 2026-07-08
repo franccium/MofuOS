@@ -65,16 +65,16 @@ pub fn create_userspace_process(
 pub fn create_userspace_processes() {
     serial_println!("Creating initial userspace processes");
 
-    // if let Ok(pid) = create_userspace_process(&RUST_FIRST_ELF, "proc1", 0, 5) {
-    //     serial_println!("Created rust_first (PID {})", pid);
-    // }
+    if let Ok(pid) = create_userspace_process(&RUST_FIRST_ELF, "proc1", 0, 5) {
+        serial_println!("Created rust_first (PID {})", pid);
+    }
 
-        if let Ok(pid) = create_userspace_process(&PING_ELF, "ping1", 0, 4) {
-            serial_println!("Created ping1 (PID {})", pid);
-        }
-        if let Ok(pid) = create_userspace_process(&PING_ELF, "ping2", 0, 4) {
-            serial_println!("Created ping2 (PID {})", pid);
-        }
+        // if let Ok(pid) = create_userspace_process(&PING_ELF, "ping1", 0, 4) {
+        //     serial_println!("Created ping1 (PID {})", pid);
+        // }
+        // if let Ok(pid) = create_userspace_process(&PING_ELF, "ping2", 0, 4) {
+        //     serial_println!("Created ping2 (PID {})", pid);
+        // }
 
     // if RUN_THEOPHE {
     //     if let Ok(pid) = create_userspace_process(&THEOPHE_ELF, "theophe", 0, 7) {
