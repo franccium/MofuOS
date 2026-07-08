@@ -200,7 +200,9 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
     }
 
     fn redraw_all(&mut self) {
-        self.clear_screen();
+        //TODO: clear takes a LONG time, compositor has clears figured out
+        // self.clear_screen();
+        rustspace::println!("theophe: redraw_all - begin");
         for i in 0..=self.curr_line_idx {
             if !self.lines[i].is_empty() {
                 let _ = Text::with_text_style(
@@ -251,6 +253,8 @@ pub extern "C" fn main() -> ! {
         pixels
     );
 
+    unsafe { rustspace::syscall1(rustspace::SYS_FOCUS_WINDOW, window_id as u64) };
+
     let surface = unsafe { UserSurface::new(pixels, width, height) };
     let mut terminal = Theophe::new(surface);
 
@@ -266,10 +270,10 @@ pub extern "C" fn main() -> ! {
     let mut frame: u32 = 0;
     loop {
         // Write a frame counter line every 256 frames to show it's alive
-        if frame & 0xFF == 0 {
-            let msg = format!("frame {}", frame);
-            terminal.write_line(&msg);
-        }
+        // if frame & 0xFF == 0 {
+        let msg = format!("frame {}", frame);
+        terminal.write_line(&msg);
+        // }
 
         rustspace::println!("theophe: loop - begin");
 

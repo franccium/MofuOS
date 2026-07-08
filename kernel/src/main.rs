@@ -251,24 +251,24 @@ fn main() -> ! {
         serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
         init_compositor(fb_width as u32, fb_height as u32);
-        let compositor = get_compositor();
-        let (window_id, window_buffer) = compositor.create_window(20, 20, 30, 30);
-        ///let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
-        ///serial_println_core!("Created window with ID: {}", window_id);
-        ///let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
-        ///theophe.write_line("");
-        ///theophe.write_line("  hi");
-        ///theophe.write_line("==========================================================");
-        ///let cpu_info = kernel::util::cpuinfo::get_cpu_info();
-        ///let cpu_info_str = cpu_info.to_pretty_string();
-        ///theophe.write_str(&cpu_info_str);
-///
-        ///theophe.render();
+        {
+            let compositor = get_compositor();
+            let (window_id, window_buffer) = compositor.create_window(20, 20, 30, 30);
+            ///let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
+            ///serial_println_core!("Created window with ID: {}", window_id);
+            ///let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
+            ///theophe.write_line("");
+            ///theophe.write_line("  hi");
+            ///theophe.write_line("==========================================================");
+            ///let cpu_info = kernel::util::cpuinfo::get_cpu_info();
+            ///let cpu_info_str = cpu_info.to_pretty_string();
+            ///theophe.write_str(&cpu_info_str);
+    ///
+            ///theophe.render();
 
-        compositor.focus_window(0);
-        compositor.compose(fb);
-
-        drop(compositor);
+            compositor.focus_window(0);
+            compositor.compose(fb);
+        }
 
         let core_count = CORE_POOL.lock().total_cores();
         serial_println_core!("Waiting for {} AP cores to be ready...", core_count - 1);
@@ -307,6 +307,12 @@ fn main() -> ! {
                 serial_println_core!("Loop time: {} ns; {} ms", dt, dt as f32 / 1_000_000.0);
             } else {
                 //serial_println_core!("loop");
+                let time_start = interrupts::system_uptime_ns();
+                get_compositor().compose(fb);
+                let time_end = interrupts::system_uptime_ns();
+                let dt: u64 = time_end - time_start;
+                time_elapsed += dt;
+                //serial_println_core!("Loop time: {} ns; {} ms", dt, dt as f32 / 1_000_000.0);
                 //hlt();
             }
         }

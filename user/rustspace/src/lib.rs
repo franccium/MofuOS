@@ -23,6 +23,7 @@ pub const SYS_DESTROY_WINDOW: u64 = 11;
 pub const SYS_MAP_WINDOW_BUFFER: u64 = 12;
 pub const SYS_PRESENT_WINDOW: u64 = 13;
 pub const SYS_GET_WINDOW_SIZE: u64 = 14;
+pub const SYS_FOCUS_WINDOW: u64 = 15;
 pub const SYS_YIELD: u64 = 998;
 pub const SYS_EXIT: u64 = 999;
 pub const SYS_ECHO: u64 = 997;

@@ -97,6 +97,7 @@ pub enum SyscallNumber {
     MapWindowBuffer = 12,
     PresentWindow = 13,
     GetWindowSize = 14,
+    FocusWindow = 15,
     GetProcessInfo = 996,
     GetPID = 997,
     Yield = 998,
@@ -364,8 +365,9 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let height = frame.arg2 as u32;
             let x = frame.arg3 as i32;
             let y = frame.arg4 as i32;
-            let (window_id, _buffer) =
-                crate::graphics::compositor::get_compositor().create_window(width, height, x, y);
+
+            let mut compositor = crate::graphics::compositor::get_compositor();
+            let (window_id, _buffer) = compositor.create_window(width, height, x, y);
             serial_println_core!(
                 "sys_create_window: {}x{} at ({},{}) -> id={}",
                 width,
@@ -374,6 +376,9 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 y,
                 window_id
             );
+            compositor.set_z_index(window_id, 7);
+            drop(compositor);
+
             window_id as u64
         }
         SyscallNumber::DestroyWindow => {
@@ -518,6 +523,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let umm = crate::memory::get_user_mem_mgr();
             let flags = x86_64::structures::paging::PageTableFlags::PRESENT
                 | x86_64::structures::paging::PageTableFlags::WRITABLE
+                | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
                 | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
 
             for i in 0..page_count {
@@ -545,6 +551,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
         }
         SyscallNumber::PresentWindow => {
             let window_id = frame.arg1 as u32;
+
             let compositor = crate::graphics::compositor::get_compositor();
             let windows = compositor.windows.read();
             if let Some(w) = windows.get(window_id as usize) {
@@ -552,6 +559,13 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                     w.buffer.present();
                 }
             }
+            serial_println_core!(
+                "sys_present_window: window_id={} presented",
+                window_id
+            );
+            drop(windows);
+            drop(compositor);
+
             0
         }
         SyscallNumber::GetWindowSize => {
@@ -566,6 +580,12 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 }
                 _ => u64::MAX,
             }
+        }
+        SyscallNumber::FocusWindow => {
+            let window_id = frame.arg1 as u32;
+            crate::graphics::compositor::get_compositor().focus_window(window_id);
+            serial_println_core!("sys_focus_window: id={}", window_id);
+            0
         }
         _ => u64::MAX,
     }
