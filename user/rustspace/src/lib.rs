@@ -1,9 +1,12 @@
 #![no_std]
 #![feature(alloc_error_handler)]
+#![feature(portable_simd)]
 
 extern crate alloc;
 
 use core::alloc::{GlobalAlloc, Layout};
+
+pub mod gfx;
 
 pub const SYS_CREATE_PROCESS: u64 = 0;
 pub const SYS_TERMINATE_PROCESS: u64 = 1;
@@ -17,6 +20,9 @@ pub const SYS_LOAD_FILE: u64 = 8;
 pub const SYS_UNLOAD_FILE: u64 = 9;
 pub const SYS_CREATE_WINDOW: u64 = 10;
 pub const SYS_DESTROY_WINDOW: u64 = 11;
+pub const SYS_MAP_WINDOW_BUFFER: u64 = 12;
+pub const SYS_PRESENT_WINDOW: u64 = 13;
+pub const SYS_GET_WINDOW_SIZE: u64 = 14;
 pub const SYS_YIELD: u64 = 998;
 pub const SYS_EXIT: u64 = 999;
 pub const SYS_ECHO: u64 = 997;
@@ -103,6 +109,35 @@ pub unsafe fn sys_destroy_window(window_id: u32) {
     unsafe { syscall1(SYS_DESTROY_WINDOW, window_id as u64) };
 }
 
+/// Map the back buffer of a kernel window into this process's address space.
+/// Returns a pointer to the first pixel (XRGB8888 u32 array), or null on failure.
+#[inline(always)]
+pub unsafe fn sys_map_window_buffer(window_id: u32) -> *mut u32 {
+    let addr = unsafe { syscall1(SYS_MAP_WINDOW_BUFFER, window_id as u64) };
+    if addr == u64::MAX {
+        core::ptr::null_mut()
+    } else {
+        addr as *mut u32
+    }
+}
+
+/// Signal the kernel that the back buffer is ready to be presented.
+#[inline(always)]
+pub unsafe fn sys_present_window(window_id: u32) {
+    unsafe { syscall1(SYS_PRESENT_WINDOW, window_id as u64) };
+}
+
+/// Returns (width, height) of the window, or (0, 0) on failure.
+#[inline(always)]
+pub unsafe fn sys_get_window_size(window_id: u32) -> (u32, u32) {
+    let packed = unsafe { syscall1(SYS_GET_WINDOW_SIZE, window_id as u64) };
+    if packed == u64::MAX {
+        (0, 0)
+    } else {
+        ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32)
+    }
+}
+
 // Arena bump allocator
 // Asks the kernel for SLAB_SIZE bytes at a time and hands out addresses
 // from within that arena. Only calls sys_allocate again when the current arena is exhausted
@@ -124,15 +159,15 @@ impl Arena {
     unsafe fn grow(&self) -> bool {
         let base = unsafe { sys_allocate(SLAB_SIZE) };
         if base != INVALID_ALLOC {
-            self.cursor.store(base as usize, core::sync::atomic::Ordering::Release);
+            self.cursor
+                .store(base as usize, core::sync::atomic::Ordering::Release);
             self.end.store(
                 base as usize + SLAB_SIZE,
                 core::sync::atomic::Ordering::Release,
             );
-            true
+            return true;
         }
-
-        false;
+        false
     }
 }
 
@@ -163,8 +198,7 @@ unsafe impl GlobalAlloc for Arena {
         }
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-    }
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
 }
 
 #[alloc_error_handler]

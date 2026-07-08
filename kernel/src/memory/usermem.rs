@@ -246,6 +246,58 @@ impl UserMemoryManager {
         Ok(())
     }
 
+    /// Map a specific physical frame (already allocated) into a user address space.
+    /// Does NOT allocate a new frame — caller provides the physical address.
+    /// Use this for mapping kernel-owned pixel buffers into user page tables.
+    pub fn map_specific_frame(
+        &self,
+        pml4_table_phys: PhysAddr,
+        virt_addr: VirtAddr,
+        phys_addr: PhysAddr,
+        flags: PageTableFlags,
+    ) -> Result<(), MapToError<Size4KiB>> {
+        use x86_64::structures::paging::PhysFrame;
+
+        let new_table_pml4_virt = VirtAddr::new(pml4_table_phys.as_u64() + self.phys_offset);
+        let pml4_table = unsafe { &mut *(new_table_pml4_virt.as_u64() as *mut PageTable) };
+        let mut user_page_mapper =
+            unsafe { OffsetPageTable::new(pml4_table, VirtAddr::new(self.phys_offset)) };
+
+        let page = Page::containing_address(virt_addr);
+        let phys_frame = PhysFrame::containing_address(phys_addr);
+        let user_flags = flags | PageTableFlags::USER_ACCESSIBLE;
+
+        let mut fa = crate::memory::get_frame_allocator();
+        unsafe {
+            match user_page_mapper.map_to(page, phys_frame, user_flags, &mut *fa) {
+                Ok(flush) => {
+                    flush.flush();
+                    Ok(())
+                }
+                Err(MapToError::PageAlreadyMapped(_existing)) => {
+                    // Page already mapped with this physical frame — update flags only
+                    match user_page_mapper.update_flags(page, user_flags) {
+                        Ok(flush) => {
+                            flush.flush();
+                            Ok(())
+                        }
+                        Err(e) => {
+                            serial_println!("map_specific_frame: update_flags failed: {:?}", e);
+                            Ok(())
+                        }
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    /// Translate a kernel heap virtual address to its physical address.
+    /// Kernel heap pages are HHDM-mapped: phys = vaddr - phys_offset.
+    pub fn translate_kernel_heap_virt_to_phys(&self, vaddr: u64) -> PhysAddr {
+        PhysAddr::new(vaddr - self.phys_offset)
+    }
+
     pub fn create_main_stack(
         &self,
         pml4_table_phys: PhysAddr,

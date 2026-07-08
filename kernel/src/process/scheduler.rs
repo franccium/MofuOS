@@ -356,12 +356,30 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
                 *kernel_rsp_slot = rsp_value;
             }
 
+            serial_println_core!(
+                "Jumping to userspace PID {} at RIP {:#x}, RSP {:#x}, RFLAGS {:#x}, CR3 {:#x}",
+                pid,
+                rip,
+                rsp,
+                rflags,
+                cr3
+            );
+            serial_println_core!(
+                "GDT state before jump: kernel_code_selector={:#x}, kernel_data_selector={:#x}, user_code_selector={:#x}, user_data_selector={:#x}, tss_selector={:#x}",
+                crate::gdt::get_kernel_code_selector(core_id).0,
+                crate::gdt::get_kernel_data_selector(core_id).0,
+                crate::gdt::get_user_code_selector(core_id).0,
+                crate::gdt::get_user_data_selector(core_id).0,
+                crate::gdt::get_tss_selector(core_id).0,
+            );
+
             x86_64::instructions::interrupts::enable();
 
             // Register assignments:
             // rax - return label address
             // r8  - kernel_rsp_slot pointer
-            // rcx - cr3 physical address
+            // r9 - cr3 physical address
+            // rcx - core_id
             // rdi - arg1: userspace entry point / resume RIP
             // rsi - arg2: userspace stack pointer
             // rdx - arg3: userspace RFLAGS
@@ -370,11 +388,12 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
                     "lea rax, [rip + 2f]",
                     "push rax",
                     "mov [r8], rsp",
-                    "mov cr3, rcx",
+                    "mov cr3, r9",
                     "jmp {jump}",
                     "2:",
-                    in("r8")  kernel_rsp_slot,
-                    in("rcx") cr3,
+                    in("r8") kernel_rsp_slot,
+                    in("r9") cr3,
+                    in("rcx") core_id as u64,
                     in("rdi") rip,
                     in("rsi") rsp,
                     in("rdx") rflags,

@@ -252,18 +252,18 @@ fn main() -> ! {
 
         init_compositor(fb_width as u32, fb_height as u32);
         let compositor = get_compositor();
-        let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
-        serial_println_core!("Created window with ID: {}", window_id);
-
-        let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
-        theophe.write_line("");
-        theophe.write_line("  hi");
-        theophe.write_line("==========================================================");
-        let cpu_info = kernel::util::cpuinfo::get_cpu_info();
-        let cpu_info_str = cpu_info.to_pretty_string();
-        theophe.write_str(&cpu_info_str);
-
-        theophe.render();
+        let (window_id, window_buffer) = compositor.create_window(20, 20, 30, 30);
+        ///let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
+        ///serial_println_core!("Created window with ID: {}", window_id);
+        ///let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
+        ///theophe.write_line("");
+        ///theophe.write_line("  hi");
+        ///theophe.write_line("==========================================================");
+        ///let cpu_info = kernel::util::cpuinfo::get_cpu_info();
+        ///let cpu_info_str = cpu_info.to_pretty_string();
+        ///theophe.write_str(&cpu_info_str);
+///
+        ///theophe.render();
 
         compositor.focus_window(0);
         compositor.compose(fb);

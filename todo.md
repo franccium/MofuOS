@@ -18,9 +18,11 @@ fun todo:
     writing into that window
         direct memory access?
         a graphics api, and batch everything somehow, give the OS a finished state in some format that it will parse and draw?
+        need something embedded-graphics-compatible-text-rendering compatible
 - port the event train i did for bigos and let userspace read input from a mapped RO memory no-syscall
     make the game.rs react to input and exit on Q pressed
 - enable sse builds?
+- rdtscp instead of rdtsc in timer handler to get core_id
 
 - stdin/stout routing for userspace
     C programs compiled into ELF to be able to get from stdin and output to stdout. What would be the stdin stdout even - another userspace program that functions as a shell?

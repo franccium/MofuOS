@@ -29,7 +29,7 @@ pub struct Compositor {
     next_window_id: AtomicU32,
     currently_focused_window: Mutex<WindowID>,
     free_window_ids: Mutex<Vec<WindowID>>,
-    windows: RwLock<Vec<Window>>,
+    pub windows: RwLock<Vec<Window>>,
 }
 
 impl Compositor {
