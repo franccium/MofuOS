@@ -179,6 +179,10 @@ impl WindowBuffer {
         self.back_buffer_ptr() as u64
     }
 
+    pub fn front_buffer_virt_addr(&self) -> u64 {
+        self.front_buffer_ptr() as u64
+    }
+
     pub fn pixel_count(&self) -> usize {
         (self.width * self.height) as usize
     }

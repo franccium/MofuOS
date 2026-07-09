@@ -8,6 +8,7 @@ use embedded_graphics::primitives::Rectangle;
 /// `pixels` points to the user virtual address returned by sys_map_window_buffer.
 pub struct UserSurface {
     pub pixels: *mut u32,
+    pub pixels_second: *mut u32,
     pub width: u32,
     pub height: u32,
 }
@@ -18,12 +19,17 @@ impl UserSurface {
     ///
     /// # Safety
     /// `pixels` must be a valid, writable mapping of `width * height` u32 slots.
-    pub unsafe fn new(pixels: *mut u32, width: u32, height: u32) -> Self {
+    pub unsafe fn new(pixels: *mut u32, pixels_second: *mut u32, width: u32, height: u32) -> Self {
         Self {
             pixels,
+            pixels_second,
             width,
             height,
         }
+    }
+
+    pub unsafe fn swap(&mut self) {
+        core::mem::swap(&mut self.pixels, &mut self.pixels_second);
     }
 
     #[inline(always)]

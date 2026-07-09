@@ -292,10 +292,13 @@ impl UserMemoryManager {
         }
     }
 
-    /// Translate a kernel heap virtual address to its physical address.
-    /// Kernel heap pages are HHDM-mapped: phys = vaddr - phys_offset.
+    /// Translate a kernel virtual address (e.g. a heap allocation) to its physical address
+    /// by walking the kernel page table. The kernel heap is not HHDM-mapped, its pages
+    /// were individually allocated by the frame allocator and mapped by init_heap, so
+    /// phys != vaddr - phys_offset. We must walk the page table to find the real frame.
     pub fn translate_kernel_heap_virt_to_phys(&self, vaddr: u64) -> PhysAddr {
-        PhysAddr::new(vaddr - self.phys_offset)
+        self.translate_user_virt_to_phys(self.kernel_page_table_phys, VirtAddr::new(vaddr))
+            .expect("translate_kernel_heap_virt_to_phys: address not mapped in kernel page table")
     }
 
     pub fn create_main_stack(

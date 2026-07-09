@@ -138,7 +138,7 @@ impl Compositor {
 
         // serial_println!("Composing frame with {} visible windows", visible_windows.len());
 
-        // TODO: clear the framebufer
+        // TODO: clear the framebuffer
 
         for window in visible_windows {
             if window.is_visible {

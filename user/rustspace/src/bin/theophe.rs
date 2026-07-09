@@ -78,7 +78,7 @@ impl Line {
 }
 
 pub struct Theophe<D: DrawTarget<Color = Rgb888>> {
-    draw_target: D,
+    pub draw_target: D,
     curr_line_idx: usize,
     max_chars_per_line: usize,
     lines: [Line; MAX_LINES],
@@ -201,7 +201,7 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
 
     fn redraw_all(&mut self) {
         //TODO: clear takes a LONG time, compositor has clears figured out
-        // self.clear_screen();
+        self.clear_screen();
         rustspace::println!("theophe: redraw_all - begin");
         for i in 0..=self.curr_line_idx {
             if !self.lines[i].is_empty() {
@@ -212,6 +212,12 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
                     TEXT_STYLE,
                 )
                 .draw(&mut self.draw_target);
+
+                rustspace::println!(
+                    "theophe: redraw_all - line {}: {}",
+                    i,
+                    self.lines[i].as_str()
+                );
             }
         }
     }
@@ -238,6 +244,7 @@ pub extern "C" fn main() -> ! {
         rustspace::println!("theophe: map_window_buffer failed");
         unsafe { rustspace::sys_exit(1) }
     }
+    let pixels_second = ((pixels as u64) + 8 * 1024 * 1024) as *mut u32;
 
     let (width, height) = unsafe { rustspace::sys_get_window_size(window_id) };
     if width == 0 || height == 0 {
@@ -246,16 +253,17 @@ pub extern "C" fn main() -> ! {
     }
 
     rustspace::println!(
-        "theophe: window {}x{} id={} mapped at {:p}",
+        "theophe: window {}x{} id={} mapped at {:p}, front: {:p}",
         width,
         height,
         window_id,
-        pixels
+        pixels,
+        pixels_second
     );
 
     unsafe { rustspace::syscall1(rustspace::SYS_FOCUS_WINDOW, window_id as u64) };
 
-    let surface = unsafe { UserSurface::new(pixels, width, height) };
+    let surface = unsafe { UserSurface::new(pixels, pixels_second, width, height) };
     let mut terminal = Theophe::new(surface);
 
     rustspace::println!("theophe: writing");
@@ -279,6 +287,9 @@ pub extern "C" fn main() -> ! {
 
         terminal.render();
         unsafe { rustspace::sys_present_window(window_id) };
+        unsafe {
+            terminal.draw_target.swap();
+        }
         //unsafe { rustspace::sys_yield() };
 
         frame = frame.wrapping_add(1);

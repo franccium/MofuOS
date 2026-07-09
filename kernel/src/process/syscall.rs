@@ -505,6 +505,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             };
 
             let back_vaddr = buffer_arc.back_buffer_virt_addr();
+            let front_vaddr = buffer_arc.front_buffer_virt_addr();
             let pixel_count = buffer_arc.pixel_count();
             let byte_count = pixel_count * 4;
             let page_count = (byte_count + 0xFFF) / 0x1000;
@@ -528,10 +529,21 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
 
             for i in 0..page_count {
                 let page_vaddr = back_vaddr + (i * 0x1000) as u64;
+                let front_page_vaddr = front_vaddr + (i * 0x1000) as u64;
                 let phys = umm.translate_kernel_heap_virt_to_phys(page_vaddr);
+                let front_phys = umm.translate_kernel_heap_virt_to_phys(front_page_vaddr);
                 let user_virt = x86_64::VirtAddr::new(user_base + (i * 0x1000) as u64);
+                let front_user_virt = x86_64::VirtAddr::new(user_base + MAX_WINDOW_BUFFER_SIZE + (i * 0x1000) as u64);
 
                 if let Err(e) = umm.map_specific_frame(pml4_phys, user_virt, phys, flags) {
+                    serial_println_core!(
+                        "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
+                        i,
+                        e
+                    );
+                    return u64::MAX;
+                }
+                if let Err(e) = umm.map_specific_frame(pml4_phys, front_user_virt, front_phys, flags) {
                     serial_println_core!(
                         "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
                         i,

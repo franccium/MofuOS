@@ -30,6 +30,7 @@ pub extern "C" fn rust_main() -> ! {
         rustspace::println!("game: map_window_buffer failed");
         unsafe { rustspace::sys_exit(1) }
     }
+    let pixels_second = ((pixels as u64) + 8 * 1024 * 1024) as *mut u32;
 
     let (width, height) = unsafe { rustspace::sys_get_window_size(window_id) };
     rustspace::println!(
@@ -40,7 +41,7 @@ pub extern "C" fn rust_main() -> ! {
         pixels
     );
 
-    let mut surface = unsafe { UserSurface::new(pixels, width, height) };
+    let mut surface = unsafe { UserSurface::new(pixels, pixels_second, width, height) };
 
     let mut frame: u32 = 0;
     loop {
