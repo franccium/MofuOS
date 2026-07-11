@@ -68,6 +68,8 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 fn main() -> ! {
     serial_println_core!("Welcome to MofuOS!");
 
+    kernel::tests_exp::test_ata::test_ata_filesystem();
+
     //kernel::process_start::create_init_process();
     //kernel::process_start::create_and_run_init_process();
 

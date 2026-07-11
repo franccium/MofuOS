@@ -1,6 +1,7 @@
 use crate::filesystem::fat32::Fat32Driver;
 use crate::filesystem::fat32::FileNodeHandle;
-use crate::io::disk::{DiskOpError, MockDiskDevice, init_disk};
+use crate::io::ata::AtaPioDriver;
+use crate::io::disk::{DiskOpError, MockDiskDevice, SECTOR_SIZE, get_disk_mgr, init_disk};
 use crate::serial_println;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -298,5 +299,26 @@ pub fn init_filesystem(fat32_image: &[u8]) -> Result<(), &'static str> {
 
     SIRIUS.call_once(|| Mutex::new(Sirius::new(Box::new(fat32_driver))));
 
+    Ok(())
+}
+
+pub fn init_filesystem_ata() -> Result<(), &'static str> {
+    let ata_driver = AtaPioDriver::probe().ok_or("No ATA drive found on primary bus")?;
+
+    init_disk(Box::new(ata_driver));
+
+    let mut boot_sector_buf = [0u8; SECTOR_SIZE];
+    {
+        let mut disk = get_disk_mgr();
+        disk.read_sector(0, &mut boot_sector_buf)
+            .map_err(|_| "Failed to read boot sector from ATA drive")?;
+    }
+
+    let fat32_driver =
+        Fat32Driver::new(&boot_sector_buf).map_err(|_| "Failed to initialize FAT32 driver from ATA")?;
+
+    SIRIUS.call_once(|| Mutex::new(Sirius::new(Box::new(fat32_driver))));
+
+    serial_println!("Filesystem initialized from ATA drive");
     Ok(())
 }

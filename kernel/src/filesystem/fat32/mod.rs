@@ -130,10 +130,10 @@ pub struct Fat32Driver {
     root_filenode: FileNode,
 }
 
-pub const END_OF_CHAIN: u32 = 0x0FFFFFFF;
-pub const BAD_CLUSTER: u32 = 0xFFFFFFF7;
-pub const FAT_ENTRY_RESERVED_BEGIN: u32 = 0xFFFFFFF8;
-pub const FAT_ENTRY_RESERVED_END: u32 = 0xFFFFFFFE;
+pub const END_OF_CHAIN: u32 = 0x0FFF_FFFF;
+pub const BAD_CLUSTER: u32 = 0x0FFF_FFF7;
+pub const FAT_ENTRY_RESERVED_BEGIN: u32 = 0x0FFF_FFF8;
+pub const FAT_ENTRY_RESERVED_END: u32 = 0x0FFF_FFFE;
 
 impl Fat32Driver {
     pub fn new(boot_sector_data: &[u8]) -> FileSystemResult<Self> {
@@ -161,7 +161,15 @@ impl Fat32Driver {
             attributes: FileAttributes::DIR_DEFAULT,
         };
 
-        let available_data_sectors = boot_sector.total_sectors_32 - data_start_sector as u32;
+        let available_data_sectors = {
+            // FAT32 spec: if total_sectors_32 == 0, use total_sectors_16 (small volumes)
+            let total = if boot_sector.total_sectors_32 != 0 {
+                boot_sector.total_sectors_32
+            } else {
+                boot_sector.total_sectors_16 as u32
+            };
+            total - data_start_sector as u32
+        };
         let total_clusters = available_data_sectors / sectors_per_cluster;
         let max_cluster = total_clusters + ROOT_CLUSTER;
 
@@ -215,7 +223,8 @@ impl Fat32Driver {
             sector_buffer[offset_in_sector + 3],
         ];
 
-        Ok(u32::from_le_bytes(entry_bytes))
+        // FAT32 entries are 28 bits; top 4 bits are reserved and must be masked
+        Ok(u32::from_le_bytes(entry_bytes) & 0x0FFF_FFFF)
     }
 
     fn get_next_cluster(
@@ -397,16 +406,21 @@ impl Fat32Driver {
             self.fat_start_sector + (fat_offset / self.boot_sector.bytes_per_sector as u64);
         let offset_in_sector = (fat_offset % self.boot_sector.bytes_per_sector as u64) as usize;
 
-        let value_bytes = value.to_le_bytes();
-
         let mut sector_buffer = alloc::vec![0u8; self.boot_sector.bytes_per_sector as usize];
 
         {
-            //TODO: buffer this write, write the whole ready sector buffer after all operations
-            //let mut disk_mgr = get_disk_mgr();
             disk_mgr.read_sector(fat_sector, &mut sector_buffer)?;
 
-            sector_buffer[offset_in_sector..offset_in_sector + 4].copy_from_slice(&value_bytes);
+            // Preserve the top 4 reserved bits of the existing entry; only write the 28-bit value
+            let existing = u32::from_le_bytes([
+                sector_buffer[offset_in_sector],
+                sector_buffer[offset_in_sector + 1],
+                sector_buffer[offset_in_sector + 2],
+                sector_buffer[offset_in_sector + 3],
+            ]);
+            let new_entry = (existing & 0xF000_0000) | (value & 0x0FFF_FFFF);
+            sector_buffer[offset_in_sector..offset_in_sector + 4]
+                .copy_from_slice(&new_entry.to_le_bytes());
             disk_mgr.write_sector(fat_sector, &sector_buffer)?;
         }
 
@@ -795,11 +809,125 @@ impl FilesystemDriver for Fat32Driver {
 
     fn write_file(
         &mut self,
-        _node_id: FileNodeHandle,
-        _offset: usize,
-        _data: &[u8],
+        node_id: FileNodeHandle,
+        offset: usize,
+        data: &[u8],
     ) -> FileSystemResult<usize> {
-        Err(FileSystemError::NotSupported)
+        if data.is_empty() {
+            return Ok(0);
+        }
+
+        let (cluster, parent_cluster, attributes) = decode_node_id(node_id);
+
+        if is_directory(attributes) {
+            return Err(FileSystemError::IsDirectory);
+        }
+        if cluster == 0 {
+            return Err(FileSystemError::InvalidPath);
+        }
+
+        let mut disk_mgr = get_disk_mgr();
+
+        let mut entry = self.find_entry_by_cluster(parent_cluster, cluster, &mut disk_mgr)?;
+        let old_size = entry.file_size as usize;
+        let new_end = offset + data.len();
+
+        // Walk to the cluster that contains `offset`, extending the chain if needed
+        let target_cluster_index = offset / self.cluster_size;
+        let mut curr_cluster = cluster;
+        let mut cluster_index = 0;
+
+        // Walk existing chain to target cluster
+        while cluster_index < target_cluster_index {
+            match self.get_next_cluster(curr_cluster, &mut disk_mgr)? {
+                Some(next) => {
+                    curr_cluster = next;
+                    cluster_index += 1;
+                }
+                None => {
+                    // Need to extend the chain to reach the target offset
+                    let new_cluster = self.allocate_clusters(1, &mut disk_mgr)?;
+                    self.clear_clusters(new_cluster, 1, &mut disk_mgr)?;
+                    // Re-write the last cluster's FAT entry to point to the new one
+                    self.write_fat_entry(curr_cluster, new_cluster, &mut disk_mgr)?;
+                    curr_cluster = new_cluster;
+                    cluster_index += 1;
+                }
+            }
+        }
+
+        // Write data across clusters, doing read-modify-write where needed
+        let mut data_written = 0;
+
+        while data_written < data.len() {
+            let offset_in_cluster = if cluster_index == target_cluster_index {
+                offset % self.cluster_size
+            } else {
+                0
+            };
+
+            let bytes_remaining_in_cluster = self.cluster_size - offset_in_cluster;
+            let bytes_to_write =
+                core::cmp::min(bytes_remaining_in_cluster, data.len() - data_written);
+
+            let sector = self.cluster_to_sector(curr_cluster);
+
+            if offset_in_cluster != 0 || bytes_to_write < self.cluster_size {
+                // Partial cluster write: read existing content, patch, write back
+                let mut cluster_buf = alloc::vec![0u8; self.cluster_size];
+                disk_mgr.read_sectors(
+                    sector,
+                    self.sectors_per_cluster as usize,
+                    &mut cluster_buf,
+                )?;
+                cluster_buf[offset_in_cluster..offset_in_cluster + bytes_to_write]
+                    .copy_from_slice(&data[data_written..data_written + bytes_to_write]);
+                disk_mgr.write_sectors(
+                    sector,
+                    self.sectors_per_cluster as usize,
+                    &cluster_buf,
+                )?;
+            } else {
+                // Full cluster write - no read needed
+                disk_mgr.write_sectors(
+                    sector,
+                    self.sectors_per_cluster as usize,
+                    &data[data_written..data_written + bytes_to_write],
+                )?;
+            }
+
+            data_written += bytes_to_write;
+            cluster_index += 1;
+
+            if data_written < data.len() {
+                // Move to or allocate the next cluster
+                curr_cluster = match self.get_next_cluster(curr_cluster, &mut disk_mgr)? {
+                    Some(next) => next,
+                    None => {
+                        let new_cluster = self.allocate_clusters(1, &mut disk_mgr)?;
+                        self.clear_clusters(new_cluster, 1, &mut disk_mgr)?;
+                        self.write_fat_entry(curr_cluster, new_cluster, &mut disk_mgr)?;
+                        new_cluster
+                    }
+                };
+            }
+        }
+
+        // Update file size in the directory entry if the file grew
+        if new_end > old_size {
+            entry.file_size = new_end as u32;
+
+            // Find the index of this entry in the parent directory
+            let entries = self.read_directory_entries(parent_cluster, &mut disk_mgr)?;
+            let entry_index = entries
+                .iter()
+                .position(|e| !e.is_deleted() && e.get_first_cluster() == cluster)
+                .ok_or(FileSystemError::NotFound)?;
+
+            self.write_direntry(parent_cluster, entry_index, &entry, &mut disk_mgr)?;
+        }
+
+        Ok(data_written)
     }
 
     fn get_node(&self, node_id: FileNodeHandle) -> FileSystemResult<FileNode> {

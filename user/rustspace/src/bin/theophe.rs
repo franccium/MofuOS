@@ -277,8 +277,7 @@ pub extern "C" fn main() -> ! {
 
     let mut frame: u32 = 0;
     loop {
-        // Write a frame counter line every 256 frames to show it's alive
-        // if frame & 0xFF == 0 {
+        // if frame & 0xF == 0 {
         let msg = format!("frame {}", frame);
         terminal.write_line(&msg);
         // }
