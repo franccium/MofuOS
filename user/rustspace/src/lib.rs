@@ -14,8 +14,6 @@ pub const SYS_WRITE: u64 = 2;
 pub const SYS_READ: u64 = 3;
 pub const SYS_GET_LINE: u64 = 4;
 pub const SYS_ALLOCATE: u64 = 5;
-pub const SYS_CREATE_FILE: u64 = 6;
-pub const SYS_REMOVE_FILE: u64 = 7;
 pub const SYS_LOAD_FILE: u64 = 8;
 pub const SYS_UNLOAD_FILE: u64 = 9;
 pub const SYS_CREATE_WINDOW: u64 = 10;
@@ -24,9 +22,88 @@ pub const SYS_MAP_WINDOW_BUFFER: u64 = 12;
 pub const SYS_PRESENT_WINDOW: u64 = 13;
 pub const SYS_GET_WINDOW_SIZE: u64 = 14;
 pub const SYS_FOCUS_WINDOW: u64 = 15;
+
+// Filesystem syscalls
+pub const SYS_OPEN_FILE: u64 = 20;
+pub const SYS_CLOSE_FILE: u64 = 21;
+pub const SYS_READ_FILE: u64 = 22;
+pub const SYS_WRITE_FILE: u64 = 23;
+pub const SYS_STAT_FILE: u64 = 24;
+pub const SYS_LIST_DIR: u64 = 25;
+pub const SYS_CREATE_FILE: u64 = 26;
+pub const SYS_CREATE_DIR: u64 = 27;
+pub const SYS_DELETE: u64 = 28;
+
 pub const SYS_YIELD: u64 = 998;
 pub const SYS_EXIT: u64 = 999;
 pub const SYS_ECHO: u64 = 997;
+
+pub const FD_FLAG_READ: u8 = 0x01;
+pub const FD_FLAG_WRITE: u8 = 0x02;
+
+pub const FS_NAME_LEN: usize = 16;
+
+/// Flat directory entry returned by sys_list_dir.
+/// Must match the kernel-side DirEntryFlat layout exactly.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DirEntryFlat {
+    pub name: [u8; FS_NAME_LEN],
+    pub name_len: u8,
+    pub is_dir: u8,
+    pub size: u64,
+    pub created_time: u32,
+    pub modified_time: u32,
+}
+
+impl DirEntryFlat {
+    pub const fn zeroed() -> Self {
+        Self {
+            name: [0u8; FS_NAME_LEN],
+            name_len: 0,
+            is_dir: 0,
+            size: 0,
+            created_time: 0,
+            modified_time: 0,
+        }
+    }
+
+    pub fn name_str(&self) -> &str {
+        let len = self.name_len as usize;
+        core::str::from_utf8(&self.name[..len]).unwrap_or("")
+    }
+}
+
+/// Flat stat result returned by sys_stat.
+/// Must match the kernel-side StatFlat layout exactly.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StatFlat {
+    pub name: [u8; FS_NAME_LEN],
+    pub name_len: u8,
+    pub is_dir: u8,
+    pub size: u64,
+    pub created_time: u32,
+    pub modified_time: u32,
+}
+
+impl StatFlat {
+    pub const fn zeroed() -> Self {
+        Self {
+            name: [0u8; FS_NAME_LEN],
+            name_len: 0,
+            is_dir: 0,
+            size: 0,
+            created_time: 0,
+            modified_time: 0,
+        }
+    }
+
+    pub fn name_str(&self) -> &str {
+        let len = self.name_len as usize;
+        core::str::from_utf8(&self.name[..len]).unwrap_or("")
+    }
+}
 
 pub const INVALID_ALLOC: u64 = u64::MAX;
 
@@ -137,6 +214,131 @@ pub unsafe fn sys_get_window_size(window_id: u32) -> (u32, u32) {
     } else {
         ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32)
     }
+}
+
+// --- Filesystem wrappers ---
+
+/// Open a file or directory by path.
+/// flags: FD_FLAG_READ | FD_FLAG_WRITE
+/// Returns a file descriptor index, or usize::MAX on failure.
+#[inline(always)]
+pub unsafe fn sys_open_file(path: &str, flags: u8) -> usize {
+    let ret = unsafe {
+        syscall3(
+            SYS_OPEN_FILE,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            flags as u64,
+        )
+    };
+    if ret == u64::MAX {
+        usize::MAX
+    } else {
+        ret as usize
+    }
+}
+
+/// Close a file descriptor.
+/// Returns true on success.
+#[inline(always)]
+pub unsafe fn sys_close_file(fd: usize) -> bool {
+    unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) != u64::MAX }
+}
+
+/// Read up to buf.len() bytes from an open fd at the current offset.
+/// Returns the number of bytes read, or usize::MAX on failure.
+#[inline(always)]
+pub unsafe fn sys_read_file(fd: usize, buf: &mut [u8]) -> usize {
+    let ret = unsafe {
+        syscall3(
+            SYS_READ_FILE,
+            fd as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if ret == u64::MAX {
+        usize::MAX
+    } else {
+        ret as usize
+    }
+}
+
+/// Write buf to an open fd at the current offset.
+/// Returns the number of bytes written, or usize::MAX on failure.
+#[inline(always)]
+pub unsafe fn sys_write_file(fd: usize, buf: &[u8]) -> usize {
+    let ret = unsafe {
+        syscall3(
+            SYS_WRITE_FILE,
+            fd as u64,
+            buf.as_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if ret == u64::MAX {
+        usize::MAX
+    } else {
+        ret as usize
+    }
+}
+
+/// Stat a path. Fills out_stat on success. Returns true on success.
+#[inline(always)]
+pub unsafe fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
+    let ret = unsafe {
+        syscall3(
+            SYS_STAT_FILE,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            out_stat as *mut StatFlat as u64,
+        )
+    };
+    ret != u64::MAX
+}
+
+/// List the contents of a directory into out_entries.
+/// Returns the number of entries written, or usize::MAX on failure.
+#[inline(always)]
+pub unsafe fn sys_list_dir(path: &str, out_entries: &mut [DirEntryFlat]) -> usize {
+    let byte_len = out_entries.len() * core::mem::size_of::<DirEntryFlat>();
+    let ret = unsafe {
+        syscall6(
+            SYS_LIST_DIR,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            out_entries.as_mut_ptr() as u64,
+            byte_len as u64,
+            0,
+            0,
+        )
+    };
+    if ret == u64::MAX {
+        usize::MAX
+    } else {
+        ret as usize
+    }
+}
+
+/// Create a new file at the given path. Returns true on success.
+#[inline(always)]
+pub unsafe fn sys_create_file(path: &str) -> bool {
+    let ret = unsafe { syscall3(SYS_CREATE_FILE, path.as_ptr() as u64, path.len() as u64, 0) };
+    ret != u64::MAX
+}
+
+/// Create a new directory at the given path. Returns true on success.
+#[inline(always)]
+pub unsafe fn sys_create_dir(path: &str) -> bool {
+    let ret = unsafe { syscall3(SYS_CREATE_DIR, path.as_ptr() as u64, path.len() as u64, 0) };
+    ret != u64::MAX
+}
+
+/// Delete a file or directory at the given path. Returns true on success.
+#[inline(always)]
+pub unsafe fn sys_delete(path: &str) -> bool {
+    let ret = unsafe { syscall3(SYS_DELETE, path.as_ptr() as u64, path.len() as u64, 0) };
+    ret != u64::MAX
 }
 
 // Arena bump allocator

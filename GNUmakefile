@@ -27,10 +27,18 @@ run-hdd: run-hdd-$(KARCH)
 .PHONY: fat32-image
 fat32-image: test_disk_image.fat32.img
 
+ATA_DISK_IMG := ata_disk.img
+
+.PHONY: ata-disk
+ata-disk: $(ATA_DISK_IMG)
+
+$(ATA_DISK_IMG):
+	bash scripts/create_ata_disk.sh $(ATA_DISK_IMG) 64
+
 SOCKET1 := /tmp/mofuos_com1.sock
 SOCKET2 := /tmp/mofuos_com2.sock
 .PHONY: run-x86_64
-run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
+run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso $(ATA_DISK_IMG)
 	@mkdir -p logs
 	@rm -f $(SOCKET1) $(SOCKET2)
 	@python3 scripts/log_splitter.py $(SOCKET1) $(SOCKET2) & \
@@ -42,6 +50,9 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \
+		-device piix3-ide,id=ide \
+		-device ide-hd,drive=ata0,bus=ide.0,unit=0 \
+		-drive file=$(ATA_DISK_IMG),format=raw,id=ata0,if=none \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial unix:$(SOCKET1),server \
 		-serial unix:$(SOCKET2),server,nowait \
@@ -49,13 +60,6 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-monitor telnet:127.0.0.1:1234,server,nowait \
 		$(QEMUFLAGS)
 
-ATA_DISK_IMG := ata_disk.img
-
-.PHONY: ata-disk
-ata-disk: $(ATA_DISK_IMG)
-
-$(ATA_DISK_IMG):
-	bash scripts/create_ata_disk.sh $(ATA_DISK_IMG) 16
 
 .PHONY: run-x86_64-ata
 run-x86_64-ata: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso $(ATA_DISK_IMG)

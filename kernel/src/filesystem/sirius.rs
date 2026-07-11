@@ -53,6 +53,32 @@ impl FileAttributes {
 //     }
 // }
 
+// Canonical name length for DirEntryFlat. Must match the rustspace definition.
+const FS_NAME_LEN: usize = 16;
+
+/// Flat directory entry written into the userspace output buffer by sys_list_dir.
+#[repr(C)]
+pub struct DirEntryFlat {
+    pub name: [u8; FS_NAME_LEN],
+    pub name_len: u8,
+    pub is_dir: u8,
+    pub _pad: [u8; 6],
+    pub size: u64,
+    pub created_time: u32,
+    pub modified_time: u32,
+}
+
+/// Flat stat result written into a userspace-provided buffer by sys_stat_file
+#[repr(C)]
+pub struct StatFlat {
+    pub name: [u8; FS_NAME_LEN],
+    pub name_len: u8,
+    pub is_dir: u8,
+    pub size: u64,
+    pub created_time: u32,
+    pub modified_time: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileNode {
     pub node_id: FileNodeHandle,
@@ -127,7 +153,7 @@ pub trait FilesystemDriver: Send + Sync {
 }
 
 pub struct Sirius {
-    driver: Box<dyn FilesystemDriver>,
+    pub driver: Box<dyn FilesystemDriver>,
 }
 
 impl Sirius {
@@ -303,7 +329,8 @@ pub fn init_filesystem(fat32_image: &[u8]) -> Result<(), &'static str> {
 }
 
 pub fn init_filesystem_ata() -> Result<(), &'static str> {
-    let ata_driver = AtaPioDriver::probe().ok_or("No ATA drive found on primary bus")?;
+    let ata_driver =
+        AtaPioDriver::check_primary_bus_present().ok_or("No ATA drive found on primary bus")?;
 
     init_disk(Box::new(ata_driver));
 
@@ -314,8 +341,8 @@ pub fn init_filesystem_ata() -> Result<(), &'static str> {
             .map_err(|_| "Failed to read boot sector from ATA drive")?;
     }
 
-    let fat32_driver =
-        Fat32Driver::new(&boot_sector_buf).map_err(|_| "Failed to initialize FAT32 driver from ATA")?;
+    let fat32_driver = Fat32Driver::new(&boot_sector_buf)
+        .map_err(|_| "Failed to initialize FAT32 driver from ATA")?;
 
     SIRIUS.call_once(|| Mutex::new(Sirius::new(Box::new(fat32_driver))));
 

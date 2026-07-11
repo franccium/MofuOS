@@ -2,12 +2,12 @@ use alloc::format;
 use alloc::string::String;
 
 use crate::process::elf_loader::{
-    GAME_ELF, PING_ELF, RUST_FIRST_ELF, SMALL_ELF, TEST_ELF, THEOPHE_ELF,
+    FS_TEST_ELF, GAME_ELF, PING_ELF, RUST_FIRST_ELF, SMALL_ELF, TEST_ELF, THEOPHE_ELF,
 };
 use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
 use crate::{
-    RUN_THEOPHE, USE_GAME_PROGRAM, USE_PING_PROGRAM, USE_RUST_USER_PROGRAMS, USE_TEST_PROGRAM,
-    serial_println,
+    RUN_FS_TEST, RUN_THEOPHE, USE_GAME_PROGRAM, USE_PING_PROGRAM, USE_RUST_USER_PROGRAMS,
+    USE_TEST_PROGRAM, serial_println,
 };
 
 pub fn create_init_process() {
@@ -79,6 +79,12 @@ pub fn create_userspace_processes() {
     if RUN_THEOPHE {
         if let Ok(pid) = create_userspace_process(&THEOPHE_ELF, "theophe", 0, 7) {
             serial_println!("Created theophe (PID {})", pid);
+        }
+    }
+
+    if RUN_FS_TEST {
+        if let Ok(pid) = create_userspace_process(&FS_TEST_ELF, "fs_test", 0, 5) {
+            serial_println!("Created fs_test (PID {})", pid);
         }
     }
 

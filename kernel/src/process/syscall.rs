@@ -1,3 +1,6 @@
+use crate::filesystem::sirius::{DirEntryFlat, StatFlat};
+use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
+use crate::process::process::FileDescriptor;
 use crate::serial_println;
 use crate::util::msr::msr_write;
 use crate::{
@@ -11,6 +14,13 @@ use crate::{
 };
 use core::arch::naked_asm;
 use x86_64::registers::model_specific::{Efer, EferFlags};
+
+/// Check that a userspace pointer + length is entirely within canonical user address space
+#[inline]
+fn validate_user_ptr(ptr: usize, len: usize) -> bool {
+    let end = ptr.saturating_add(len);
+    ptr != 0 && end <= USER_MEM_MAX_ADDRESS && end >= ptr
+}
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,8 +98,6 @@ pub enum SyscallNumber {
     Read = 3,
     GetLine = 4,
     Allocate = 5,
-    CreateFile = 6,
-    RemoveFile = 7,
     LoadFile = 8,
     UnloadFile = 9,
     CreateWindow = 10,
@@ -98,6 +106,16 @@ pub enum SyscallNumber {
     PresentWindow = 13,
     GetWindowSize = 14,
     FocusWindow = 15,
+    // Filesystem syscalls
+    OpenFile = 20,
+    CloseFile = 21,
+    ReadFile = 22,
+    WriteFile = 23,
+    StatFile = 24,
+    ListDir = 25,
+    CreateFile = 26,
+    CreateDir = 27,
+    Delete = 28,
     GetProcessInfo = 996,
     GetPID = 997,
     Yield = 998,
@@ -599,6 +617,384 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             serial_println_core!("sys_focus_window: id={}", window_id);
             0
         }
+
+        // sys_open_file(path_ptr, path_len, flags) -> fd index or u64::MAX
+        SyscallNumber::OpenFile => {
+            let path_ptr = frame.arg1 as usize;
+            let path_len = frame.arg2 as usize;
+            let flags = frame.arg3 as u8;
+            
+            if !validate_user_ptr(path_ptr, path_len) {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path = match core::str::from_utf8(path_bytes) {
+                Ok(s) => s,
+                Err(_) => return FileDescriptor::INVALID_FD,
+            };
+
+            let node_id: usize = {
+                let sirius_guard = crate::filesystem::sirius::get_sirius();
+                match sirius_guard.resolve_path(path) {
+                    Ok(node) => node.node_id,
+                    Err(e) => {
+                        serial_println_core!("sys_open_file: '{}' not found: {:?}", path, e);
+                        return FileDescriptor::INVALID_FD;
+                    }
+                }
+            };
+
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+
+            let fd_index = {
+                let mut pm = PROCESS_MANAGER.lock();
+                match pm.get_process_mut(pid) {
+                    Ok(proc) => {
+                        let idx = proc.file_descriptors.size;
+                        proc.file_descriptors
+                            .push(crate::process::process::FileDescriptor {
+                                node_id: node_id as usize,
+                                offset: 0,
+                                flags,
+                            });
+                        idx
+                    }
+                    Err(_) => return FileDescriptor::INVALID_FD,
+                }
+            };
+
+            serial_println_core!("sys_open_file: '{}' -> fd={}", path, fd_index);
+            fd_index as u64
+        }
+
+        // sys_closeFile(fd) -> 0 or u64::MAX
+        SyscallNumber::CloseFile => {
+            let fd = frame.arg1 as usize;
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+
+            let mut pm = PROCESS_MANAGER.lock();
+            match pm.get_process_mut(pid) {
+                Ok(proc) => {
+                    if fd >= proc.file_descriptors.size {
+                        return FileDescriptor::INVALID_FD;
+                    }
+                    // Swap-remove: O(1), order in fd table does not matter
+                    let last = proc.file_descriptors.size - 1;
+                    if fd != last {
+                        let last_fd = *proc.file_descriptors.get(last);
+                        *proc.file_descriptors.get_mut(fd) = last_fd;
+                    }
+                    proc.file_descriptors.size -= 1;
+                    serial_println_core!("sys_closeFile: fd={} closeFiled", fd);
+                    0
+                }
+                Err(_) => FileDescriptor::INVALID_FD,
+            }
+        }
+
+        // sys_read_file(fd, buffer_ptr, count) -> bytes read or FileDescriptor::INVALID_FD
+        SyscallNumber::ReadFile => {
+            let fd = frame.arg1 as usize;
+            let buffer_ptr = frame.arg2 as usize;
+            let count = frame.arg3 as usize;
+
+            if !validate_user_ptr(buffer_ptr, count) {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+
+            let (node_id, offset, flags) = {
+                let pm = PROCESS_MANAGER.lock();
+                match pm.get_process(pid) {
+                    Ok(proc) => {
+                        if fd >= proc.file_descriptors.size {
+                            return FileDescriptor::INVALID_FD;
+                        }
+                        let d = proc.file_descriptors.get(fd);
+                        (d.node_id, d.offset, d.flags)
+                    }
+                    Err(_) => return FileDescriptor::INVALID_FD,
+                }
+            };
+
+            if flags & crate::process::process::FD_FLAG_READ == 0 {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let buffer = unsafe { core::slice::from_raw_parts_mut(buffer_ptr as *mut u8, count) };
+            let bytes_read = {
+                let mut sirius = crate::filesystem::sirius::get_sirius();
+                match sirius.driver.read_file(node_id, offset, buffer) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        serial_println_core!("sys_read_file: fd={} error: {:?}", fd, e);
+                        return FileDescriptor::INVALID_FD;
+                    }
+                }
+            };
+
+            // Advance the stored offset
+            {
+                let mut pm = PROCESS_MANAGER.lock();
+                if let Ok(proc) = pm.get_process_mut(pid) {
+                    if fd < proc.file_descriptors.size {
+                        proc.file_descriptors.get_mut(fd).offset += bytes_read;
+                    }
+                }
+            }
+
+            bytes_read as u64
+        }
+
+        // sys_write_file(fd, buffer_ptr, count) -> bytes written or FileDescriptor::INVALID_FD
+        SyscallNumber::WriteFile => {
+            let fd = frame.arg1 as usize;
+            let buffer_ptr = frame.arg2 as usize;
+            let count = frame.arg3 as usize;
+
+            if !validate_user_ptr(buffer_ptr, count) {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+
+            let (node_id, offset, flags) = {
+                let pm = PROCESS_MANAGER.lock();
+                match pm.get_process(pid) {
+                    Ok(proc) => {
+                        if fd >= proc.file_descriptors.size {
+                            return FileDescriptor::INVALID_FD;
+                        }
+                        let descriptor = proc.file_descriptors.get(fd);
+                        (descriptor.node_id, descriptor.offset, descriptor.flags)
+                    }
+                    Err(_) => return FileDescriptor::INVALID_FD,
+                }
+            };
+
+            if flags & crate::process::process::FD_FLAG_WRITE == 0 {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr as *const u8, count) };
+            let bytes_written = {
+                let mut sirius = crate::filesystem::sirius::get_sirius();
+                match sirius.driver.write_file(node_id, offset, buffer) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        serial_println_core!("sys_write_file: fd={} error: {:?}", fd, e);
+                        return FileDescriptor::INVALID_FD;
+                    }
+                }
+            };
+
+            {
+                let mut pm = PROCESS_MANAGER.lock();
+                if let Ok(proc) = pm.get_process_mut(pid) {
+                    if fd < proc.file_descriptors.size {
+                        proc.file_descriptors.get_mut(fd).offset += bytes_written;
+                    }
+                }
+            }
+
+            bytes_written as u64
+        }
+
+        // sys_stat_file(path_ptr, path_len, stat_buffer_ptr) -> 0 or FileDescriptor::INVALID_FD
+        // stat_buffer_ptr must point to a StatFlat-sized buffer in user space
+        SyscallNumber::StatFile => {
+            let path_ptr = frame.arg1 as usize;
+            let path_len = frame.arg2 as usize;
+            let stat_ptr = frame.arg3 as usize;
+
+            if !validate_user_ptr(path_ptr, path_len) {
+                return FileDescriptor::INVALID_FD;
+            }
+            if !validate_user_ptr(stat_ptr, core::mem::size_of::<StatFlat>()) {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path = match core::str::from_utf8(path_bytes) {
+                Ok(s) => s,
+                Err(_) => return FileDescriptor::INVALID_FD,
+            };
+
+            let node = {
+                let sirius = crate::filesystem::sirius::get_sirius();
+                match sirius.resolve_path(path) {
+                    Ok(file_node) => file_node,
+                    Err(e) => {
+                        serial_println_core!("sys_stat: '{}' error: {:?}", path, e);
+                        return FileDescriptor::INVALID_FD;
+                    }
+                }
+            };
+
+            let out = unsafe { &mut *(stat_ptr as *mut StatFlat) };
+            out.name = [0u8; FS_NAME_LEN];
+            let name_bytes = node.name.as_bytes();
+            let copy_len = name_bytes.len().min(FS_NAME_LEN);
+            out.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+            out.name_len = copy_len as u8;
+            out.is_dir = (node.file_type == crate::filesystem::sirius::FileType::Directory) as u8;
+            out.size = node.size as u64;
+            out.created_time = node.created_time;
+            out.modified_time = node.modified_time;
+
+            0
+        }
+
+        // sys_list_dir(path_ptr, path_len, out_buffer_ptr, out_buffer_len) -> entry count or FileDescriptor::INVALID_FD
+        // out_buffer is filled with packed DirEntryFlat structs; entries beyond capacity are dropped
+        SyscallNumber::ListDir => {
+            let path_ptr = frame.arg1 as usize;
+            let path_len = frame.arg2 as usize;
+            let out_ptr = frame.arg3 as usize;
+            let out_buffer_len = frame.arg4 as usize;
+
+            if !validate_user_ptr(path_ptr, path_len) {
+                return FileDescriptor::INVALID_FD;
+            }
+            if !validate_user_ptr(out_ptr, out_buffer_len) {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path = match core::str::from_utf8(path_bytes) {
+                Ok(s) => s,
+                Err(_) => return FileDescriptor::INVALID_FD,
+            };
+
+            let entries = {
+                let sirius = crate::filesystem::sirius::get_sirius();
+                match sirius.list_directory(path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        serial_println_core!("sys_list_dir: '{}' error: {:?}", path, e);
+                        return FileDescriptor::INVALID_FD;
+                    }
+                }
+            };
+
+            let entry_size = core::mem::size_of::<DirEntryFlat>();
+            let max_entries = out_buffer_len / entry_size;
+            let write_count = entries.len().min(max_entries);
+
+            for (i, node) in entries.iter().take(write_count).enumerate() {
+                let slot_ptr = (out_ptr + i * entry_size) as *mut DirEntryFlat;
+                let slot = unsafe { &mut *slot_ptr };
+                slot.name = [0u8; FS_NAME_LEN];
+                let name_bytes = node.name.as_bytes();
+                let copy_len = name_bytes.len().min(FS_NAME_LEN);
+                slot.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+                slot.name_len = copy_len as u8;
+                slot.is_dir =
+                    (node.file_type == crate::filesystem::sirius::FileType::Directory) as u8;
+                slot.size = node.size as u64;
+                slot.created_time = node.created_time;
+                slot.modified_time = node.modified_time;
+            }
+
+            write_count as u64
+        }
+
+        // sys_create_file(path_ptr, path_len) -> 0 or FileDescriptor::INVALID_FD
+        SyscallNumber::CreateFile => {
+            let path_ptr = frame.arg1 as usize;
+            let path_len = frame.arg2 as usize;
+
+            if !validate_user_ptr(path_ptr, path_len) {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path = match core::str::from_utf8(path_bytes) {
+                Ok(s) => s,
+                Err(_) => return FileDescriptor::INVALID_FD,
+            };
+
+            let mut sirius = crate::filesystem::sirius::get_sirius();
+            match sirius.create_file(path) {
+                Ok(_) => {
+                    serial_println_core!("sys_create_file: '{}' created", path);
+                    0
+                }
+                Err(e) => {
+                    serial_println_core!("sys_create_file: '{}' error: {:?}", path, e);
+                    FileDescriptor::INVALID_FD
+                }
+            }
+        }
+
+        // sys_create_dir(path_ptr, path_len) -> 0 or FileDescriptor::INVALID_FD
+        SyscallNumber::CreateDir => {
+            let path_ptr = frame.arg1 as usize;
+            let path_len = frame.arg2 as usize;
+
+            if !validate_user_ptr(path_ptr, path_len) {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path = match core::str::from_utf8(path_bytes) {
+                Ok(s) => s,
+                Err(_) => return FileDescriptor::INVALID_FD,
+            };
+
+            let mut sirius = crate::filesystem::sirius::get_sirius();
+            match sirius.create_directory(path) {
+                Ok(_) => {
+                    serial_println_core!("sys_create_dir: '{}' created", path);
+                    0
+                }
+                Err(e) => {
+                    serial_println_core!("sys_create_dir: '{}' error: {:?}", path, e);
+                    FileDescriptor::INVALID_FD
+                }
+            }
+        }
+
+        // sys_delete(path_ptr, path_len) -> 0 or FileDescriptor::INVALID_FD
+        SyscallNumber::Delete => {
+            let path_ptr = frame.arg1 as usize;
+            let path_len = frame.arg2 as usize;
+
+            if !validate_user_ptr(path_ptr, path_len) {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path = match core::str::from_utf8(path_bytes) {
+                Ok(s) => s,
+                Err(_) => return FileDescriptor::INVALID_FD,
+            };
+
+            let mut sirius = crate::filesystem::sirius::get_sirius();
+            match sirius.delete(path) {
+                Ok(_) => {
+                    serial_println_core!("sys_delete: '{}' deleted", path);
+                    0
+                }
+                Err(e) => {
+                    serial_println_core!("sys_delete: '{}' error: {:?}", path, e);
+                    FileDescriptor::INVALID_FD
+                }
+            }
+        }
+
         _ => u64::MAX,
     }
 }

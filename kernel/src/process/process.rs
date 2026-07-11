@@ -85,9 +85,18 @@ pub struct ExecutionContext {
     pub page_table_base_phys: u64,
 }
 
-//TODO: when we have a fs/vfs
+pub const FD_FLAG_READ: u8 = 0x01;
+pub const FD_FLAG_WRITE: u8 = 0x02;
+
+#[derive(Debug, Clone, Copy)]
 pub struct FileDescriptor {
-    pub handle: usize,
+    pub node_id: usize,
+    pub offset: usize,
+    pub flags: u8,
+}
+
+impl FileDescriptor {
+    pub const INVALID_FD: u64 = u64::MAX;
 }
 
 pub struct Process {

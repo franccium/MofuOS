@@ -10,6 +10,7 @@ use x86_64::{
 const LEVEL_4_KERNEL_ENTRIES_START: usize = 256;
 const LEVEL_4_KERNEL_ENTRIES_END: usize = 512;
 pub const USER_STACK_TOP: u64 = 0x7FFF_FFFF_F000;
+pub const USER_MEM_MAX_ADDRESS: usize = 0x0000_8000_0000_0000;
 
 pub struct UserMemoryManager {
     pub kernel_page_table_phys: PhysAddr,

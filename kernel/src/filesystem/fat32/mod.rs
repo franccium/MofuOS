@@ -7,7 +7,6 @@ use crate::filesystem::sirius::{
     FileAttributes, FileNode, FileSystemError, FileSystemResult, FileType, FilesystemDriver,
 };
 use crate::io::disk::{DiskManager, get_disk_mgr};
-use crate::serial_println;
 use alloc::string::String;
 use alloc::vec::Vec;
 use boot_sector::BootSector;
@@ -18,6 +17,25 @@ pub const ROOT_CLUSTER: u32 = 2;
 // node_id packing assumes up to 2^24 clusters
 pub const MAX_CLUSTER: u32 = 0xFFFFFF;
 const EMPTY_FAT_ENTRY: u32 = 0;
+
+const DEBUG_LOGS: bool = true;
+const DEBUG_LOGS_VERBOSE: bool = false;
+
+macro_rules! serial_println {
+    ($($arg:tt)*) => {
+        if DEBUG_LOGS {
+            $crate::serial_println!($($arg)*);
+        }
+    };
+}
+
+macro_rules! serial_println_verbose {
+    ($($arg:tt)*) => {
+        if DEBUG_LOGS && DEBUG_LOGS_VERBOSE {
+            $crate::serial_println!($($arg)*);
+        }
+    };
+}
 
 pub type FileNodeHandle = usize;
 pub const INVALID_NODE_HANDLE: FileNodeHandle = 0;
@@ -237,7 +255,7 @@ impl Fat32Driver {
         }
 
         let fat_entry = self.read_fat_entry(cluster, disk_mgr)?;
-        serial_println!("get_next_cluster returning {}", fat_entry);
+        serial_println_verbose!("get_next_cluster returning {}", fat_entry);
 
         match fat_entry {
             END_OF_CHAIN => Ok(None),
@@ -308,14 +326,14 @@ impl Fat32Driver {
     ) -> FileSystemResult<u32> {
         for cluster in ROOT_CLUSTER..self.max_cluster {
             let fat_entry = self.read_fat_entry(cluster, disk_mgr)?;
-            serial_println!(
+            serial_println_verbose!(
                 "find_free_cluster: read next fat_entry ({}) for cluster {}",
                 fat_entry,
                 cluster
             );
 
             if fat_entry == 0 {
-                serial_println!("  Found free cluster: {}", cluster);
+                serial_println_verbose!("  Found free cluster: {}", cluster);
                 return Ok(cluster);
             }
         }
@@ -333,12 +351,12 @@ impl Fat32Driver {
         assert!(count != 0);
 
         let first_cluster = self.find_free_cluster(disk_mgr)?;
-        serial_println!("  Allocating cluster chain starting at: {}", first_cluster);
+        serial_println_verbose!("  Allocating cluster chain starting at: {}", first_cluster);
 
         let mut prev_cluster = first_cluster;
         for _ in 1..count {
             let new_cluster = self.find_free_cluster(disk_mgr)?;
-            serial_println!("    Allocating new cluster: {}", new_cluster);
+            serial_println_verbose!("    Allocating new cluster: {}", new_cluster);
 
             // link the previous cluster
             self.write_fat_entry(prev_cluster, new_cluster, disk_mgr)?;
@@ -357,7 +375,7 @@ impl Fat32Driver {
         disk_mgr: &mut MutexGuard<'_, DiskManager>,
     ) -> FileSystemResult<()> {
         let mut curr_cluster = start_cluster;
-        serial_println!(
+        serial_println_verbose!(
             "clear_clusters: starting with start_cluster: {}, to clear count: {}",
             start_cluster,
             count
@@ -368,21 +386,21 @@ impl Fat32Driver {
 
             for _ in 0..count {
                 let sector = self.cluster_to_sector(curr_cluster);
-                serial_println!(
+                serial_println_verbose!(
                     "clear_clusters: clearing cluster {}, sector {}",
                     curr_cluster,
                     sector
                 );
 
                 for i in 0..self.sectors_per_cluster {
-                    serial_println!("clear_clusters: writing sector {}", i);
+                    serial_println_verbose!("clear_clusters: writing sector {}", i);
                     disk_mgr.write_sector(sector + i as u64, &ZERO_BUFFER)?;
                 }
-                serial_println!("clear_clusters: finished writing");
+                serial_println_verbose!("clear_clusters: finished writing");
 
                 match self.get_next_cluster(curr_cluster, disk_mgr)? {
                     Some(next) => {
-                        serial_println!("clear_clusters: moving to next cluster: {}", next);
+                        serial_println_verbose!("clear_clusters: moving to next cluster: {}", next);
                         curr_cluster = next
                     }
                     None => break,
@@ -390,7 +408,7 @@ impl Fat32Driver {
             }
         }
 
-        serial_println!("clear_clusters: finished");
+        serial_println_verbose!("clear_clusters: finished");
 
         Ok(())
     }
@@ -444,7 +462,7 @@ impl Fat32Driver {
         let entry_count = bytes_read / DIRECTORY_ENTRY_SIZE;
         let mut valid_entries = Vec::with_capacity(entry_count);
 
-        serial_println!(
+        serial_println_verbose!(
             "read_directory_entries: cluster_chain_length: {}, bytes_read: {}, entry_count: {}",
             cluster_count,
             bytes_read,
@@ -456,14 +474,14 @@ impl Fat32Driver {
             let entry = DirectoryEntry::from_bytes(&buffer[offset..offset + DIRECTORY_ENTRY_SIZE]);
 
             if entry.is_empty() {
-                serial_println!(
+                serial_println_verbose!(
                     "read_directory_entries: Hit end of directory at entry {}",
                     i
                 );
                 break;
             }
 
-            serial_println!(
+            serial_println_verbose!(
                 "  Entry {}: name={}, attr={:#x}, deleted={}",
                 i,
                 entry.get_filename(),
@@ -512,7 +530,7 @@ impl Fat32Driver {
 
         for (i, path_part) in path_parts.iter().enumerate() {
             let fat32_path_part = to_fat32_name(*path_part)?;
-            serial_println!(
+            serial_println_verbose!(
                 "FAT32Driver: find_direntry: path part {} - {} = {:?}",
                 i,
                 *path_part,
@@ -521,7 +539,7 @@ impl Fat32Driver {
 
             let entries = self.read_directory_entries(curr_cluster, disk_mgr)?;
             for e in &entries {
-                serial_println!(
+                serial_println_verbose!(
                     "   FAT32Driver: find_direntry: entry {}, is equal?: {}",
                     e.get_filename(),
                     e.full_name_matches(&fat32_path_part)
@@ -615,17 +633,17 @@ impl Fat32Driver {
                 None => break,
             }
         }
-        serial_println!("expand_directory: last_cluster = {}", last_cluster);
+        serial_println_verbose!("expand_directory: last_cluster = {}", last_cluster);
 
         let new_cluster = self.allocate_clusters(1, disk_mgr)?;
-        serial_println!("expand_directory: allocated new_cluster = {}", new_cluster);
+        serial_println_verbose!("expand_directory: allocated new_cluster = {}", new_cluster);
         self.clear_clusters(new_cluster, 1, disk_mgr)?;
-        serial_println!("expand_directory: cleared new cluster");
+        serial_println_verbose!("expand_directory: cleared new cluster");
 
         self.write_fat_entry(last_cluster, new_cluster, disk_mgr)?;
         self.write_fat_entry(new_cluster, END_OF_CHAIN, disk_mgr)?;
         let new_slot_index = curr_entry_count;
-        serial_println!(
+        serial_println_verbose!(
             "expand_directory: linked clusters {} and {}, returning new slot index: {}",
             last_cluster,
             new_cluster,
@@ -653,7 +671,7 @@ impl Fat32Driver {
 
             // free the current cluster
             self.write_fat_entry(curr_cluster, EMPTY_FAT_ENTRY, disk_mgr)?;
-            serial_println!("free_cluster_chain: freed cluster {}", curr_cluster);
+            serial_println_verbose!("free_cluster_chain: freed cluster {}", curr_cluster);
 
             match next {
                 Some(next_cluster) => curr_cluster = next_cluster,
@@ -670,12 +688,12 @@ impl Fat32Driver {
         entries: &Vec<DirectoryEntry>,
         disk_mgr: &mut MutexGuard<'_, DiskManager>,
     ) -> FileSystemResult<usize> {
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: find_free_slot_in_directory(): reading directory entries from a given entry list"
         );
         for (i, entry) in entries.iter().enumerate() {
             if !entry.is_valid() {
-                serial_println!(
+                serial_println_verbose!(
                     "FAT32Driver: find_free_slot_in_directory(): found free entry at slot: {}",
                     i
                 );
@@ -683,11 +701,11 @@ impl Fat32Driver {
             }
         }
 
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: find_free_slot_in_directory(): no free entry found, expanding directory"
         );
         let new_slot = self.expand_directory(dir_cluster, entries.len(), disk_mgr)?;
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: find_free_slot_in_directory(): expanded directory: new_slot: {}",
             new_slot
         );
@@ -705,7 +723,7 @@ impl FilesystemDriver for Fat32Driver {
     ) -> FileSystemResult<usize> {
         let (cluster, parent_cluster, attributes) = decode_node_id(node_id);
 
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: read_file called with node_id={:#x}, cluster={}, offset={}, out_buffer_size={}",
             node_id,
             cluster,
@@ -727,19 +745,15 @@ impl FilesystemDriver for Fat32Driver {
         let file_size = entry.file_size as usize;
 
         if offset >= file_size {
-            serial_println!(
-                "FAT32Driver: Offset {} is beyond file size {}",
-                offset,
-                file_size
-            );
-            return Err(FileSystemError::FileSizeExceeded);
+            // EOF or empty file — not an error, just no bytes to read
+            return Ok(0);
         }
 
         let skip_clusters = offset / self.cluster_size;
         let offset_in_cluster = offset % self.cluster_size;
 
         // Skip to correct cluster
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: Reading file at cluster {}, offset_in_cluster {}, skip_clusters {}",
             cluster,
             offset_in_cluster,
@@ -755,7 +769,7 @@ impl FilesystemDriver for Fat32Driver {
             }
         }
 
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: Positioned at cluster {} after skipping",
             curr_cluster
         );
@@ -763,7 +777,7 @@ impl FilesystemDriver for Fat32Driver {
         // Read cluster and offset
         let mut temp_buffer = alloc::vec![0u8; self.cluster_size];
         let sector = self.cluster_to_sector(curr_cluster);
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: Reading cluster {}, sector {}, offset_in_cluster {}",
             curr_cluster,
             sector,
@@ -771,7 +785,7 @@ impl FilesystemDriver for Fat32Driver {
         );
 
         {
-            serial_println!(
+            serial_println_verbose!(
                 "FAT32Driver: Issuing read_sectors for sector {}, count {}, temp_buffer size {}",
                 sector,
                 self.sectors_per_cluster,
@@ -787,7 +801,7 @@ impl FilesystemDriver for Fat32Driver {
             core::cmp::min(out_buffer.len(), file_size - offset),
         );
 
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: Reading cluster {}, sector {}, offset_in_cluster {}, bytes_to_read {}",
             curr_cluster,
             sector,
@@ -798,7 +812,7 @@ impl FilesystemDriver for Fat32Driver {
         out_buffer[..bytes_to_read]
             .copy_from_slice(&temp_buffer[offset_in_cluster..offset_in_cluster + bytes_to_read]);
 
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: Read {} bytes from file (offset {})",
             bytes_to_read,
             offset
@@ -882,11 +896,7 @@ impl FilesystemDriver for Fat32Driver {
                 )?;
                 cluster_buf[offset_in_cluster..offset_in_cluster + bytes_to_write]
                     .copy_from_slice(&data[data_written..data_written + bytes_to_write]);
-                disk_mgr.write_sectors(
-                    sector,
-                    self.sectors_per_cluster as usize,
-                    &cluster_buf,
-                )?;
+                disk_mgr.write_sectors(sector, self.sectors_per_cluster as usize, &cluster_buf)?;
             } else {
                 // Full cluster write - no read needed
                 disk_mgr.write_sectors(
@@ -966,7 +976,7 @@ impl FilesystemDriver for Fat32Driver {
         }
         let mut nodes = Vec::with_capacity(entries.len());
 
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: list_directory found {} entries in dir_cluster {}",
             entries.len(),
             dir_cluster
@@ -978,7 +988,7 @@ impl FilesystemDriver for Fat32Driver {
             let size = entry.file_size;
             let node_id = encode_node_id(&entry, dir_cluster);
 
-            serial_println!(
+            serial_println_verbose!(
                 "FAT32Driver: list_directory Encoding file '{}' with cluster={}, size={}, is_dir={}, node_id={:#x}",
                 entry.get_filename(),
                 entry_cluster,
@@ -1008,7 +1018,7 @@ impl FilesystemDriver for Fat32Driver {
         let is_dir = entry.is_directory();
         let size = entry.file_size;
 
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: find_node found '{}' at cluster {}, parent_cluster {}, is_dir={}",
             path,
             entry.get_first_cluster(),
@@ -1018,7 +1028,7 @@ impl FilesystemDriver for Fat32Driver {
         assert!(!(is_dir && size != 0));
 
         let node_id = encode_node_id(&entry, parent_cluster);
-        serial_println!("find_node: Encoding node_id {:#x}", node_id);
+        serial_println_verbose!("find_node: Encoding node_id {:#x}", node_id);
 
         Ok(node_id)
     }
@@ -1032,7 +1042,7 @@ impl FilesystemDriver for Fat32Driver {
         // including reading clusters and until the last write - maybe do a cluster-level guard (some busy flag?) (locking the
         // whole disk is not a great idea)
         let (parent_cluster, _, attrs) = decode_node_id(parent_id);
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: create_file: called for parent with node id: {:#x}",
             parent_id
         );
@@ -1063,26 +1073,26 @@ impl FilesystemDriver for Fat32Driver {
 
             let free_slot_index =
                 self.find_free_slot_in_directory(parent_cluster, &entries, &mut disk_mgr)?;
-            serial_println!(
+            serial_println_verbose!(
                 "FAT32Driver: create_file: free_slot_index: {}",
                 free_slot_index
             );
 
             let new_file_cluster = self.allocate_clusters(1, &mut disk_mgr)?;
-            serial_println!(
+            serial_println_verbose!(
                 "FAT32Driver: create_file: new_file_cluster: {}",
                 new_file_cluster
             );
             self.clear_clusters(new_file_cluster, 1, &mut disk_mgr)?;
-            serial_println!("FAT32Driver: create_file: New file cluster cleared");
+            serial_println_verbose!("FAT32Driver: create_file: New file cluster cleared");
 
             let _timestamp = 0; //TODO: pass to constructor
-            entry.set_filename(name);
+            entry.set_filename(name)?;
             entry.attributes = FatFileAttributes::Archive as u8;
             entry.set_first_cluster(new_file_cluster);
 
             self.write_direntry(parent_cluster, free_slot_index, &entry, &mut disk_mgr)?;
-            serial_println!("FAT32Driver: create_file: new directory entry written");
+            serial_println_verbose!("FAT32Driver: create_file: new directory entry written");
         }
 
         let node_id = encode_node_id(&entry, parent_cluster);
@@ -1096,7 +1106,7 @@ impl FilesystemDriver for Fat32Driver {
         name: &str,
     ) -> FileSystemResult<FileNodeHandle> {
         let (parent_cluster, _, attrs) = decode_node_id(parent_id);
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: create_directory: called for parent with node id: {:#x}",
             parent_id
         );
@@ -1126,28 +1136,28 @@ impl FilesystemDriver for Fat32Driver {
             }
             let free_slot_index =
                 self.find_free_slot_in_directory(parent_cluster, &entries, &mut disk_mgr)?;
-            serial_println!(
+            serial_println_verbose!(
                 "FAT32Driver: create_directory: free_slot_index: {}",
                 free_slot_index
             );
 
             let new_dir_cluster = self.allocate_clusters(1, &mut disk_mgr)?;
-            serial_println!(
+            serial_println_verbose!(
                 "FAT32Driver: create_directory: allocated cluster: {}",
                 new_dir_cluster
             );
 
             self.clear_clusters(new_dir_cluster, 1, &mut disk_mgr)?;
-            serial_println!("FAT32Driver: create_directory: cleared new cluster");
+            serial_println_verbose!("FAT32Driver: create_directory: cleared new cluster");
 
             let dot_entry = DirectoryEntry::create_dot_entry(new_dir_cluster);
             let dotdot_entry = DirectoryEntry::create_dot_dot_entry(parent_cluster);
 
             self.write_direntry(new_dir_cluster, 0, &dot_entry, &mut disk_mgr)?;
             self.write_direntry(new_dir_cluster, 1, &dotdot_entry, &mut disk_mgr)?;
-            serial_println!("FAT32Driver: create_directory: wrote . and .. entries");
+            serial_println_verbose!("FAT32Driver: create_directory: wrote . and .. entries");
 
-            new_dir_entry.set_filename(name);
+            new_dir_entry.set_filename(name)?;
             new_dir_entry.attributes = FatFileAttributes::Directory as u8;
             new_dir_entry.set_first_cluster(new_dir_cluster);
             new_dir_entry.file_size = 0;
@@ -1160,11 +1170,13 @@ impl FilesystemDriver for Fat32Driver {
                 &new_dir_entry,
                 &mut disk_mgr,
             )?;
-            serial_println!("FAT32Driver: create_directory: wrote new directory entry to parent");
+            serial_println_verbose!(
+                "FAT32Driver: create_directory: wrote new directory entry to parent"
+            );
         }
 
         let node_id = encode_node_id(&new_dir_entry, parent_cluster);
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: create_directory: created directory with node_id: {:#x}",
             node_id
         );
@@ -1174,7 +1186,7 @@ impl FilesystemDriver for Fat32Driver {
 
     fn delete(&mut self, node_id: FileNodeHandle) -> FileSystemResult<()> {
         let (cluster, parent_cluster, attrs) = decode_node_id(node_id);
-        serial_println!(
+        serial_println_verbose!(
             "FAT32Driver: delete: called for node_id: {:#x}, cluster: {}, parent_cluster: {}",
             node_id,
             cluster,
@@ -1191,7 +1203,7 @@ impl FilesystemDriver for Fat32Driver {
                 .find(|(_, e)| !e.is_deleted() && e.get_first_cluster() == cluster)
                 .ok_or(FileSystemError::NotFound)?;
 
-            serial_println!("FAT32Driver: delete: found entry at index {}", entry_index);
+            serial_println_verbose!("FAT32Driver: delete: found entry at index {}", entry_index);
 
             if is_directory(attrs) {
                 let dir_entries = self.read_directory_entries(cluster, &mut disk_mgr)?;
@@ -1206,16 +1218,16 @@ impl FilesystemDriver for Fat32Driver {
                 }
 
                 self.free_cluster_chain(cluster, &mut disk_mgr)?;
-                serial_println!("FAT32Driver: delete: freed directory clusters");
+                serial_println_verbose!("FAT32Driver: delete: freed directory clusters");
             } else {
                 self.free_cluster_chain(cluster, &mut disk_mgr)?;
-                serial_println!("FAT32Driver: delete: freed file clusters");
+                serial_println_verbose!("FAT32Driver: delete: freed file clusters");
             }
 
             let mut deleted_entry = entry.clone();
             deleted_entry.mark_deleted();
             self.write_direntry(parent_cluster, entry_index, &deleted_entry, &mut disk_mgr)?;
-            serial_println!("FAT32Driver: delete: marked entry as deleted");
+            serial_println_verbose!("FAT32Driver: delete: marked entry as deleted");
         }
 
         Ok(())

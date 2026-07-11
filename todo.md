@@ -58,6 +58,8 @@ fun todo:
 - userspace shell if that works?
 - some regression tests for the future for the userspace stuff
 
+- hook up the virtio_drivers crate; but there is no point for now and id have to probably maintain it when it updates; ata is fine for now
+
 graphics:
 
 - at this point tough to optimize anything, should do multithreaded rendering

@@ -40,10 +40,7 @@ impl AtaPioDriver {
         let present = unsafe { Self::drive_identify() };
         if present {
             let sector_count = unsafe { Self::read_sector_count() };
-            serial_println_core!(
-                "AtaPioDriver: found drive, sector_count={}",
-                sector_count
-            );
+            serial_println_core!("AtaPioDriver: found drive, sector_count={}", sector_count);
             Some(Self { sector_count })
         } else {
             serial_println_core!("AtaPioDriver: no drive found on primary bus master");
@@ -85,7 +82,11 @@ impl AtaPioDriver {
         let lba_mid_val = lba_mid.read();
         let lba_high_val = lba_high.read();
         if lba_mid_val != 0 || lba_high_val != 0 {
-            serial_println!("AtaPioDriver: IDENTIFY: non-ATA device (LBA mid={}, high={})", lba_mid_val, lba_high_val);
+            serial_println!(
+                "AtaPioDriver: IDENTIFY: non-ATA device (LBA mid={}, high={})",
+                lba_mid_val,
+                lba_high_val
+            );
             return false;
         }
 
@@ -158,7 +159,10 @@ impl AtaPioDriver {
         for _ in 0..POLL_TIMEOUT_MAX_ITERATIONS {
             let status = alt_status.read();
             if status & STATUS_ERR != 0 || status & STATUS_DF != 0 {
-                serial_println!("AtaPioDriver: drive error during poll_drq_set, status={:#x}", status);
+                serial_println!(
+                    "AtaPioDriver: drive error during poll_drq_set, status={:#x}",
+                    status
+                );
                 return Err(DiskOpError::ReadError);
             }
             if status & STATUS_DRQ != 0 {
@@ -272,12 +276,7 @@ impl DiskDevice for AtaPioDriver {
         Ok(())
     }
 
-    fn write_sectors(
-        &mut self,
-        start_sector: u64,
-        count: usize,
-        data: &[u8],
-    ) -> DiskOpResult<()> {
+    fn write_sectors(&mut self, start_sector: u64, count: usize, data: &[u8]) -> DiskOpResult<()> {
         if start_sector + count as u64 > self.sector_count {
             return Err(DiskOpError::InvalidSector);
         }

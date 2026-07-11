@@ -3,7 +3,7 @@
 set -e
 
 OUTPUT="${1:-ata_disk.img}"
-SIZE_MB="${2:-16}"
+SIZE_MB="${2:-256}"
 
 echo "Creating ${SIZE_MB}MB FAT32 disk image: ${OUTPUT}"
 

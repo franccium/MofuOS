@@ -21,6 +21,10 @@ path = "src/bin/game.rs"
 name = "theophe"
 path = "src/bin/theophe.rs"
 
+[[bin]]
+name = "fs_test"
+path = "src/bin/fs_test.rs"
+
 [dependencies]
 x86_64 = "0.15.2"
 pc-keyboard = "0.8.0"

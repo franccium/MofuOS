@@ -14,7 +14,9 @@ pub fn test_ata() {
     let mut driver = match AtaPioDriver::check_primary_bus_present() {
         Some(d) => d,
         None => {
-            serial_println!("FAIL: AtaPioDriver::check_primary_bus_present() returned None - no ATA drive detected");
+            serial_println!(
+                "FAIL: AtaPioDriver::check_primary_bus_present() returned None - no ATA drive detected"
+            );
             return;
         }
     };
@@ -218,10 +220,7 @@ fn test_boot_counter() {
                     "OK: boot counter after write = {} (verified read-back)",
                     readback
                 );
-                serial_println!(
-                    "INFO: run again with make run-x86_64-ata - next boot should show counter before = {}",
-                    new_value
-                );
+                serial_println!("INFO: next boot should show counter before = {}", new_value);
             } else {
                 serial_println!(
                     "FAIL: read-back mismatch - wrote {} read back {}",

@@ -12,6 +12,7 @@ pub const USE_PING_PROGRAM: bool = false;
 pub const USE_TEST_PROGRAM: bool = false;
 pub const USE_RUST_USER_PROGRAMS: bool = false;
 pub const USE_GAME_PROGRAM: bool = false;
+pub const RUN_FS_TEST: bool = true;
 
 pub const HHDM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 pub const MAX_CORES: u8 = 4;
