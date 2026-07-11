@@ -246,9 +246,8 @@ impl UserMemoryManager {
         Ok(())
     }
 
-    /// Map a specific physical frame (already allocated) into a user address space.
-    /// Does NOT allocate a new frame — caller provides the physical address.
-    /// Use this for mapping kernel-owned pixel buffers into user page tables.
+    /// Map a specific alloated physical frame into a user address space
+    /// Does not allocate a new frame, caller provides the physical address
     pub fn map_specific_frame(
         &self,
         pml4_table_phys: PhysAddr,
@@ -275,7 +274,6 @@ impl UserMemoryManager {
                     Ok(())
                 }
                 Err(MapToError::PageAlreadyMapped(_existing)) => {
-                    // Page already mapped with this physical frame — update flags only
                     match user_page_mapper.update_flags(page, user_flags) {
                         Ok(flush) => {
                             flush.flush();

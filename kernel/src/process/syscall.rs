@@ -533,7 +533,8 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 let phys = umm.translate_kernel_heap_virt_to_phys(page_vaddr);
                 let front_phys = umm.translate_kernel_heap_virt_to_phys(front_page_vaddr);
                 let user_virt = x86_64::VirtAddr::new(user_base + (i * 0x1000) as u64);
-                let front_user_virt = x86_64::VirtAddr::new(user_base + MAX_WINDOW_BUFFER_SIZE + (i * 0x1000) as u64);
+                let front_user_virt =
+                    x86_64::VirtAddr::new(user_base + MAX_WINDOW_BUFFER_SIZE + (i * 0x1000) as u64);
 
                 if let Err(e) = umm.map_specific_frame(pml4_phys, user_virt, phys, flags) {
                     serial_println_core!(
@@ -543,7 +544,9 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                     );
                     return u64::MAX;
                 }
-                if let Err(e) = umm.map_specific_frame(pml4_phys, front_user_virt, front_phys, flags) {
+                if let Err(e) =
+                    umm.map_specific_frame(pml4_phys, front_user_virt, front_phys, flags)
+                {
                     serial_println_core!(
                         "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
                         i,
@@ -571,10 +574,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                     w.buffer.present();
                 }
             }
-            serial_println_core!(
-                "sys_present_window: window_id={} presented",
-                window_id
-            );
+            serial_println_core!("sys_present_window: window_id={} presented", window_id);
             drop(windows);
             drop(compositor);
 
@@ -644,12 +644,7 @@ pub fn init_syscall() {
     //
     // sysretq sets CS = (STAR[63:48] + 16) | 3 = 0x23, SS = (STAR[63:48] + 8) | 3 = 0x1B
     let star_value = (0x10u64 << 48) | (0x08u64 << 32);
-    // SFMASK: mask these RFLAGS bits on syscall entry.
-    // Bit 9 (IF) must be masked so the timer cannot fire mid-syscall while SS
-    // is still the kernel selector. sysretq restores RFLAGS from R11 (saved
-    // user RFLAGS with IF=1), so interrupts re-enable automatically on return
-    // to userspace. We re-enable interrupts manually inside handle_syscall_inner
-    // for preemption of long-running syscalls.
+    // SFMASK: mask these RFLAGS bits on syscall entry
     let sfmask: u64 = 1 << 9; // mask IF
     unsafe {
         msr_write(0xC0000081, star_value);

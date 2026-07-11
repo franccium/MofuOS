@@ -967,8 +967,6 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
         if PREEMPTION_ENABLED && in_userspace {
             let pid = crate::process::scheduler::get_current_process_for_core(core_id);
 
-            // Only preempt if another process is waiting. If the queue is empty,
-            // let the current process keep running (fall through to SS patch + iretq).
             let has_waiting = {
                 let sched = crate::process::scheduler::SCHEDULER.lock();
                 sched.has_ready_threads_on_core(core_id)
@@ -983,18 +981,13 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
                         proc.execution_context.rflags = stack_frame.cpu_flags.bits();
                     }
                 }
-                // EOI before return_to_scheduler: unwinds directly to scheduler
-                // loop, skipping the compiler-generated iretq.
                 interrupt_over();
                 crate::process::scheduler::return_to_scheduler();
             }
         }
 
         if in_userspace {
-            // Intel sysretq sets SS = STAR[63:48]+8 without ORing RPL=3, leaving
-            // SS=0x18 (RPL=0) in the running user process. The compiler-generated
-            // iretq back to Ring3 GPFs if SS RPL != 3. Patch SS to 0x1b.
-            // CPU Ring3 interrupt frame layout: RIP, CS, RFLAGS, RSP, SS (5 x u64).
+            // RPL wasnt getting set to 3 on syscall/sysretq, idk what im doing wrong, just do that for now
             let ss_slot = core::ptr::addr_of!(*stack_frame) as *mut u64;
             ss_slot.add(4).write_volatile(0x1b);
         }

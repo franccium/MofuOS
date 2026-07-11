@@ -37,7 +37,12 @@ pub fn execute_process_direct(process: &Process) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe fn jump_to_userspace(entry_point: u64, stack_pointer: u64, rflags: u64, core_id: u8) -> ! {
+pub unsafe fn jump_to_userspace(
+    entry_point: u64,
+    stack_pointer: u64,
+    rflags: u64,
+    core_id: u8,
+) -> ! {
     let user_code_selector = crate::gdt::get_user_code_selector(core_id).0 as u64;
     let user_data_selector = crate::gdt::get_user_data_selector(core_id).0 as u64;
     serial_println_core!(

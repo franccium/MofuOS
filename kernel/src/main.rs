@@ -263,9 +263,8 @@ fn main() -> ! {
             ///let cpu_info = kernel::util::cpuinfo::get_cpu_info();
             ///let cpu_info_str = cpu_info.to_pretty_string();
             ///theophe.write_str(&cpu_info_str);
-    ///
+            ///
             ///theophe.render();
-
             compositor.focus_window(0);
             compositor.compose(fb);
         }
