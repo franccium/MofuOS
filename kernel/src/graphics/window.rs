@@ -171,9 +171,20 @@ impl WindowBuffer {
         unsafe { (*self.back_buffer.get()).as_ptr() }
     }
 
-    // Helper to get front buffer pointer
     pub fn front_buffer_ptr(&self) -> *const u32 {
         unsafe { (*self.front_buffer.get()).as_ptr() }
+    }
+
+    pub fn back_buffer_virt_addr(&self) -> u64 {
+        self.back_buffer_ptr() as u64
+    }
+
+    pub fn front_buffer_virt_addr(&self) -> u64 {
+        self.front_buffer_ptr() as u64
+    }
+
+    pub fn pixel_count(&self) -> usize {
+        (self.width * self.height) as usize
     }
 
     pub fn get_bounding_rect(&self) -> Rect {
@@ -257,6 +268,9 @@ impl<'a> WindowPresentBuffer<'a> {
         }
     }
 }
+
+unsafe impl Send for WindowBuffer {}
+unsafe impl Sync for WindowBuffer {}
 
 impl Drop for WindowBuffer {
     fn drop(&mut self) {

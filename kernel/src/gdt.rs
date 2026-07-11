@@ -46,8 +46,8 @@ struct Gdt {
     table: GlobalDescriptorTable,
     kernel_code_selector: SegmentSelector,
     kernel_data_selector: SegmentSelector,
-    user_data_selector: SegmentSelector,
     user_code_selector: SegmentSelector,
+    user_data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
@@ -58,17 +58,17 @@ impl Gdt {
     const fn empty() -> Self {
         let mut table = GlobalDescriptorTable::new();
         let kernel_code_selector = table.append(Descriptor::kernel_code_segment());
-        let kernel_data_selector = table.append(Descriptor::kernel_code_segment());
-        let user_code_selector = table.append(Descriptor::kernel_code_segment());
-        let user_data_selector = table.append(Descriptor::kernel_code_segment());
+        let kernel_data_selector = table.append(Descriptor::kernel_data_segment());
+        let user_data_selector = table.append(Descriptor::user_data_segment());
+        let user_code_selector = table.append(Descriptor::user_code_segment());
         let tss_selector = table.append(Descriptor::kernel_code_segment());
 
         Gdt {
             table,
             kernel_code_selector,
             kernel_data_selector,
-            user_data_selector,
             user_code_selector,
+            user_data_selector,
             tss_selector,
         }
     }
@@ -107,6 +107,9 @@ impl Gdt {
         let user_data_selector = table.append(Descriptor::user_data_segment());
         let user_code_selector = table.append(Descriptor::user_code_segment());
         let tss_selector = table.append(Descriptor::tss_segment(tss));
+        serial_println!("Initialized GDT for core {} with: kernel_code_selector={:#x}, kernel_data_selector={:#x}, 
+        user_code_selector={:#x}, user_data_selector={:#x}, tss_selector={:#x}", core_id, kernel_code_selector.0, kernel_data_selector.0, 
+        user_code_selector.0, user_data_selector.0, tss_selector.0);
 
         Gdt {
             table,
@@ -157,27 +160,22 @@ pub unsafe fn init_core_gdt(core_id: u8) {
     }
 }
 
-pub fn get_kernel_code_selector() -> SegmentSelector {
-    let core_id = crate::util::cpuinfo::get_current_core_id() as usize;
-    unsafe { PER_CORE_GDT[core_id].kernel_code_selector }
+pub fn get_kernel_code_selector(core_id: u8) -> SegmentSelector {
+    unsafe { PER_CORE_GDT[core_id as usize].kernel_code_selector }
 }
 
-pub fn get_kernel_data_selector() -> SegmentSelector {
-    let core_id = crate::util::cpuinfo::get_current_core_id() as usize;
-    unsafe { PER_CORE_GDT[core_id].kernel_data_selector }
+pub fn get_kernel_data_selector(core_id: u8) -> SegmentSelector {
+    unsafe { PER_CORE_GDT[core_id as usize].kernel_data_selector }
 }
 
-pub fn get_user_code_selector() -> SegmentSelector {
-    let core_id = crate::util::cpuinfo::get_current_core_id() as usize;
-    unsafe { PER_CORE_GDT[core_id].user_code_selector }
+pub fn get_user_code_selector(core_id: u8) -> SegmentSelector {
+    unsafe { PER_CORE_GDT[core_id as usize].user_code_selector }
 }
 
-pub fn get_user_data_selector() -> SegmentSelector {
-    let core_id = crate::util::cpuinfo::get_current_core_id() as usize;
-    unsafe { PER_CORE_GDT[core_id].user_data_selector }
+pub fn get_user_data_selector(core_id: u8) -> SegmentSelector {
+    unsafe { PER_CORE_GDT[core_id as usize].user_data_selector }
 }
 
-pub fn get_tss_selector() -> SegmentSelector {
-    let core_id = crate::util::cpuinfo::get_current_core_id() as usize;
-    unsafe { PER_CORE_GDT[core_id].tss_selector }
+pub fn get_tss_selector(core_id: u8) -> SegmentSelector {
+    unsafe { PER_CORE_GDT[core_id as usize].tss_selector }
 }

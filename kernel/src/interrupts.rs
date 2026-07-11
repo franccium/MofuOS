@@ -1,5 +1,6 @@
 #![allow(unused)]
 use crate::io::serial;
+use crate::process::execution::jump_to_userspace;
 use crate::process::{SCHEDULER, Scheduler};
 use crate::process::{
     process::INVALID_PID,
@@ -45,6 +46,7 @@ use x86_64::{
 const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
+const PREEMPTION_ENABLED: bool = false;
 
 /// TSC frequency measured at boot via PIT calibration
 /// Written once by core 0 before any AP is started
@@ -893,7 +895,6 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     serial_println!("RSP: {:#x}", stack_frame.stack_pointer);
     serial_println!("SS: {:?}", stack_frame.stack_segment);
 
-    // Read the values that iretq would pop
     unsafe {
         let rsp = stack_frame.stack_pointer.as_u64() as *const u64;
         serial_println!("Stack contents for iretq:");
@@ -904,11 +905,9 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         serial_println!("  SS: {:#x}", *rsp.add(4));
     }
 
-    // Try to read the instruction that caused the fault
     let rip = stack_frame.instruction_pointer.as_u64();
     serial_println!("Faulting instruction at: {:#x}", rip);
 
-    // Read the bytes at RIP to identify the instruction
     unsafe {
         let instr_ptr = rip as *const u8;
         serial_println!(
@@ -963,22 +962,17 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
         let next_deadline = tsc_read() + tsc_cycles_per_tick();
         msr_write(MSR_IA32_TSC_DEADLINE, next_deadline);
 
-        // Check if a userspace process is running on this core.
-        // stack_frame.code_segment RPL == 3 means we interrupted userspace.
-        let preempt = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+        let in_userspace = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
 
-        // serial_println_core!(
-        //     "Core {}: Timer interrupt, preempting userspace?: {}",
-        //     core_id,
-        //     preempt
-        // );
-
-        if preempt {
+        if PREEMPTION_ENABLED && in_userspace {
             let pid = crate::process::scheduler::get_current_process_for_core(core_id);
-            serial_println_core!("Core {}: Preempting process PID {}", core_id, pid);
-            if pid != crate::process::process::INVALID_PID {
-                // Save the interrupted userspace context into the process so
-                // the scheduler can resume it via iretq when it runs next.
+
+            let has_waiting = {
+                let sched = crate::process::scheduler::SCHEDULER.lock();
+                sched.has_ready_threads_on_core(core_id)
+            };
+
+            if has_waiting && pid != crate::process::process::INVALID_PID {
                 {
                     let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
                     if let Ok(proc) = pm.get_process_mut(pid) {
@@ -987,14 +981,15 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
                         proc.execution_context.rflags = stack_frame.cpu_flags.bits();
                     }
                 }
-
-                // EOI must be sent before return_to_scheduler() because that
-                // call never returns here — it unwinds directly to the
-                // scheduler loop, skipping the compiler-generated iretq.
                 interrupt_over();
-
                 crate::process::scheduler::return_to_scheduler();
             }
+        }
+
+        if in_userspace {
+            // RPL wasnt getting set to 3 on syscall/sysretq, idk what im doing wrong, just do that for now
+            let ss_slot = core::ptr::addr_of!(*stack_frame) as *mut u64;
+            ss_slot.add(4).write_volatile(0x1b);
         }
 
         interrupt_over();

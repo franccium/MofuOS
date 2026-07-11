@@ -80,7 +80,7 @@ pub enum SystemCall {
     },
 }
 
-#[repr(usize)]
+#[repr(u64)]
 pub enum SyscallNumber {
     CreateProcess = 0,
     TerminateProcess = 1,
@@ -93,7 +93,13 @@ pub enum SyscallNumber {
     LoadFile = 8,
     UnloadFile = 9,
     CreateWindow = 10,
-    GetProcessInfo = 11,
+    DestroyWindow = 11,
+    MapWindowBuffer = 12,
+    PresentWindow = 13,
+    GetWindowSize = 14,
+    FocusWindow = 15,
+    GetProcessInfo = 996,
+    GetPID = 997,
     Yield = 998,
     Exit = 999,
 }
@@ -232,8 +238,8 @@ pub struct SyscallFrame {
     pub r14: u64,
     pub r13: u64,
     pub r12: u64,
-    pub rbx: u64,
     pub rbp: u64,
+    pub rbx: u64,
 
     pub arg6: u64,        // r9
     pub arg5: u64,        // r8
@@ -253,7 +259,7 @@ pub struct SyscallFrame {
 pub unsafe extern "C" fn syscall_handler() -> ! {
     naked_asm!(
         // on syscall entry: CS/SS switched, interrupts off, user RIP in RCX, RFLAGS in R11
-        // GS currently holds user GS — swap to kernel GS (which holds PerCoreSyscallData ptr)
+        // swap to kernel GS
         "swapgs",
 
         // save user RSP; load per-core kernel stack top from gs:0 (stack_top field)
@@ -275,9 +281,8 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
         "push r10",
         "push r8",
         "push r9",
-
-        "push rbp",
         "push rbx",
+        "push rbp",
         "push r12",
         "push r13",
         "push r14",
@@ -289,10 +294,16 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
         "pop r14",
         "pop r13",
         "pop r12",
-        "pop rbx",
         "pop rbp",
-
-        "add rsp, 7*8",
+        "pop rbx",
+        "pop r9",
+        "pop r8",
+        "pop r10",
+        "pop rdx",
+        "pop rsi",
+        "pop rdi",
+        "add rsp, 8", // pop rax
+        //"add rsp, 7*8",
 
         "pop r11",
         "pop rcx",
@@ -311,6 +322,13 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
     let frame = unsafe { &mut *frame };
 
+    // SFMASK masked IF on syscall entry to prevent the timer firing while SS
+    // still holds the kernel selector. Re-enable interrupts now that we are on
+    // the per-core kernel stack so the timer can preempt long-running syscalls.
+    // sysretq will restore RFLAGS from R11 (user RFLAGS, IF=1), so interrupts
+    // stay enabled on return to userspace without any extra work here.
+    x86_64::instructions::interrupts::enable();
+
     // serial_println_core!(
     //     "Syscall: num={}, arg1={:#x}, arg2={:#x}, arg3={:#x}, arg4={:#x}, arg5={:#x}, arg6={:#x}",
     //     frame.syscall_num,
@@ -322,8 +340,10 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
     //     frame.arg6,
     // );
 
-    match frame.syscall_num {
-        2 => {
+    let syscall = unsafe { core::mem::transmute::<u64, SyscallNumber>(frame.syscall_num) };
+
+    match syscall {
+        SyscallNumber::Write => {
             let fd = frame.arg1;
             let buf = frame.arg2 as *const u8;
             let count = frame.arg3 as usize;
@@ -340,14 +360,41 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             }
             count as u64
         }
+        SyscallNumber::CreateWindow => {
+            let width = frame.arg1 as u32;
+            let height = frame.arg2 as u32;
+            let x = frame.arg3 as i32;
+            let y = frame.arg4 as i32;
 
-        997 => {
-            // serial_println_core!("997 returning: {}", frame.arg1);
-            frame.arg1
+            let mut compositor = crate::graphics::compositor::get_compositor();
+            let (window_id, _buffer) = compositor.create_window(width, height, x, y);
+            serial_println_core!(
+                "sys_create_window: {}x{} at ({},{}) -> id={}",
+                width,
+                height,
+                x,
+                y,
+                window_id
+            );
+            compositor.set_z_index(window_id, 7);
+            drop(compositor);
+
+            window_id as u64
+        }
+        SyscallNumber::DestroyWindow => {
+            let window_id = frame.arg1 as u32;
+            crate::graphics::compositor::get_compositor().destroy_window(window_id);
+            serial_println_core!("sys_destroy_window: id={}", window_id);
+            0
+        }
+        SyscallNumber::GetPID => {
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+            pid as u64
         }
         // Voluntarily yield the CPU back to the scheduler without terminating
         // Save the userspace return address and stack into the process's execution_context
-        998 => {
+        SyscallNumber::Yield => {
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
             serial_println_core!("sys_yield: PID {} yielding", pid);
@@ -361,9 +408,12 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 }
             }
 
+            // Disable interrupts before unwinding to the scheduler stack.
+            // The timer must not fire between here and return_to_scheduler's ret.
+            x86_64::instructions::interrupts::disable();
             scheduler::return_to_scheduler();
         }
-        999 => {
+        SyscallNumber::Exit => {
             let exit_code = frame.arg1;
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
@@ -374,7 +424,180 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 pm.terminate_process(pid, exit_code as i32, false);
             }
 
+            // Disable interrupts before unwinding to the scheduler stack.
+            x86_64::instructions::interrupts::disable();
             scheduler::return_to_scheduler();
+        }
+        SyscallNumber::Allocate => {
+            let size = frame.arg1 as usize;
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+
+            let old_heap_end = {
+                let pm = PROCESS_MANAGER.lock();
+                match pm.get_process(pid) {
+                    Ok(proc) => proc.memory_layout.heap_end,
+                    Err(_) => {
+                        serial_println_core!("sys_allocate: pid={} not found", pid);
+                        return u64::MAX;
+                    }
+                }
+            };
+
+            let new_heap_end = old_heap_end + size as u64;
+            let umm = crate::memory::get_user_mem_mgr();
+            let mut fa = crate::memory::get_frame_allocator();
+
+            let result = {
+                let mut pm = PROCESS_MANAGER.lock();
+                match pm.get_process_mut(pid) {
+                    Ok(proc) => match proc.memory_layout.grow_heap(new_heap_end, umm, &mut fa) {
+                        Ok(_) => {
+                            serial_println_core!(
+                                "sys_allocate: pid={} size={} -> ptr={:#x}",
+                                pid,
+                                size,
+                                old_heap_end.as_u64()
+                            );
+                            old_heap_end.as_u64()
+                        }
+                        Err(e) => {
+                            serial_println_core!(
+                                "sys_allocate: pid={} size={} grow_heap failed: {:?}",
+                                pid,
+                                size,
+                                e
+                            );
+                            u64::MAX
+                        }
+                    },
+                    Err(_) => u64::MAX,
+                }
+            };
+            result
+        }
+        SyscallNumber::MapWindowBuffer => {
+            let window_id = frame.arg1 as u32;
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+
+            // User virtual base for window pixel buffers.
+            // Chosen to be above the heap and well below the stack.
+            const USER_WINDOW_BUFFER_BASE: u64 = 0x0000_0001_0000_0000;
+            const MAX_WINDOW_BUFFER_SIZE: u64 = 8 * 1024 * 1024; // 8 MB per window slot
+
+            let user_base = USER_WINDOW_BUFFER_BASE + (window_id as u64) * MAX_WINDOW_BUFFER_SIZE;
+
+            // Retrieve the WindowBuffer Arc from the compositor, then release the compositor lock.
+            let buffer_arc = {
+                let compositor = crate::graphics::compositor::get_compositor();
+                let windows = compositor.windows.read();
+                match windows.get(window_id as usize) {
+                    Some(w) if w.is_visible => alloc::sync::Arc::clone(&w.buffer),
+                    _ => {
+                        serial_println_core!(
+                            "sys_map_window_buffer: window_id={} not found",
+                            window_id
+                        );
+                        return u64::MAX;
+                    }
+                }
+            };
+
+            let back_vaddr = buffer_arc.back_buffer_virt_addr();
+            let front_vaddr = buffer_arc.front_buffer_virt_addr();
+            let pixel_count = buffer_arc.pixel_count();
+            let byte_count = pixel_count * 4;
+            let page_count = (byte_count + 0xFFF) / 0x1000;
+
+            let pml4_phys = {
+                let pm = PROCESS_MANAGER.lock();
+                match pm.get_process(pid) {
+                    Ok(p) => p.memory_layout.top_page_table_phys,
+                    Err(_) => {
+                        serial_println_core!("sys_map_window_buffer: pid={} not found", pid);
+                        return u64::MAX;
+                    }
+                }
+            };
+
+            let umm = crate::memory::get_user_mem_mgr();
+            let flags = x86_64::structures::paging::PageTableFlags::PRESENT
+                | x86_64::structures::paging::PageTableFlags::WRITABLE
+                | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
+                | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
+
+            for i in 0..page_count {
+                let page_vaddr = back_vaddr + (i * 0x1000) as u64;
+                let front_page_vaddr = front_vaddr + (i * 0x1000) as u64;
+                let phys = umm.translate_kernel_heap_virt_to_phys(page_vaddr);
+                let front_phys = umm.translate_kernel_heap_virt_to_phys(front_page_vaddr);
+                let user_virt = x86_64::VirtAddr::new(user_base + (i * 0x1000) as u64);
+                let front_user_virt =
+                    x86_64::VirtAddr::new(user_base + MAX_WINDOW_BUFFER_SIZE + (i * 0x1000) as u64);
+
+                if let Err(e) = umm.map_specific_frame(pml4_phys, user_virt, phys, flags) {
+                    serial_println_core!(
+                        "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
+                        i,
+                        e
+                    );
+                    return u64::MAX;
+                }
+                if let Err(e) =
+                    umm.map_specific_frame(pml4_phys, front_user_virt, front_phys, flags)
+                {
+                    serial_println_core!(
+                        "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
+                        i,
+                        e
+                    );
+                    return u64::MAX;
+                }
+            }
+
+            serial_println_core!(
+                "sys_map_window_buffer: window_id={} mapped {} pages at user {:#x}",
+                window_id,
+                page_count,
+                user_base
+            );
+            user_base
+        }
+        SyscallNumber::PresentWindow => {
+            let window_id = frame.arg1 as u32;
+
+            let compositor = crate::graphics::compositor::get_compositor();
+            let windows = compositor.windows.read();
+            if let Some(w) = windows.get(window_id as usize) {
+                if w.is_visible {
+                    w.buffer.present();
+                }
+            }
+            serial_println_core!("sys_present_window: window_id={} presented", window_id);
+            drop(windows);
+            drop(compositor);
+
+            0
+        }
+        SyscallNumber::GetWindowSize => {
+            let window_id = frame.arg1 as u32;
+            let compositor = crate::graphics::compositor::get_compositor();
+            let windows = compositor.windows.read();
+            match windows.get(window_id as usize) {
+                Some(w) if w.is_visible => {
+                    let width = w.buffer.width as u64;
+                    let height = w.buffer.height as u64;
+                    (width << 32) | height
+                }
+                _ => u64::MAX,
+            }
+        }
+        SyscallNumber::FocusWindow => {
+            let window_id = frame.arg1 as u32;
+            crate::graphics::compositor::get_compositor().focus_window(window_id);
+            serial_println_core!("sys_focus_window: id={}", window_id);
+            0
         }
         _ => u64::MAX,
     }
@@ -411,20 +634,22 @@ pub fn init_syscall() {
     }
 
     // STAR MSR layout:
+    // https://www.felixcloutier.com/x86/sysret
     // Bits 63:48 = User CS base for sysretq (CS = this + 16, SS = this + 8)
     // Bits 47:32 = Kernel CS base for syscall (CS = this, SS = this + 8)
     //
     // GDT layout:
     //   0x08 = kernel code, 0x10 = kernel data
-    //   0x18 = user data,   0x20 = user code
+    //   0x18 = user data, 0x20 = user code
     //
     // sysretq sets CS = (STAR[63:48] + 16) | 3 = 0x23, SS = (STAR[63:48] + 8) | 3 = 0x1B
-    // so STAR[63:48] must be 0x10
     let star_value = (0x10u64 << 48) | (0x08u64 << 32);
+    // SFMASK: mask these RFLAGS bits on syscall entry
+    let sfmask: u64 = 1 << 9; // mask IF
     unsafe {
         msr_write(0xC0000081, star_value);
         msr_write(0xC0000082, syscall_handler as *const () as u64);
-        msr_write(0xC0000084, 0u64); // no RFLAGS masking
+        msr_write(0xC0000084, sfmask);
     }
 
     serial_println_core!("Syscall MSRs initialized");

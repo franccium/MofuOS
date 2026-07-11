@@ -243,12 +243,34 @@ pub unsafe fn init_current_core() {
 
     serial_println!("Core {}: Initializing", core_id);
 
+    unsafe { enable_sse_for_current_core() };
     unsafe { init_cpu_info_for_core(core_id) };
     unsafe { init_timer_for_core(core_id) };
 
     process::syscall::init_syscall();
 
     serial_println!("Core {}: Initialized successfully", core_id);
+}
+
+/// CR0.MP (bit 1) = 1 - monitor coprocessor
+/// CR0.EM (bit 2) = 0 - clear FPU emulation flag
+/// CR4.OSFXSR (bit 9) = 1 - OS supports FXSAVE/FXRSTOR
+/// CR4.OSXMMEXCPT (bit 10) = 1 - OS handles SSE exceptions
+pub unsafe fn enable_sse_for_current_core() {
+    unsafe {
+        core::arch::asm!(
+            "mov rax, cr0",
+            "or  rax, 0x2", // set MP
+            "and rax, ~0x4",// clear EM
+            "mov cr0, rax",
+            // set OSFXSR and OSXMMEXCPT
+            "mov rax, cr4",
+            "or  rax, 0x600",
+            "mov cr4, rax",
+            out("rax") _,
+            options(nostack, nomem),
+        );
+    }
 }
 
 pub unsafe fn init_cpu_info_for_core(core_id: u8) {
@@ -576,6 +598,9 @@ pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
     // Create the core's GDT
     gdt::init_core_gdt(proc_id);
     serial_println!("Core {}: GDT loaded", proc_id);
+
+    // Enable SSE/SSE2 — must be done on every core before entering userspace
+    unsafe { enable_sse_for_current_core() };
 
     // Initialize per-core syscall stack and SYSCALL/SYSRET MSRs
     process::syscall::init_syscall();

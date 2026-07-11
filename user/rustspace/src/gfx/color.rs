@@ -45,12 +45,6 @@ impl Rgba8888UNORM {
         b: 255,
         a: 255,
     };
-    pub const DARK_BLUE: Self = Self {
-        r: 0,
-        g: 0,
-        b: 55,
-        a: 255,
-    };
     pub const GRAY: Self = Self {
         r: 64,
         g: 64,

@@ -30,7 +30,7 @@ PROGRAMS = programs/first/first programs/test/test programs/ping/ping programs/p
 all: $(PROGRAMS) rust-programs
 
 rust-programs:
-	cd rustspace && cargo +nightly build -Z build-std=core -Z json-target-spec --target x86_64-user.json
+	cd rustspace && cargo fmt && cargo +nightly build -Z build-std=core,alloc -Z json-target-spec --target x86_64-user.json
 
 crt0.o: crt0.c
 	$(CC) $(CFLAGS) -c $< -o $@

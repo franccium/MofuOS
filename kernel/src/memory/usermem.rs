@@ -246,6 +246,59 @@ impl UserMemoryManager {
         Ok(())
     }
 
+    /// Map a specific alloated physical frame into a user address space
+    /// Does not allocate a new frame, caller provides the physical address
+    pub fn map_specific_frame(
+        &self,
+        pml4_table_phys: PhysAddr,
+        virt_addr: VirtAddr,
+        phys_addr: PhysAddr,
+        flags: PageTableFlags,
+    ) -> Result<(), MapToError<Size4KiB>> {
+        use x86_64::structures::paging::PhysFrame;
+
+        let new_table_pml4_virt = VirtAddr::new(pml4_table_phys.as_u64() + self.phys_offset);
+        let pml4_table = unsafe { &mut *(new_table_pml4_virt.as_u64() as *mut PageTable) };
+        let mut user_page_mapper =
+            unsafe { OffsetPageTable::new(pml4_table, VirtAddr::new(self.phys_offset)) };
+
+        let page = Page::containing_address(virt_addr);
+        let phys_frame = PhysFrame::containing_address(phys_addr);
+        let user_flags = flags | PageTableFlags::USER_ACCESSIBLE;
+
+        let mut fa = crate::memory::get_frame_allocator();
+        unsafe {
+            match user_page_mapper.map_to(page, phys_frame, user_flags, &mut *fa) {
+                Ok(flush) => {
+                    flush.flush();
+                    Ok(())
+                }
+                Err(MapToError::PageAlreadyMapped(_existing)) => {
+                    match user_page_mapper.update_flags(page, user_flags) {
+                        Ok(flush) => {
+                            flush.flush();
+                            Ok(())
+                        }
+                        Err(e) => {
+                            serial_println!("map_specific_frame: update_flags failed: {:?}", e);
+                            Ok(())
+                        }
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    /// Translate a kernel virtual address (e.g. a heap allocation) to its physical address
+    /// by walking the kernel page table. The kernel heap is not HHDM-mapped, its pages
+    /// were individually allocated by the frame allocator and mapped by init_heap, so
+    /// phys != vaddr - phys_offset. We must walk the page table to find the real frame.
+    pub fn translate_kernel_heap_virt_to_phys(&self, vaddr: u64) -> PhysAddr {
+        self.translate_user_virt_to_phys(self.kernel_page_table_phys, VirtAddr::new(vaddr))
+            .expect("translate_kernel_heap_virt_to_phys: address not mapped in kernel page table")
+    }
+
     pub fn create_main_stack(
         &self,
         pml4_table_phys: PhysAddr,
