@@ -1,8 +1,12 @@
 use crate::filesystem::sirius::{DirEntryFlat, FS_NAME_LEN, StatFlat};
+use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
 use crate::memory::get_frame_allocator;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
+use crate::process::CORE_POOL;
+use crate::process::core_pool::TOTAL_CORE_COUNT;
 use crate::process::process::FileDescriptor;
 use crate::serial_println;
+use crate::util::cpuinfo::{CpuInfoFlat, get_cpu_info_for_core};
 use crate::util::msr::msr_write;
 use crate::{
     process::{
@@ -14,6 +18,7 @@ use crate::{
     util::cpuinfo::get_current_core_id,
 };
 use core::arch::naked_asm;
+use core::sync::atomic::Ordering;
 use x86_64::registers::model_specific::{Efer, EferFlags};
 
 /// Check that a userspace pointer + length is entirely within canonical user address space
@@ -117,6 +122,7 @@ pub enum SyscallNumber {
     CreateFile = 26,
     CreateDir = 27,
     Delete = 28,
+    GetCpuInfo = 970,
     GetProcessInfo = 996,
     GetPID = 997,
     Yield = 998,
@@ -1009,6 +1015,31 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                     FileDescriptor::INVALID_FD
                 }
             }
+        }
+
+        SyscallNumber::GetCpuInfo => {
+            let buffer_ptr = frame.arg1 as usize;
+            let buffer_len = frame.arg2 as usize;
+
+            if !validate_user_ptr(buffer_ptr, buffer_len) {
+                serial_println_core!("sys_get_cpu_info: invalid pointer");
+                return 2;
+            }
+
+            let core_id = get_current_core_id();
+            let cpu_info = get_cpu_info_for_core(core_id);
+
+            let tsc_freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
+            let boot_tsc = BOOT_TSC.load(Ordering::Relaxed);
+            let core_count = unsafe { TOTAL_CORE_COUNT };
+
+            let flat = CpuInfoFlat::from_kernel_info(cpu_info, tsc_freq, boot_tsc, core_count);
+
+            unsafe {
+                core::ptr::write(buffer_ptr as *mut CpuInfoFlat, flat);
+            }
+
+            0
         }
 
         _ => u64::MAX,

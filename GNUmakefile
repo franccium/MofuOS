@@ -46,7 +46,7 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-M q35 \
 		-accel kvm \
 		-smp cores=3,threads=1 \
-		-cpu qemu64,+tsc-deadline,+apic \
+		-cpu host,+tsc-deadline,+apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \
@@ -70,7 +70,7 @@ run-x86_64-ata: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NA
 		-M q35 \
 		-accel kvm \
 		-smp cores=3,threads=1 \
-		-cpu qemu64,+tsc-deadline,+apic \
+		-cpu host,+tsc-deadline,+apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \
@@ -90,7 +90,7 @@ run-nologs: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-M q35 \
 		-accel kvm \
 		-smp cores=2,threads=1 \
-		-cpu qemu64,+tsc-deadline,+apic \
+		-cpu host,+tsc-deadline,+apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \
@@ -105,7 +105,7 @@ run-fast-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_N
 	qemu-system-$(KARCH) \
 		-M q35 \
 		-accel kvm \
-		-cpu host \
+		-cpu host,+tsc-deadline,+apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \

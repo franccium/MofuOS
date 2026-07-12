@@ -34,6 +34,8 @@ pub const SYS_CREATE_FILE: u64 = 26;
 pub const SYS_CREATE_DIR: u64 = 27;
 pub const SYS_DELETE: u64 = 28;
 
+pub const SYS_GET_CPU_INFO: u64 = 970;
+
 pub const SYS_YIELD: u64 = 998;
 pub const SYS_EXIT: u64 = 999;
 pub const SYS_ECHO: u64 = 997;
@@ -105,6 +107,45 @@ impl StatFlat {
     }
 }
 
+#[repr(C, align(16))]
+pub struct CpuInfoFlat {
+    pub vendor: u8,
+    pub family: u8,
+    pub model: u8,
+    pub stepping: u8,
+    pub display_family: u16,
+    pub display_model: u8,
+    pub cache_line_size: u8,
+    pub apic_id: u8,
+    pub features: u32,
+    pub tsc_frequency_hz: u64,
+    pub boot_tsc: u64,
+    pub max_cpuid_leaf: u32,
+    pub max_extended_cpuid_leaf: u32,
+    pub core_count: u8,
+}
+
+impl CpuInfoFlat {
+    pub const fn zeroed() -> Self {
+        Self {
+            vendor: 0,
+            family: 0,
+            model: 0,
+            stepping: 0,
+            display_family: 0,
+            display_model: 0,
+            cache_line_size: 0,
+            apic_id: 0,
+            features: 0,
+            tsc_frequency_hz: 0,
+            boot_tsc: 0,
+            max_cpuid_leaf: 0,
+            max_extended_cpuid_leaf: 0,
+            core_count: 0,
+        }
+    }
+}
+
 pub const INVALID_ALLOC: u64 = u64::MAX;
 
 #[inline(always)]
@@ -131,13 +172,28 @@ pub unsafe fn syscall6(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6
 }
 
 #[inline(always)]
+pub unsafe fn syscall1(num: u64, a1: u64) -> u64 {
+    unsafe { syscall6(num, a1, 0, 0, 0, 0, 0) }
+}
+
+#[inline(always)]
+pub unsafe fn syscall2(num: u64, a1: u64, a2: u64) -> u64 {
+    unsafe { syscall6(num, a1, a2, 0, 0, 0, 0) }
+}
+
+#[inline(always)]
 pub unsafe fn syscall3(num: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     unsafe { syscall6(num, a1, a2, a3, 0, 0, 0) }
 }
 
 #[inline(always)]
-pub unsafe fn syscall1(num: u64, a1: u64) -> u64 {
-    unsafe { syscall6(num, a1, 0, 0, 0, 0, 0) }
+pub unsafe fn syscall4(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    unsafe { syscall6(num, a1, a2, a3, a4, 0, 0) }
+}
+
+#[inline(always)]
+pub unsafe fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    unsafe { syscall6(num, a1, a2, a3, a4, a5, 0) }
 }
 
 #[inline(always)]
@@ -341,6 +397,18 @@ pub unsafe fn sys_delete(path: &str) -> bool {
     ret != u64::MAX
 }
 
+#[inline(always)]
+pub unsafe fn sys_get_cpu_info(out_info: &mut CpuInfoFlat) -> bool {
+    let ret = unsafe {
+        syscall2(
+            SYS_GET_CPU_INFO,
+            out_info as *mut CpuInfoFlat as u64,
+            core::mem::size_of::<CpuInfoFlat>() as u64,
+        )
+    };
+    ret == 0
+}
+
 // Arena bump allocator
 // Asks the kernel for SLAB_SIZE bytes at a time and hands out addresses
 // from within that arena. Only calls sys_allocate again when the current arena is exhausted
@@ -410,6 +478,7 @@ fn alloc_error(_layout: Layout) -> ! {
     unsafe { sys_exit(1) }
 }
 
+use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Debug, Clone, Copy)]
@@ -513,6 +582,26 @@ impl EventReader {
             unsafe { sys_yield() }
         }
     }
+}
+
+pub unsafe fn tsc_read() -> (u64, u32) {
+    let low: u32;
+    let high: u32;
+    let core: u32;
+
+    unsafe {
+        asm!(
+            "lfence",
+            "rdtscp",
+            out("eax") low,
+            out("edx") high,
+            out("ecx") core,
+            options(nostack, preserves_flags)
+        );
+    }
+
+    let tsc = ((high as u64) << 32) | (low as u64);
+    (tsc, core)
 }
 
 pub struct Serial;

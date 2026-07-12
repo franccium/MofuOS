@@ -54,11 +54,11 @@ const PREEMPTION_ENABLED: bool = false;
 /// TSC frequency measured at boot via PIT calibration
 /// Written once by core 0 before any AP is started
 /// All cores read this after it is set
-static TSC_FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
+pub static TSC_FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
 
 /// TSC value at the moment core 0 finished basic init (just before APs start)
 /// Used as the zero-point for log timestamps
-static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
+pub static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
 
 pub const TIMER_TICK_INTERVAL_MS: u64 = 10;
 pub const TIMER_TICK_FREQ_HZ: u64 = 1000 / TIMER_TICK_INTERVAL_MS;
@@ -400,11 +400,12 @@ unsafe fn init_local_apic(
 
 /// Read the Time Stamp Counter (TSC) register
 /// Returns the current cycle count since processor reset
-unsafe fn tsc_read() -> u64 {
+pub unsafe fn tsc_read() -> u64 {
     let low: u32;
     let high: u32;
     unsafe {
         asm!(
+            "lfence",
             "rdtsc",
             out("eax") low,
             out("edx") high,

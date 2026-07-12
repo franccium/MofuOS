@@ -6,9 +6,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use rustspace::{
-    DirEntryFlat, FD_FLAG_READ, FD_FLAG_WRITE, StatFlat, println, sys_close_file, sys_create_dir,
-    sys_create_file, sys_delete, sys_exit, sys_list_dir, sys_open_file, sys_read_file,
-    sys_stat_file, sys_write_file,
+    CpuInfoFlat, DirEntryFlat, FD_FLAG_READ, FD_FLAG_WRITE, StatFlat, println, sys_close_file,
+    sys_create_dir, sys_create_file, sys_delete, sys_exit, sys_get_cpu_info, sys_list_dir,
+    sys_open_file, sys_read_file, sys_stat_file, sys_write_file, tsc_read,
 };
 
 global_asm!(
@@ -18,8 +18,6 @@ global_asm!(
     "    call main",
     "    ud2",
 );
-
-// --- Test harness ---
 
 static mut PASS_COUNT: u32 = 0;
 static mut FAIL_COUNT: u32 = 0;
@@ -62,8 +60,6 @@ fn print_summary() {
     println!("--- results: {} passed, {} failed ---", pass, fail);
 }
 
-// --- Helpers ---
-
 // Read all bytes from an open fd into a Vec. Stops at EOF (0 bytes returned).
 // All filenames used in this test are valid FAT32 8.3 names:
 //   stem <= 8 chars, extension <= 3 chars.
@@ -86,8 +82,6 @@ unsafe fn read_all(fd: usize, max_bytes: usize) -> Option<Vec<u8>> {
     }
     Some(result)
 }
-
-// --- Test suites ---
 
 unsafe fn suite_stat_and_list() {
     suite_header("stat and list_dir");
@@ -374,19 +368,84 @@ unsafe fn suite_overwrite() {
     unsafe { sys_delete(PATH) };
 }
 
-// --- Entry point ---
-
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
     println!("fs_test: starting");
 
+    let mut cpu_info = CpuInfoFlat::zeroed();
     unsafe {
+        sys_get_cpu_info(&mut cpu_info);
+    }
+    let freq_hz = cpu_info.tsc_frequency_hz;
+    rustspace::println!("CPU Frequency: {} MHz", freq_hz / 1_000_000);
+    let cycles_to_us = |cycles: u64| -> u64 {
+        if freq_hz > 0 {
+            (cycles as u128 * 1_000_000 / freq_hz as u128) as u64
+        } else {
+            0
+        }
+    };
+
+    unsafe {
+        let (start_cycle, core) = rustspace::tsc_read();
+        rustspace::println!("Core: {}, Cycle: {}", core, start_cycle);
+
         suite_stat_and_list();
+        let (cycle, _) = rustspace::tsc_read();
+        let elapsed = cycle - start_cycle;
+        rustspace::println!(
+            "stat_and_list: {} cycles ({}us)",
+            elapsed,
+            cycles_to_us(elapsed)
+        );
+
         suite_create_write_read_delete();
+        let (cycle, _) = rustspace::tsc_read();
+        let elapsed = cycle - start_cycle;
+        rustspace::println!(
+            "create_write_read_delete: {} cycles ({}us)",
+            elapsed,
+            cycles_to_us(elapsed)
+        );
+
         suite_sequential_reads();
+        let (cycle, _) = rustspace::tsc_read();
+        let elapsed = cycle - start_cycle;
+        rustspace::println!(
+            "sequential_reads: {} cycles ({}us)",
+            elapsed,
+            cycles_to_us(elapsed)
+        );
+
         suite_directories();
+        let (cycle, _) = rustspace::tsc_read();
+        let elapsed = cycle - start_cycle;
+        rustspace::println!(
+            "directories: {} cycles ({}us)",
+            elapsed,
+            cycles_to_us(elapsed)
+        );
+
         suite_error_cases();
+        let (cycle, _) = rustspace::tsc_read();
+        let elapsed = cycle - start_cycle;
+        rustspace::println!(
+            "error_cases: {} cycles ({}us)",
+            elapsed,
+            cycles_to_us(elapsed)
+        );
+
         suite_overwrite();
+        let (cycle, _) = rustspace::tsc_read();
+        let elapsed = cycle - start_cycle;
+        rustspace::println!(
+            "overwrite: {} cycles ({}us)",
+            elapsed,
+            cycles_to_us(elapsed)
+        );
+
+        let total_cycles = cycle - start_cycle;
+        rustspace::println!("Total Cycles: {} ({}us)", total_cycles, cycles_to_us(total_cycles));
     }
 
     print_summary();
