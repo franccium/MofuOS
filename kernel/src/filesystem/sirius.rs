@@ -54,7 +54,7 @@ impl FileAttributes {
 // }
 
 // Canonical name length for DirEntryFlat. Must match the rustspace definition.
-const FS_NAME_LEN: usize = 16;
+pub const FS_NAME_LEN: usize = 16;
 
 /// Flat directory entry written into the userspace output buffer by sys_list_dir.
 #[repr(C)]

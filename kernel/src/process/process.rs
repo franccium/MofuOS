@@ -1,8 +1,10 @@
 use crate::{
     data_structures::vector::Vec,
     process::{
-        ElfLoadInfo, KernelThread, ThreadState, elf_loader::ElfLoadFlags,
+        ElfLoadInfo, KernelThread, ThreadState,
+        elf_loader::ElfLoadFlags,
         process_mem::ProcessMemoryLayout,
+        shared_state::{SHARED_STATE, SharedState},
     },
     serial_println,
 };
@@ -287,6 +289,15 @@ impl Process {
                     page_flags: flags,
                 });
         }
+
+        let shared_state = SHARED_STATE.get().unwrap().lock();
+        shared_state
+            .map_into_process(
+                address_space_manager,
+                memory_layout.top_page_table_phys,
+                &mut frame_allocator,
+            )
+            .unwrap();
 
         let stack_size = DEFAULT_NEW_PROCESS_STACK_SIZE;
         let stack_top = address_space_manager.create_main_stack(

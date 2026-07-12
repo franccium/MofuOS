@@ -13,6 +13,7 @@ use embedded_graphics::primitives::{
     Circle, Primitive, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle,
 };
 use kernel::data_structures::vector::Vec;
+use kernel::filesystem::init_filesystem_ata;
 use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use kernel::graphics::compositor::{self, Compositor};
 use kernel::graphics::pipeline::{
@@ -25,6 +26,7 @@ use kernel::graphics::window::{self, Window, WindowBuffer};
 use kernel::interrupts;
 use kernel::process::CORE_POOL;
 use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, TEST_ELF};
+use kernel::process::shared_state::init_shared_state;
 use kernel::util::cpuinfo::{
     AP_CORE_APIC_ID_MESSAGE_OFFSET, AP_CORE_CR3_MESSAGE_OFFSET, SECRET_MESSAGE_OFFSET,
 };
@@ -68,6 +70,12 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 fn main() -> ! {
     serial_println_core!("Welcome to MofuOS!");
 
+    match init_filesystem_ata() {
+        Ok(()) => serial_println_core!("OK: filesystem initialized from ATA drive"),
+        Err(e) => {
+            serial_println_core!("FAIL: filesystem init failed: {}", e);
+        }
+    }
     kernel::tests_exp::test_ata::test_ata_filesystem();
 
     //kernel::process_start::create_init_process();
@@ -277,6 +285,7 @@ fn main() -> ! {
         {
             hlt();
         }
+        init_shared_state();
         kernel::process_start::create_userspace_processes();
 
         loop {

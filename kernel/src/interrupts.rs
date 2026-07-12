@@ -1,6 +1,8 @@
 #![allow(unused)]
+use crate::events::event_buffer::{InputEvent, KeyState, Keys};
 use crate::io::serial;
 use crate::process::execution::jump_to_userspace;
+use crate::process::shared_state::get_shared_input_event_buffer;
 use crate::process::{SCHEDULER, Scheduler};
 use crate::process::{
     process::INVALID_PID,
@@ -32,6 +34,7 @@ use core::arch::asm;
 use core::arch::x86_64::__rdtscp;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
+use pc_keyboard::KeyCode;
 use spin::Mutex;
 use x86_64::structures::paging::frame;
 use x86_64::{
@@ -997,15 +1000,17 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
+    use pc_keyboard::{
+        DecodedKey, HandleControl, KeyState as PcKeyState, Keyboard, ScancodeSet1, layouts,
+    };
     use spin::Mutex;
     use x86_64::instructions::port::Port;
 
     lazy_static! {
-        static ref KEYBOARD: Mutex<Keyboard<layouts::Uk105Key, ScancodeSet1>> =
+        static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> =
             Mutex::new(Keyboard::new(
                 ScancodeSet1::new(),
-                layouts::Uk105Key,
+                layouts::Us104Key,
                 HandleControl::Ignore
             ));
     }
@@ -1014,16 +1019,29 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     // SAFETY: This port is only read from in this interrupt handler.
     let scancode: u8 = unsafe { keyboard_port.read() };
 
-    if let Ok(Some(event)) = keyboard.add_byte(scancode)
-        && let Some(decoded_key) = keyboard.process_keyevent(event)
-        && KEYBOARD_DEBUG_PRINT
-    {
-        match decoded_key {
-            DecodedKey::Unicode(character) => {
-                serial_print!("{}", character)
+    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+        let is_press =
+            key_event.state == PcKeyState::Down || key_event.state == PcKeyState::SingleShot;
+        if let Some(decoded_key) = keyboard.process_keyevent(key_event)
+            && is_press
+        {
+            let value = match decoded_key {
+                DecodedKey::Unicode(c) => Some(c as u32),
+                DecodedKey::RawKey(KeyCode::ArrowUp) => Some(Keys::ArrowUp as u32),
+                _ => None,
+            };
+            if let Some(v) = value {
+                serial_println_core!("keyboard_handler: Pushed {:x}", v);
+                let _ = unsafe {
+                    get_shared_input_event_buffer().push(InputEvent::new_key(v, KeyState::Pressed))
+                };
             }
-            DecodedKey::RawKey(key) => {
-                serial_print!("{:?}", key)
+
+            if KEYBOARD_DEBUG_PRINT {
+                match decoded_key {
+                    DecodedKey::Unicode(c) => serial_print!("{}", c),
+                    DecodedKey::RawKey(k) => serial_print!("{:?}", k),
+                }
             }
         }
     }

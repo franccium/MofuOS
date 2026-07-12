@@ -32,25 +32,15 @@ pub fn test_ata() {
     serial_println!("--- ATA PIO test end ---");
 }
 
-/// Initialize the FAT32 filesystem from the ATA drive and run the boot counter
-/// persistence test. Call this instead of test_ata() when running with make run-x86_64-ata.
 pub fn test_ata_filesystem() {
     serial_println!("--- ATA filesystem persistence test begin ---");
-
-    match init_filesystem_ata() {
-        Ok(()) => serial_println!("OK: filesystem initialized from ATA drive"),
-        Err(e) => {
-            serial_println!("FAIL: filesystem init failed: {}", e);
-            return;
-        }
-    }
 
     test_boot_counter();
 
     serial_println!("--- ATA filesystem persistence test end ---");
 }
 
-// Read sector 0 and verify the FAT32 boot signature.
+// Read sector 0 and verify the FAT32 boot signature
 fn test_read_sector0(driver: &mut AtaPioDriver) {
     let mut buf = [0u8; SECTOR_SIZE];
 
@@ -90,7 +80,7 @@ fn test_read_sector0(driver: &mut AtaPioDriver) {
     }
 }
 
-// Write a known pattern to sector 100, read it back, compare every byte.
+// Write a known pattern to sector 100, read it back, compare every byte
 fn test_write_read_back(driver: &mut AtaPioDriver) {
     let mut write_buf = [0u8; SECTOR_SIZE];
     for (i, byte) in write_buf.iter_mut().enumerate() {
@@ -141,8 +131,7 @@ fn test_write_read_back(driver: &mut AtaPioDriver) {
 }
 
 // Read /counter.txt from the FAT32 volume, parse the integer, increment it,
-// write back, and read again to confirm. On first boot the file is absent and
-// is created with value 0.
+// write back, and read again to confirm. On first boot the file is absent and is created with value 0
 fn test_boot_counter() {
     let mut sirius = get_sirius();
 

@@ -7,12 +7,12 @@
 
 use static_assertions::const_assert;
 
-pub const RUN_THEOPHE: bool = false;
+pub const RUN_THEOPHE: bool = true;
 pub const USE_PING_PROGRAM: bool = false;
 pub const USE_TEST_PROGRAM: bool = false;
 pub const USE_RUST_USER_PROGRAMS: bool = false;
 pub const USE_GAME_PROGRAM: bool = false;
-pub const RUN_FS_TEST: bool = true;
+pub const RUN_FS_TEST: bool = false;
 
 pub const HHDM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 pub const MAX_CORES: u8 = 4;
@@ -29,6 +29,7 @@ extern crate alloc;
 pub mod asm;
 pub mod boot_info;
 pub mod data_structures;
+pub mod events;
 pub mod filesystem;
 pub mod gdt;
 pub mod graphics;

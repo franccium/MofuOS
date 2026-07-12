@@ -1,4 +1,5 @@
-use crate::filesystem::sirius::{DirEntryFlat, StatFlat};
+use crate::filesystem::sirius::{DirEntryFlat, FS_NAME_LEN, StatFlat};
+use crate::memory::get_frame_allocator;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
 use crate::process::process::FileDescriptor;
 use crate::serial_println;
@@ -545,32 +546,47 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
                 | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
 
-            for i in 0..page_count {
-                let page_vaddr = back_vaddr + (i * 0x1000) as u64;
-                let front_page_vaddr = front_vaddr + (i * 0x1000) as u64;
-                let phys = umm.translate_kernel_heap_virt_to_phys(page_vaddr);
-                let front_phys = umm.translate_kernel_heap_virt_to_phys(front_page_vaddr);
-                let user_virt = x86_64::VirtAddr::new(user_base + (i * 0x1000) as u64);
-                let front_user_virt =
-                    x86_64::VirtAddr::new(user_base + MAX_WINDOW_BUFFER_SIZE + (i * 0x1000) as u64);
+            {
+                let mut frame_allocator = get_frame_allocator();
 
-                if let Err(e) = umm.map_specific_frame(pml4_phys, user_virt, phys, flags) {
-                    serial_println_core!(
-                        "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
-                        i,
-                        e
+                for i in 0..page_count {
+                    let page_vaddr = back_vaddr + (i * 0x1000) as u64;
+                    let front_page_vaddr = front_vaddr + (i * 0x1000) as u64;
+                    let phys = umm.translate_kernel_heap_virt_to_phys(page_vaddr);
+                    let front_phys = umm.translate_kernel_heap_virt_to_phys(front_page_vaddr);
+                    let user_virt = x86_64::VirtAddr::new(user_base + (i * 0x1000) as u64);
+                    let front_user_virt = x86_64::VirtAddr::new(
+                        user_base + MAX_WINDOW_BUFFER_SIZE + (i * 0x1000) as u64,
                     );
-                    return u64::MAX;
-                }
-                if let Err(e) =
-                    umm.map_specific_frame(pml4_phys, front_user_virt, front_phys, flags)
-                {
-                    serial_println_core!(
-                        "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
-                        i,
-                        e
-                    );
-                    return u64::MAX;
+
+                    if let Err(e) = umm.map_specific_frame(
+                        pml4_phys,
+                        user_virt,
+                        phys,
+                        flags,
+                        &mut frame_allocator,
+                    ) {
+                        serial_println_core!(
+                            "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
+                            i,
+                            e
+                        );
+                        return u64::MAX;
+                    }
+                    if let Err(e) = umm.map_specific_frame(
+                        pml4_phys,
+                        front_user_virt,
+                        front_phys,
+                        flags,
+                        &mut frame_allocator,
+                    ) {
+                        serial_println_core!(
+                            "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
+                            i,
+                            e
+                        );
+                        return u64::MAX;
+                    }
                 }
             }
 
@@ -623,7 +639,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let path_ptr = frame.arg1 as usize;
             let path_len = frame.arg2 as usize;
             let flags = frame.arg3 as u8;
-            
+
             if !validate_user_ptr(path_ptr, path_len) {
                 return FileDescriptor::INVALID_FD;
             }

@@ -6,6 +6,7 @@ pub mod process;
 pub mod process_manager;
 pub mod process_mem;
 pub mod scheduler;
+pub mod shared_state;
 pub mod syscall;
 
 pub use core_pool::{CORE_POOL, CorePool, CorePoolStats};

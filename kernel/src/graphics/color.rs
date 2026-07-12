@@ -57,6 +57,12 @@ impl Rgba8888UNORM {
         b: 64,
         a: 255,
     };
+    pub const PURPLE: Self = Self {
+        r: 160,
+        g: 0,
+        b: 160,
+        a: 255,
+    };
 
     pub fn from_rgb_emb(rgb: Rgb888) -> Self {
         Self {

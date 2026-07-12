@@ -410,6 +410,111 @@ fn alloc_error(_layout: Layout) -> ! {
     unsafe { sys_exit(1) }
 }
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct InputEvent {
+    pub event_type: EventType,
+    pub _pad: [u8; 3],
+    pub value: u32,
+    pub extra: u32,
+    pub reserved: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EventType {
+    None = 0,
+    KeyEvent = 1,
+    MouseEvent = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum KeyState {
+    Pressed = 0,
+    Released = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Keys {
+    ArrowUp = 0x110000,
+}
+
+pub struct AsciiChar;
+impl AsciiChar {
+    pub const BACKSPACE: char = '\x08';
+    pub const TAB: char = '\x09';
+    pub const NEWLINE: char = '\n';
+    pub const CARRIAGE_RETURN: char = '\r';
+    pub const ESCAPE: char = '\x1B';
+    pub const DELETE: char = '\x7F';
+    pub const SPACE: char = ' ';
+}
+
+const PAGE_SIZE: usize = 4096;
+const BUFFER_HEADER_SIZE: usize = core::mem::size_of::<AtomicU32>() * 3;
+const MAX_EVENT_COUNT: usize =
+    (PAGE_SIZE - BUFFER_HEADER_SIZE) / core::mem::size_of::<InputEvent>();
+
+#[repr(C, align(4096))]
+pub struct EventBuffer {
+    pub write_idx: AtomicU32,
+    pub read_idx: AtomicU32,
+    pub event_count: AtomicU32,
+    pub events: [InputEvent; MAX_EVENT_COUNT],
+}
+
+pub struct EventReader {
+    buffer: &'static EventBuffer,
+}
+
+pub const EVENT_BUFFER_ADDR: usize = 0x0000_0007_0000_0000;
+
+impl EventReader {
+    /// Create a new event reader for the buffer at the given address
+    /// The address must point to a valid, kernel-mapped EventBuffer
+    pub unsafe fn new(buffer_addr: usize) -> Self {
+        let buffer = unsafe { &*(buffer_addr as *const EventBuffer) };
+        Self { buffer }
+    }
+
+    pub fn has_events(&self) -> bool {
+        self.buffer.event_count.load(Ordering::Acquire) > 0
+    }
+
+    pub fn try_read(&mut self) -> Option<InputEvent> {
+        if self.buffer.event_count.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+
+        let idx = self.buffer.read_idx.load(Ordering::Acquire) as usize;
+
+        let event =
+            unsafe { core::ptr::read_volatile(&self.buffer.events[idx] as *const InputEvent) };
+
+        core::sync::atomic::fence(Ordering::Acquire);
+
+        let new_idx = ((idx + 1) % MAX_EVENT_COUNT) as u32;
+        self.buffer.read_idx.store(new_idx, Ordering::Release);
+
+        self.buffer.event_count.fetch_sub(1, Ordering::Release);
+
+        Some(event)
+    }
+
+    pub fn read_blocking(&mut self) -> InputEvent {
+        loop {
+            if let Some(event) = self.try_read() {
+                return event;
+            }
+            unsafe { sys_yield() }
+        }
+    }
+}
+
 pub struct Serial;
 
 impl core::fmt::Write for Serial {

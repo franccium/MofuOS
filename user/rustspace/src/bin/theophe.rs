@@ -16,7 +16,19 @@ use embedded_graphics::{
     primitives::{PrimitiveStyle, Rectangle},
     text::{Alignment, LineHeight, Text, TextStyle, TextStyleBuilder},
 };
-use rustspace::gfx::surface::UserSurface;
+use rustspace::{
+    AsciiChar, EVENT_BUFFER_ADDR, EventReader, EventType, InputEvent, KeyState, Keys,
+    gfx::{color::Rgba8888UNORM, surface::UserSurface},
+};
+
+const DEBUG_LOGS: bool = false;
+macro_rules! serial_println {
+    ($($arg:tt)*) => {
+        if DEBUG_LOGS {
+            rustspace::println!($($arg)*);
+        }
+    };
+}
 
 global_asm!(
     ".section .text.entry",
@@ -78,9 +90,11 @@ impl Line {
 }
 
 pub struct Theophe<D: DrawTarget<Color = Rgb888>> {
-    pub draw_target: D,
+    needs_redraw: bool,
     curr_line_idx: usize,
     max_chars_per_line: usize,
+    last_command: Line,
+    pub draw_target: D,
     lines: [Line; MAX_LINES],
 }
 
@@ -89,10 +103,12 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
         let bounding_box = draw_target.bounding_box();
         let max_chars_per_line = (bounding_box.size.width / CHARACTER_WIDTH as u32) as usize;
         Self {
+            needs_redraw: true,
             draw_target,
             curr_line_idx: 0,
             max_chars_per_line,
             lines: [Line::new(); MAX_LINES],
+            last_command: Line::new(),
         }
     }
 
@@ -143,30 +159,94 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
         }
     }
 
-    fn write_bytes(&mut self, text: &str) {
-        let bytes = text.as_bytes();
-        let mut start = 0;
-        for i in 0..bytes.len() {
-            if bytes[i] == b'\n' {
-                if i > start {
-                    self.append_bytes(&bytes[start..i]);
-                }
-                self.newline();
-                start = i + 1;
+    fn _write_bytes(&mut self, bytes: &[u8]) {
+        let mut bytes_start = 0;
+        let bytes_len = bytes.len();
+        let max_chars_per_line = self.max_chars_per_line;
+
+        for i in 0..bytes_len {
+            if bytes[i] == b'\n' && i > bytes_start {
+                let line = self.get_last_line();
+                let written = line.write_slice(&bytes[bytes_start..i]);
+                serial_println!(
+                    "Found newline, written: {}, space left now: {}",
+                    written,
+                    max_chars_per_line - line.length
+                );
             }
         }
-        if start < bytes.len() {
-            self.append_bytes(&bytes[start..]);
+
+        while bytes_start < bytes_len {
+            let remaining = bytes_len - bytes_start;
+            let line = self.get_last_line();
+            let space_left = max_chars_per_line - line.length;
+            serial_println!("Remaining bytes: {}", remaining);
+
+            if remaining <= space_left {
+                let written = line.write_slice(&bytes[bytes_start..]);
+                serial_println!(
+                    "Fit in last line, written: {}, space left now: {}",
+                    written,
+                    max_chars_per_line - line.length
+                );
+                assert!(written == remaining);
+                break;
+            } else {
+                //let line_start = line.length;
+
+                // Find a good breaking point (a space)
+                let mut split_point = min(space_left, remaining);
+                for i in (0..split_point).rev() {
+                    if bytes[bytes_start + i] == b' ' {
+                        split_point = i + 1; // Include the space
+                        break;
+                    }
+                }
+
+                // If no space found, split at line end
+                if split_point == 0 {
+                    split_point = space_left;
+                }
+
+                let slice = &bytes[bytes_start..bytes_start + split_point];
+
+                let line = self.get_last_line();
+
+                let written = line.write_slice(slice);
+                self.newline();
+                bytes_start += written;
+            }
         }
     }
 
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        let bytes_len = bytes.len();
+        let mut bytes_start = 0;
+
+        for i in 0..bytes_len {
+            if bytes[i] == b'\n' {
+                if i > bytes_start {
+                    self._write_bytes(&bytes[bytes_start..i]);
+                }
+                self.newline();
+                bytes_start = i + 1;
+            }
+        }
+
+        if bytes_start < bytes_len {
+            self._write_bytes(&bytes[bytes_start..]);
+        }
+
+        self.needs_redraw = true;
+    }
+
     pub fn write_line(&mut self, text: &str) {
-        self.write_bytes(text);
+        self.write_bytes(text.as_bytes());
         self.newline();
     }
 
     pub fn write_str(&mut self, text: &str) {
-        self.write_bytes(text);
+        self.write_bytes(text.as_bytes());
     }
 
     fn newline(&mut self) {
@@ -177,6 +257,7 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
                 self.lines[i - 1] = core::mem::replace(&mut self.lines[i], Line::new());
             }
         }
+        self.needs_redraw = true;
     }
 
     pub fn clear(&mut self) {
@@ -185,24 +266,18 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
             line.clear();
         }
         self.clear_screen();
+
+        self.needs_redraw = true;
     }
 
     fn clear_screen(&mut self) {
-        let terminal_height = (MAX_LINES * CHARACTER_HEIGHT
-            + (MAX_LINES - 1) * (LINE_SPACING as usize - CHARACTER_HEIGHT))
-            as u32;
-        let _ = Rectangle::new(
-            Point::new(0, 0),
-            Size::new(self.draw_target.bounding_box().size.width, terminal_height),
-        )
-        .into_styled(PrimitiveStyle::with_fill(BACKGROUND_COLOR))
-        .draw(&mut self.draw_target);
+        let surface = unsafe { &mut *(&mut self.draw_target as *mut D as *mut UserSurface) };
+        surface.clear(Rgba8888UNORM::BLACK);
     }
 
     fn redraw_all(&mut self) {
-        //TODO: clear takes a LONG time, compositor has clears figured out
         self.clear_screen();
-        rustspace::println!("theophe: redraw_all - begin");
+        serial_println!("theophe: redraw_all - begin");
         for i in 0..=self.curr_line_idx {
             if !self.lines[i].is_empty() {
                 let _ = Text::with_text_style(
@@ -213,13 +288,68 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
                 )
                 .draw(&mut self.draw_target);
 
-                rustspace::println!(
+                serial_println!(
                     "theophe: redraw_all - line {}: {}",
                     i,
                     self.lines[i].as_str()
                 );
             }
         }
+    }
+
+    fn recall_last_command(&mut self) {
+        if !self.last_command.is_empty() {
+            self.lines[self.curr_line_idx] = self.last_command;
+        }
+    }
+
+    fn backspace(&mut self) {
+        let line = &mut self.lines[self.curr_line_idx];
+        if line.length > 0 {
+            line.length -= 1;
+        }
+    }
+
+    fn execute_command(&mut self, line: &Line) {
+        let s = line.as_str().trim();
+        if s.is_empty() {
+            return;
+        }
+
+        let (cmd, args) = match s.find(' ') {
+            Some(i) => s.split_at(i),
+            None => (s, ""),
+        };
+        let args = args.trim_matches(' ');
+
+        match cmd {
+            "deb" => {
+                self.write_line("deb!");
+            }
+            _ => {}
+        }
+    }
+
+    pub fn handle_event(&mut self, event: InputEvent) {
+        let v = event.value;
+        if v == Keys::ArrowUp as u32 {
+            self.recall_last_command();
+        } else if let Some(c) = char::from_u32(v) {
+            match c {
+                AsciiChar::BACKSPACE => self.backspace(),
+                AsciiChar::NEWLINE | AsciiChar::CARRIAGE_RETURN => {
+                    self.last_command = self.lines[self.curr_line_idx];
+                    let cmd = self.last_command;
+                    self.newline();
+                    self.execute_command(&cmd);
+                }
+                c if !c.is_control() => {
+                    self.write_bytes(&[c as u8]);
+                }
+                _ => {}
+            }
+        }
+        self.needs_redraw = true;
     }
 }
 
@@ -273,21 +403,39 @@ pub extern "C" fn main() -> ! {
 
     rustspace::println!("theophe: starting loop");
 
+    let mut event_reader = unsafe { EventReader::new(EVENT_BUFFER_ADDR) };
+
     unsafe { rustspace::sys_yield() };
 
     let mut frame: u32 = 0;
     loop {
+        loop {
+            let event = event_reader.try_read();
+            match event {
+                Some(event) => {
+                    terminal.handle_event(event);
+                }
+                None => break,
+            }
+        }
+
         // if frame & 0xF == 0 {
-        let msg = format!("frame {}", frame);
-        terminal.write_line(&msg);
+        // let msg = format!("frame {}", frame);
+        // terminal.write_line(&msg);
         // }
 
         rustspace::println!("theophe: loop - begin");
 
-        terminal.render();
+        let backbuffer_redraw_required = terminal.needs_redraw;
+        if terminal.needs_redraw {
+            terminal.render();
+            terminal.needs_redraw = false;
+        }
         unsafe { rustspace::sys_present_window(window_id) };
         unsafe {
             terminal.draw_target.swap();
+            //NOTE: we also need to redraw the second buffer, so one more redrawing frame is required
+            terminal.needs_redraw = backbuffer_redraw_required;
         }
         //unsafe { rustspace::sys_yield() };
 

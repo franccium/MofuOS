@@ -24,6 +24,11 @@ fun todo:
 - enable sse builds?
 - rdtscp instead of rdtsc in timer handler to get core_id
 
+- grouping syscalls
+    instead of always doing the entire ring swap, group syscalls that can be called at a single time
+        the whole window creation chain is a good example
+        
+
 - stdin/stout routing for userspace
     C programs compiled into ELF to be able to get from stdin and output to stdout. What would be the stdin stdout even - another userspace program that functions as a shell?
     I suppose we first do a userspace shell
