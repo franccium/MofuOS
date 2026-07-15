@@ -46,7 +46,9 @@ impl CorePool {
             self.total_cores = MAX_CORES;
         }
 
-        unsafe { TOTAL_CORE_COUNT = core_count; }
+        unsafe {
+            TOTAL_CORE_COUNT = core_count;
+        }
 
         self.total_cores = core_count;
         self.available_cores = (1u64 << self.total_cores) - 1;

@@ -103,7 +103,9 @@ pub fn render_shaders_2d_textured(
 
     let pipeline2 = PipelineState {
         vs: PassThroughVS,
-        ps: TextureSamplePS { texture_slot: texture_slot2 },
+        ps: TextureSamplePS {
+            texture_slot: texture_slot2,
+        },
         vertex_layout: VertexLayout::new_2d(),
         rasterizer_state: RasterizerState::default(),
         blend_state: BlendState::default(),

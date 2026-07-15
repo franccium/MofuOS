@@ -180,7 +180,7 @@ unsafe extern "C" fn kmain() -> ! {
     serial_println!("MP Info:");
     serial_println!("  Total cores: {}", core_count);
     serial_println!("  BSP LAPIC ID: {}", bsp_lapic_id);
-    
+
     for (i, cpu) in cpus.iter().enumerate() {
         serial_println!(
             "  CPU {}: LAPIC ID={}, Processor ID={}",

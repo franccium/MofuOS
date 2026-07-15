@@ -27,7 +27,7 @@ run-hdd: run-hdd-$(KARCH)
 .PHONY: fat32-image
 fat32-image: test_disk_image.fat32.img
 
-ATA_DISK_IMG := storage/ata_disk.img
+ATA_DISK_IMG := ata_disk.img
 
 .PHONY: ata-disk
 ata-disk: $(ATA_DISK_IMG)
@@ -45,14 +45,14 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 	qemu-system-$(KARCH) \
 		-M q35 \
 		-accel kvm \
-		-smp cores=3,threads=1 \
+		-smp cores=2,threads=1 \
 		-cpu host,+tsc-deadline,+apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \
 		-device piix3-ide,id=ide \
 		-device ide-hd,drive=ata0,bus=ide.0,unit=0 \
-		-drive file=$(ATA_DISK_IMG),format=raw,id=ata0,if=none \
+		-drive file=storage/$(ATA_DISK_IMG),format=raw,id=ata0,if=none \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial unix:$(SOCKET1),server \
 		-serial unix:$(SOCKET2),server,nowait \

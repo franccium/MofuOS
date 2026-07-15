@@ -630,3 +630,83 @@ macro_rules! println {
         unsafe { $crate::sys_write(1, b"\n".as_ptr(), 1) };
     }};
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CacheStatsFlat {
+    pub total_files: u64,
+    pub total_bytes: u64,
+    pub max_bytes: u64,
+}
+
+impl CacheStatsFlat {
+    pub const fn zeroed() -> Self {
+        Self {
+            total_files: 0,
+            total_bytes: 0,
+            max_bytes: 0,
+        }
+    }
+}
+
+// Cache importance enum
+#[repr(u8)]
+pub enum CacheImportance {
+    Minimal = 0,
+    Low = 1,
+    Normal = 2,
+    High = 3,
+    VeryHigh = 4,
+    Critical = 5,
+    Resident = 6,
+}
+
+// Cache syscall wrappers
+pub unsafe fn sys_pin_file(path: &str) -> u64 {
+    let path_bytes = path.as_bytes();
+    syscall4(
+        30,
+        path_bytes.as_ptr() as u64,
+        path_bytes.len() as u64,
+        0,
+        0,
+    )
+}
+
+pub unsafe fn sys_unpin_file(path: &str) -> u64 {
+    let path_bytes = path.as_bytes();
+    syscall4(
+        31,
+        path_bytes.as_ptr() as u64,
+        path_bytes.len() as u64,
+        0,
+        0,
+    )
+}
+
+pub unsafe fn sys_reserve_cache(path: &str, importance: u8) -> u64 {
+    let path_bytes = path.as_bytes();
+    syscall4(
+        32,
+        path_bytes.as_ptr() as u64,
+        path_bytes.len() as u64,
+        importance as u64,
+        0,
+    )
+}
+
+pub unsafe fn sys_evict_directory(path: &str) -> u64 {
+    let path_bytes = path.as_bytes();
+    syscall4(
+        33,
+        path_bytes.as_ptr() as u64,
+        path_bytes.len() as u64,
+        0,
+        0,
+    )
+}
+
+pub unsafe fn sys_get_cache_stats(stats: &mut CacheStatsFlat) -> bool {
+    let ret = syscall4(34, stats as *mut CacheStatsFlat as u64, 0, 0, 0);
+    ret == 0
+}

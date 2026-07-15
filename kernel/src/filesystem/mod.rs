@@ -1,4 +1,5 @@
 pub mod fat32;
+pub mod file_cache;
 pub mod sirius;
 
 pub use sirius::{

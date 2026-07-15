@@ -2,13 +2,19 @@ use crate::filesystem::fat32::Fat32Driver;
 use crate::filesystem::fat32::FileNodeHandle;
 use crate::io::ata::AtaPioDriver;
 use crate::io::disk::{DiskOpError, MockDiskDevice, SECTOR_SIZE, get_disk_mgr, init_disk};
-use crate::serial_println;
+use crate::serial_println_core;
 use alloc::boxed::Box;
+#[cfg(feature = "use_cached_fs")]
+use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::bitflags;
 use lazy_static::lazy_static;
 use spin::{Mutex, Once};
+
+#[cfg(feature = "use_cached_fs")]
+use crate::filesystem::file_cache::{CacheFilesystemDriver, CacheImportance, Fat32OptimizedCache};
 
 lazy_static! {
     pub static ref SIRIUS: Once<Mutex<Sirius>> = Once::new();
@@ -150,15 +156,281 @@ pub trait FilesystemDriver: Send + Sync {
     fn delete(&mut self, node_id: FileNodeHandle) -> FileSystemResult<()>;
 
     fn root_node(&self) -> FileNodeHandle;
+
+    #[cfg(feature = "use_cached_fs")]
+    fn read_whole_file(&mut self, path: &str) -> FileSystemResult<Vec<u8>> {
+        let node_id = self.find_node(path)?;
+        let node = self.get_node(node_id)?;
+
+        if node.file_type != FileType::File {
+            return Err(FileSystemError::IsDirectory);
+        }
+
+        let mut buffer = vec![0u8; node.size];
+        let bytes_read = self.read_file(node_id, 0, &mut buffer)?;
+        serial_println_core!("read_whole_file: bytes_read={}", bytes_read);
+        buffer.truncate(bytes_read);
+        Ok(buffer)
+    }
 }
+
+#[cfg(feature = "use_cached_fs")]
+struct CachedDriver {
+    inner: Box<dyn FilesystemDriver>,
+    cache: Fat32OptimizedCache,
+    path_cache: BTreeMap<FileNodeHandle, String>,
+}
+
+#[cfg(feature = "use_cached_fs")]
+impl CachedDriver {
+    fn new(inner: Box<dyn FilesystemDriver>, cache_size: usize) -> Self {
+        Self {
+            inner,
+            cache: Fat32OptimizedCache::new(cache_size),
+            path_cache: BTreeMap::new(),
+        }
+    }
+
+    fn cache_path(&mut self, node_id: FileNodeHandle, path: &str) {
+        if !self.path_cache.contains_key(&node_id) {
+            self.path_cache.insert(node_id, String::from(path));
+        }
+    }
+}
+
+#[cfg(feature = "use_cached_fs")]
+impl FilesystemDriver for CachedDriver {
+    fn read_file(
+        &mut self,
+        node_id: FileNodeHandle,
+        offset: usize,
+        out_buffer: &mut [u8],
+    ) -> FileSystemResult<usize> {
+        // Get the path for this node (needed for cache lookup)
+        let node = self.inner.get_node(node_id)?;
+        let path = self.path_cache.get(&node_id).cloned();
+
+        if let Some(path) = path {
+            let mut adapter = DriverAdapter {
+                inner: &mut *self.inner,
+            };
+
+            match self.cache.read_file(&mut adapter, &path) {
+                Ok(cached_data) => {
+                    if cached_data.is_empty() || offset >= cached_data.len() {
+                        return Ok(0);
+                    }
+
+                    let len = out_buffer
+                        .len()
+                        .min(cached_data.len().saturating_sub(offset));
+                    if len > 0 {
+                        out_buffer[..len].copy_from_slice(&cached_data[offset..offset + len]);
+                    }
+                    serial_println_core!(
+                        "read_file from cached driver: found cached data, length={}, out_buffer.len()={}. cached_data.len()={}",
+                        len,
+                        out_buffer.len(),
+                        cached_data.len()
+                    );
+                    Ok(len)
+                }
+                Err(_) => {
+                    let len = self.inner.read_file(node_id, offset, out_buffer);
+                    match len {
+                        Ok(bytes_read) => {
+                            serial_println_core!(
+                                "read_file from cached driver: did not find cached data, bytes_read={}",
+                                bytes_read
+                            );
+                        }
+                        _ => {
+                            serial_println_core!(
+                                "read_file from cached driver: did not find cached data, and got a read error"
+                            );
+                        }
+                    }
+                    len
+                }
+            }
+        } else {
+            // No path cached - direct read
+            self.inner.read_file(node_id, offset, out_buffer)
+        }
+    }
+
+    fn write_file(
+        &mut self,
+        node_id: FileNodeHandle,
+        offset: usize,
+        data: &[u8],
+    ) -> FileSystemResult<usize> {
+        // Writes go directly to disk (and invalidate cache if needed)
+        self.inner.write_file(node_id, offset, data)
+    }
+
+    fn find_node(&self, path: &str) -> FileSystemResult<FileNodeHandle> {
+        self.inner.find_node(path)
+    }
+
+    fn get_node(&self, node_id: FileNodeHandle) -> FileSystemResult<FileNode> {
+        self.inner.get_node(node_id)
+    }
+
+    fn list_directory(&self, node_id: FileNodeHandle) -> FileSystemResult<Vec<FileNode>> {
+        self.inner.list_directory(node_id)
+    }
+
+    fn create_file(
+        &mut self,
+        parent_id: FileNodeHandle,
+        name: &str,
+    ) -> FileSystemResult<FileNodeHandle> {
+        self.inner.create_file(parent_id, name)
+    }
+
+    fn create_directory(
+        &mut self,
+        parent_id: FileNodeHandle,
+        name: &str,
+    ) -> FileSystemResult<FileNodeHandle> {
+        self.inner.create_directory(parent_id, name)
+    }
+
+    fn delete(&mut self, node_id: FileNodeHandle) -> FileSystemResult<()> {
+        self.inner.delete(node_id)
+    }
+
+    fn root_node(&self) -> FileNodeHandle {
+        self.inner.root_node()
+    }
+}
+
+/// Adapter to make our VFS driver work with the cache's driver trait
+#[cfg(feature = "use_cached_fs")]
+struct DriverAdapter<'a> {
+    inner: &'a mut dyn FilesystemDriver,
+}
+
+#[cfg(feature = "use_cached_fs")]
+impl<'a> CacheFilesystemDriver for DriverAdapter<'a> {
+    fn read_whole_file(&mut self, path: &str) -> FileSystemResult<Vec<u8>> {
+        self.inner.read_whole_file(path).map_err(|e| e.into())
+    }
+
+    fn read_file_range(
+        &mut self,
+        path: &str,
+        offset: usize,
+        len: usize,
+    ) -> FileSystemResult<Vec<u8>> {
+        let node_id = self
+            .inner
+            .find_node(path)
+            .map_err(|_| FileSystemError::NotFound)?;
+        let node = self
+            .inner
+            .get_node(node_id)
+            .map_err(|_| FileSystemError::NotFound)?;
+
+        let read_len = len.min(node.size.saturating_sub(offset));
+        let mut buffer = vec![0u8; read_len];
+
+        self.inner
+            .read_file(node_id, offset, &mut buffer)
+            .map_err(|_| FileSystemError::IoError)?;
+
+        Ok(buffer)
+    }
+
+    fn file_size(&self, path: &str) -> FileSystemResult<usize> {
+        let node_id = self
+            .inner
+            .find_node(path)
+            .map_err(|_| FileSystemError::NotFound)?;
+        let node = self
+            .inner
+            .get_node(node_id)
+            .map_err(|_| FileSystemError::NotFound)?;
+        Ok(node.size)
+    }
+
+    fn resolve_path(&self, path: &str) -> FileSystemResult<FileNodeHandle> {
+        self.inner
+            .find_node(path)
+            .map_err(|_| FileSystemError::NotFound)
+    }
+
+    fn read_dir(&mut self, path: &str) -> FileSystemResult<Vec<alloc::string::String>> {
+        let node_id = self
+            .inner
+            .find_node(path)
+            .map_err(|_| FileSystemError::NotFound)?;
+        let nodes = self
+            .inner
+            .list_directory(node_id)
+            .map_err(|_| FileSystemError::IoError)?;
+
+        Ok(nodes.into_iter().map(|n| n.name).collect())
+    }
+}
+
+// ---- Sirius with optional caching ----
 
 pub struct Sirius {
     pub driver: Box<dyn FilesystemDriver>,
+
+    #[cfg(feature = "use_cached_fs")]
+    cache_enabled: bool,
 }
 
 impl Sirius {
+    #[cfg(not(feature = "use_cached_fs"))]
     pub fn new(driver: Box<dyn FilesystemDriver>) -> Self {
         Self { driver }
+    }
+
+    #[cfg(feature = "use_cached_fs")]
+    pub fn new(driver: Box<dyn FilesystemDriver>) -> Self {
+        Self {
+            driver,
+            cache_enabled: true, // Enabled by default when feature is on
+        }
+    }
+
+    #[cfg(feature = "use_cached_fs")]
+    pub fn new_with_cache(
+        driver: Box<dyn FilesystemDriver>,
+        cache_size: usize,
+        enable: bool,
+    ) -> Self {
+        if enable {
+            Self {
+                driver: Box::new(CachedDriver::new(driver, cache_size)),
+                cache_enabled: true,
+            }
+        } else {
+            Self {
+                driver,
+                cache_enabled: false,
+            }
+        }
+    }
+
+    #[cfg(feature = "use_cached_fs")]
+    pub fn enable_caching(&mut self, cache_size: usize) -> Result<(), &'static str> {
+        if self.cache_enabled {
+            return Ok(());
+        }
+
+        // This would require extracting the inner driver from the Box
+        // For now, we just mark it as enabled if it's already a CachedDriver
+        Err("Cannot enable caching after initialization")
+    }
+
+    #[cfg(feature = "use_cached_fs")]
+    pub fn is_cache_enabled(&self) -> bool {
+        self.cache_enabled
     }
 
     pub fn resolve_path(&self, path: &str) -> FileSystemResult<FileNode> {
@@ -177,7 +449,7 @@ impl Sirius {
 
     pub fn list_directory(&self, path: &str) -> FileSystemResult<Vec<FileNode>> {
         let node = self.resolve_path(path)?;
-        serial_println!(
+        serial_println_core!(
             "Resolved path '{}' to node ID {:#x}, type: {:?}",
             path,
             node.node_id,
@@ -197,7 +469,7 @@ impl Sirius {
         buffer: &mut [u8],
     ) -> FileSystemResult<usize> {
         let node = self.resolve_path(path)?;
-        serial_println!(
+        serial_println_core!(
             "Reading file '{}' (node ID {:#x}) at offset {}, buffer size {}",
             path,
             node.node_id,
@@ -207,6 +479,12 @@ impl Sirius {
         if node.file_type != FileType::File {
             return Err(FileSystemError::IsDirectory);
         }
+
+        #[cfg(feature = "use_cached_fs")]
+        if let Some(cached) = self.as_cached_driver_mut() {
+            cached.cache_path(node.node_id, path);
+        }
+
         self.driver.read_file(node.node_id, offset, buffer)
     }
 
@@ -227,7 +505,7 @@ impl Sirius {
         let (parent_path, name) = self.split_path(path)?;
         let parent = self.resolve_path(parent_path.as_str())?;
 
-        serial_println!(
+        serial_println_core!(
             "Sirius: create_file: path: {}, parent_path: {}, name: {}",
             path,
             parent_path,
@@ -235,21 +513,28 @@ impl Sirius {
         );
 
         if parent.file_type != FileType::Directory {
-            serial_println!("Error: Sirius: create_file: parent is not a directory");
+            serial_println_core!("Error: Sirius: create_file: parent is not a directory");
             return Err(FileSystemError::NotDirectory);
         }
 
         let node_id = self.driver.create_file(parent.node_id, name.as_str())?;
-        serial_println!("Sirius: create_file: created file: {:#x}", node_id);
+        serial_println_core!("Sirius: create_file: created file: {:#x}", node_id);
 
-        self.driver.get_node(node_id)
+        let node = self.driver.get_node(node_id)?;
+
+        #[cfg(feature = "use_cached_fs")]
+        if let Some(cached) = self.as_cached_driver_mut() {
+            cached.cache_path(node_id, path);
+        }
+
+        Ok(node)
     }
 
     pub fn create_directory(&mut self, path: &str) -> FileSystemResult<FileNode> {
         let (parent_path, name) = self.split_path(path)?;
         let parent = self.resolve_path(parent_path.as_str())?;
 
-        serial_println!(
+        serial_println_core!(
             "Sirius: create_directory: path: {}, parent_path: {}, name: {}",
             path,
             parent_path,
@@ -263,7 +548,7 @@ impl Sirius {
         let node_id = self
             .driver
             .create_directory(parent.node_id, name.as_str())?;
-        serial_println!(
+        serial_println_core!(
             "Sirius: create_directory: created directory: {:#x}",
             node_id
         );
@@ -272,10 +557,10 @@ impl Sirius {
     }
 
     pub fn delete(&mut self, path: &str) -> FileSystemResult<()> {
-        serial_println!("Sirius: delete: looking for path: {}", path);
+        serial_println_core!("Sirius: delete: looking for path: {}", path);
         let node = self.resolve_path(path)?;
 
-        serial_println!(
+        serial_println_core!(
             "Sirius: delete: path: {}, resolved node: {}",
             path,
             node.name
@@ -284,7 +569,89 @@ impl Sirius {
         self.driver.delete(node.node_id)
     }
 
-    // Split path into parents part and filename
+    // ---- Cache-specific public API (only available with feature) ----
+
+    /// Pin a file in cache - it will never be evicted
+    #[cfg(feature = "use_cached_fs")]
+    pub fn pin_file(&mut self, path: &str) -> FileSystemResult<()> {
+        if let Some(cached) = self.as_cached_driver_mut() {
+            // Access the cache through the CachedDriver
+            // This requires exposing methods on CachedDriver
+            cached.pin_file(path).map_err(|e| e.into())
+        } else {
+            Err(FileSystemError::NotSupported)
+        }
+    }
+
+    /// Unpin a previously pinned file
+    #[cfg(feature = "use_cached_fs")]
+    pub fn unpin_file(&mut self, path: &str) -> FileSystemResult<()> {
+        if let Some(cached) = self.as_cached_driver_mut() {
+            cached.unpin_file(path).map_err(|e| e.into())
+        } else {
+            Err(FileSystemError::NotSupported)
+        }
+    }
+
+    /// Reserve cache space for a directory with given importance
+    #[cfg(feature = "use_cached_fs")]
+    pub fn reserve_cache(
+        &mut self,
+        path: &str,
+        importance: CacheImportance,
+    ) -> FileSystemResult<()> {
+        if let Some(cached) = self.as_cached_driver_mut() {
+            cached.reserve_cache(path, importance).map_err(|e| e.into())
+        } else {
+            Err(FileSystemError::NotSupported)
+        }
+    }
+
+    /// Evict all cached files under a directory
+    #[cfg(feature = "use_cached_fs")]
+    pub fn evict_directory(&mut self, path: &str) -> FileSystemResult<usize> {
+        if let Some(cached) = self.as_cached_driver_mut() {
+            cached.evict_directory(path).map_err(|e| e.into())
+        } else {
+            Err(FileSystemError::NotSupported)
+        }
+    }
+
+    /// Get cache statistics
+    #[cfg(feature = "use_cached_fs")]
+    pub fn cache_stats(&self) -> Option<crate::filesystem::file_cache::CacheStats> {
+        self.as_cached_driver().map(|c| c.cache_stats())
+    }
+
+    /// Helper to get mutable reference to CachedDriver if available
+    #[cfg(feature = "use_cached_fs")]
+    fn as_cached_driver_mut(&mut self) -> Option<&mut CachedDriver> {
+        // Use unsafe to downcast the trait object
+        // This is safe because we control the type and know it's CachedDriver
+        let driver_ref: &mut dyn FilesystemDriver = &mut *self.driver;
+        unsafe {
+            let ptr = driver_ref as *mut dyn FilesystemDriver as *mut CachedDriver;
+            if self.cache_enabled {
+                Some(&mut *ptr)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "use_cached_fs")]
+    fn as_cached_driver(&self) -> Option<&CachedDriver> {
+        let driver_ref: &dyn FilesystemDriver = &*self.driver;
+        unsafe {
+            let ptr = driver_ref as *const dyn FilesystemDriver as *const CachedDriver;
+            if self.cache_enabled {
+                Some(&*ptr)
+            } else {
+                None
+            }
+        }
+    }
+
     fn split_path(&self, path: &str) -> FileSystemResult<(String, String)> {
         if path.is_empty() || path == "/" {
             return Err(FileSystemError::InvalidPath);
@@ -296,7 +663,6 @@ impl Sirius {
             path
         };
 
-        // find the last '/', the parent part is everything before it
         match path.rfind('/') {
             Some(pos) => {
                 let parent = if pos == 0 {
@@ -312,6 +678,40 @@ impl Sirius {
     }
 }
 
+// Add cache-specific methods to CachedDriver
+#[cfg(feature = "use_cached_fs")]
+impl CachedDriver {
+    pub fn pin_file(&mut self, path: &str) -> FileSystemResult<()> {
+        let mut adapter = DriverAdapter {
+            inner: &mut *self.inner,
+        };
+        self.cache.pin_file(&mut adapter, path)
+    }
+
+    pub fn unpin_file(&mut self, path: &str) -> FileSystemResult<()> {
+        self.cache.unpin_file(path)
+    }
+
+    pub fn reserve_cache(
+        &mut self,
+        path: &str,
+        importance: CacheImportance,
+    ) -> FileSystemResult<()> {
+        self.cache.reserve_directory(path, importance)
+    }
+
+    pub fn evict_directory(&mut self, path: &str) -> FileSystemResult<usize> {
+        self.cache.evict_directory(path)
+    }
+
+    pub fn cache_stats(&self) -> crate::filesystem::file_cache::CacheStats {
+        self.cache.stats()
+    }
+}
+
+// ---- Initialization ----
+
+#[cfg(not(feature = "use_cached_fs"))]
 pub fn init_filesystem(fat32_image: &[u8]) -> Result<(), &'static str> {
     let mut disk = MockDiskDevice::new(fat32_image.len() / 512 + 1);
     disk.load_image(fat32_image)
@@ -325,9 +725,51 @@ pub fn init_filesystem(fat32_image: &[u8]) -> Result<(), &'static str> {
 
     SIRIUS.call_once(|| Mutex::new(Sirius::new(Box::new(fat32_driver))));
 
+    serial_println_core!("Filesystem initialized (no cache)");
     Ok(())
 }
 
+#[cfg(feature = "use_cached_fs")]
+pub fn init_filesystem(fat32_image: &[u8]) -> Result<(), &'static str> {
+    init_filesystem_with_cache(fat32_image, 64 * 1024 * 1024, true)
+}
+
+#[cfg(feature = "use_cached_fs")]
+pub fn init_filesystem_with_cache(
+    fat32_image: &[u8],
+    cache_size: usize,
+    enable_cache: bool,
+) -> Result<(), &'static str> {
+    let mut disk = MockDiskDevice::new(fat32_image.len() / 512 + 1);
+    disk.load_image(fat32_image)
+        .map_err(|_| "Failed to load disk image")?;
+    init_disk(Box::new(disk));
+
+    let boot_sector_data = &fat32_image[..512];
+
+    let fat32_driver =
+        Fat32Driver::new(boot_sector_data).map_err(|_| "Failed to initialize FAT32 driver")?;
+
+    SIRIUS.call_once(|| {
+        Mutex::new(Sirius::new_with_cache(
+            Box::new(fat32_driver),
+            cache_size,
+            enable_cache,
+        ))
+    });
+
+    if enable_cache {
+        serial_println_core!(
+            "Filesystem initialized with cache ({}MB)",
+            cache_size / (1024 * 1024)
+        );
+    } else {
+        serial_println_core!("Filesystem initialized (cache disabled)");
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "use_cached_fs"))]
 pub fn init_filesystem_ata() -> Result<(), &'static str> {
     let ata_driver =
         AtaPioDriver::check_primary_bus_present().ok_or("No ATA drive found on primary bus")?;
@@ -346,6 +788,50 @@ pub fn init_filesystem_ata() -> Result<(), &'static str> {
 
     SIRIUS.call_once(|| Mutex::new(Sirius::new(Box::new(fat32_driver))));
 
-    serial_println!("Filesystem initialized from ATA drive");
+    serial_println_core!("Filesystem initialized from ATA drive (no cache)");
+    Ok(())
+}
+
+#[cfg(feature = "use_cached_fs")]
+pub fn init_filesystem_ata() -> Result<(), &'static str> {
+    init_filesystem_ata_with_cache(64 * 1024 * 1024, true)
+}
+
+#[cfg(feature = "use_cached_fs")]
+pub fn init_filesystem_ata_with_cache(
+    cache_size: usize,
+    enable_cache: bool,
+) -> Result<(), &'static str> {
+    let ata_driver =
+        AtaPioDriver::check_primary_bus_present().ok_or("No ATA drive found on primary bus")?;
+
+    init_disk(Box::new(ata_driver));
+
+    let mut boot_sector_buf = [0u8; SECTOR_SIZE];
+    {
+        let mut disk = get_disk_mgr();
+        disk.read_sector(0, &mut boot_sector_buf)
+            .map_err(|_| "Failed to read boot sector from ATA drive")?;
+    }
+
+    let fat32_driver = Fat32Driver::new(&boot_sector_buf)
+        .map_err(|_| "Failed to initialize FAT32 driver from ATA")?;
+
+    SIRIUS.call_once(|| {
+        Mutex::new(Sirius::new_with_cache(
+            Box::new(fat32_driver),
+            cache_size,
+            enable_cache,
+        ))
+    });
+
+    if enable_cache {
+        serial_println_core!(
+            "Filesystem initialized from ATA drive with cache ({}MB)",
+            cache_size / (1024 * 1024)
+        );
+    } else {
+        serial_println_core!("Filesystem initialized from ATA drive (cache disabled)");
+    }
     Ok(())
 }

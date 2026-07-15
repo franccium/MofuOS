@@ -929,10 +929,10 @@ impl FilesystemDriver for Fat32Driver {
             }
         }
 
+        entry.file_size = new_end as u32;
+
         // Update file size in the directory entry if the file grew
         if new_end > old_size {
-            entry.file_size = new_end as u32;
-
             // Find the index of this entry in the parent directory
             let entries = self.read_directory_entries(parent_cluster, &mut disk_mgr)?;
             let entry_index = entries

@@ -741,8 +741,8 @@ pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
 
 impl CpuInfoFlat {
     pub fn from_kernel_info(
-        cpu_info: &CpuInfo, 
-        tsc_freq: u64, 
+        cpu_info: &CpuInfo,
+        tsc_freq: u64,
         boot_tsc: u64,
         core_count: u8,
     ) -> Self {
@@ -762,7 +762,7 @@ impl CpuInfoFlat {
             max_extended_cpuid_leaf: 0,
             core_count,
         };
-        
+
         flat
     }
 }
