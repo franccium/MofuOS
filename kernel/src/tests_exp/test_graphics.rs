@@ -81,8 +81,8 @@ pub fn render_shaders_2d_textured(
     let texture_slot2 = ctx.bind_texture(texture);
 
     let pipeline = PipelineState {
-        vs: Box::new(PassThroughVS),
-        ps: Box::new(TextureSamplePS { texture_slot }),
+        vs: PassThroughVS,
+        ps: TextureSamplePS { texture_slot },
         vertex_layout: VertexLayout::new_2d(),
         rasterizer_state: RasterizerState::default(),
         blend_state: BlendState::default(),
@@ -102,10 +102,8 @@ pub fn render_shaders_2d_textured(
     );
 
     let pipeline2 = PipelineState {
-        vs: Box::new(PassThroughVS),
-        ps: Box::new(TextureSamplePS {
-            texture_slot: texture_slot2,
-        }),
+        vs: PassThroughVS,
+        ps: TextureSamplePS { texture_slot: texture_slot2 },
         vertex_layout: VertexLayout::new_2d(),
         rasterizer_state: RasterizerState::default(),
         blend_state: BlendState::default(),
@@ -148,8 +146,8 @@ pub fn render_shaders_2d(window_buffer: &Arc<WindowBuffer>, render_target: &mut 
     const SIZE: u32 = 120;
 
     let pipeline = PipelineState {
-        vs: Box::new(PassThroughVS),
-        ps: Box::new(UVDebugPS),
+        vs: PassThroughVS,
+        ps: UVDebugPS,
         vertex_layout: VertexLayout::new_2d(),
         rasterizer_state: RasterizerState::default(),
         blend_state: BlendState::default(),

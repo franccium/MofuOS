@@ -1,7 +1,7 @@
 use crate::graphics::color::Rgba8888UNORM;
 use crate::graphics::pipeline::{
-    CullMode, PSIn, PipelineState, PipelineState3D, RenderMode, RenderTarget, VSIn, VSOut, VSOut3D,
-    Vertex2D, Vertex3D,
+    CullMode, PSIn, PipelineState, PipelineState3D, PixelShader, RenderMode, RenderTarget, VSIn,
+    VSOut, VSOut3D, Vertex2D, Vertex3D, VertexShader,
 };
 use crate::graphics::resources::{ConstantBuffer, DepthBuffer, RWBuffer, Texture};
 use crate::graphics::window::{WindowBackBuffer, WindowBuffer};
@@ -406,7 +406,7 @@ impl RenderContext {
         false
     }
 
-    pub fn draw_triangle_2d(
+    pub fn draw_triangle_2d<VS, PS>(
         &mut self,
         x0: f32,
         y0: f32,
@@ -421,8 +421,11 @@ impl RenderContext {
         u2: f32,
         v2: f32,
         render_target: &mut RenderTarget<'_>,
-        pipeline: &PipelineState,
-    ) {
+        pipeline: &PipelineState<VS, PS>,
+    ) where
+        VS: VertexShader,
+        PS: PixelShader,
+    {
         let vertices = [
             Vertex2D::new(x0, y0, u0, v0),
             Vertex2D::new(x1, y1, u1, v1),
@@ -432,15 +435,18 @@ impl RenderContext {
         self.draw_single_triangle_vertex_list(&vertices, render_target, pipeline);
     }
 
-    pub fn draw_rect_2d(
+    pub fn draw_rect_2d<VS, PS>(
         &mut self,
         x: f32,
         y: f32,
         width: f32,
         height: f32,
         render_target: &mut RenderTarget<'_>,
-        pipeline: &PipelineState,
-    ) {
+        pipeline: &PipelineState<VS, PS>,
+    ) where
+        VS: VertexShader,
+        PS: PixelShader,
+    {
         // let vertices = [
         //     Vertex2D::new(x, y, 0.0, 0.0),
         //     Vertex2D::new(x + width, y + height, 1.0, 1.0),
@@ -475,12 +481,15 @@ impl RenderContext {
         self.draw_triangle_pair_vertex_list(&vertices, render_target, pipeline);
     }
 
-    fn draw_triangle_pair_vertex_list(
+    fn draw_triangle_pair_vertex_list<VS, PS>(
         &mut self,
         vertices: &[Vertex2D; 6],
         render_target: &mut RenderTarget<'_>,
-        pipeline: &PipelineState,
-    ) {
+        pipeline: &PipelineState<VS, PS>,
+    ) where
+        VS: VertexShader,
+        PS: PixelShader,
+    {
         let rt_width = render_target.width;
         let rt_height = render_target.height;
         let rt_buffer = render_target.get_buffer_mut();
@@ -496,12 +505,15 @@ impl RenderContext {
         self.rasterize_triangle_simd(&vs3, &vs4, &vs5, rt_buffer, rt_width, rt_height, pipeline);
     }
 
-    fn draw_single_triangle_vertex_list(
+    fn draw_single_triangle_vertex_list<VS, PS>(
         &mut self,
         vertices: &[Vertex2D; 3],
         render_target: &mut RenderTarget<'_>,
-        pipeline: &PipelineState,
-    ) {
+        pipeline: &PipelineState<VS, PS>,
+    ) where
+        VS: VertexShader,
+        PS: PixelShader,
+    {
         let rt_width = render_target.width;
         let rt_height = render_target.height;
         let rt_buffer = render_target.get_buffer_mut();
@@ -513,12 +525,15 @@ impl RenderContext {
         self.rasterize_triangle_simd(&vs0, &vs1, &vs2, rt_buffer, rt_width, rt_height, pipeline);
     }
 
-    fn draw_triangle_list(
+    fn draw_triangle_list<VS, PS>(
         &mut self,
         vertices: &[Vertex2D],
         render_target: &mut RenderTarget<'_>,
-        pipeline: &PipelineState,
-    ) {
+        pipeline: &PipelineState<VS, PS>,
+    ) where
+        VS: VertexShader,
+        PS: PixelShader,
+    {
         let rt_width = render_target.width;
         let rt_height = render_target.height;
         let rt_buffer = render_target.get_buffer_mut();
@@ -539,7 +554,7 @@ impl RenderContext {
         }
     }
 
-    fn rasterize_triangle_simd(
+    fn rasterize_triangle_simd<VS, PS>(
         &mut self,
         v0: &VSOut,
         v1: &VSOut,
@@ -547,8 +562,11 @@ impl RenderContext {
         rt_buffer: &mut [u32],
         rt_width: u32,
         rt_height: u32,
-        pipeline: &PipelineState,
-    ) {
+        pipeline: &PipelineState<VS, PS>,
+    ) where
+        VS: VertexShader,
+        PS: PixelShader,
+    {
         let x0 = f32x4::splat(v0.x());
         let y0 = f32x4::splat(v0.y());
         let x1 = f32x4::splat(v1.x());

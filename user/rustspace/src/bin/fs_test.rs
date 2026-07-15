@@ -445,7 +445,11 @@ pub extern "C" fn main() -> ! {
         );
 
         let total_cycles = cycle - start_cycle;
-        rustspace::println!("Total Cycles: {} ({}us)", total_cycles, cycles_to_us(total_cycles));
+        rustspace::println!(
+            "Total Cycles: {} ({}us)",
+            total_cycles,
+            cycles_to_us(total_cycles)
+        );
     }
 
     print_summary();

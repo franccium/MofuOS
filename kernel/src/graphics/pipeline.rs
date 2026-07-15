@@ -162,9 +162,13 @@ pub enum DepthFunc {
     GreaterEqual,
 }
 
-pub struct PipelineState {
-    pub vs: Box<dyn VertexShader>,
-    pub ps: Box<dyn PixelShader>,
+pub struct PipelineState<VS, PS>
+where
+    VS: VertexShader,
+    PS: PixelShader,
+{
+    pub vs: VS,
+    pub ps: PS,
     pub vertex_layout: VertexLayout,
     pub rasterizer_state: RasterizerState,
     pub blend_state: BlendState,

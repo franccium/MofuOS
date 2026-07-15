@@ -27,7 +27,7 @@ run-hdd: run-hdd-$(KARCH)
 .PHONY: fat32-image
 fat32-image: test_disk_image.fat32.img
 
-ATA_DISK_IMG := ata_disk.img
+ATA_DISK_IMG := storage/ata_disk.img
 
 .PHONY: ata-disk
 ata-disk: $(ATA_DISK_IMG)

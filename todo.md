@@ -8,29 +8,24 @@ now that fat32 kinda works:
 
 
 REAL TODO:
+
+- !! file caching
+
 - now that we can redirect logs, write automated tests for cretain parts of kernel and for userspace programs
 - create test suite userspace programs that will run and test stuff
 
-fun todo:
+- make sure loaded program sections get page-aligned and have actual proper protection flags
+
 - thread context switching, two processes running on 1 core
 - upstream bigos compositor and terminal (no not yet, we will do userspace shell, doing it kernel mode now would couple things i dont want coupled and that would be problematic in the future) to this
-- CreateWindow syscall handling
-    writing into that window
-        direct memory access?
-        a graphics api, and batch everything somehow, give the OS a finished state in some format that it will parse and draw?
-        need something embedded-graphics-compatible-text-rendering compatible
-- port the event train i did for bigos and let userspace read input from a mapped RO memory no-syscall
-    make the game.rs react to input and exit on Q pressed
 - enable sse builds?
 - rdtscp instead of rdtsc in timer handler to get core_id
 
 - grouping syscalls
     instead of always doing the entire ring swap, group syscalls that can be called at a single time
         the whole window creation chain is a good example
-        
 
 - stdin/stout routing for userspace
-    C programs compiled into ELF to be able to get from stdin and output to stdout. What would be the stdin stdout even - another userspace program that functions as a shell?
     I suppose we first do a userspace shell
         FIRST FIGURE OUT HOW TO HANDLE THE SHARED BUFFERS, SHELL'S ARCHITECTURE DEPENDS ON THAT
     then we define what stdout and stdin is
@@ -57,10 +52,6 @@ fun todo:
             i need extremely small overhead on all things in this OS, so maybe making the processes be mandatorily smart is the real way
                 esp since nobody is ever gonna use that and id know how to write programs for my own kernel
 
-
-
-- Process with terminal output / graphics
-- userspace shell if that works?
 - some regression tests for the future for the userspace stuff
 
 - hook up the virtio_drivers crate; but there is no point for now and id have to probably maintain it when it updates; ata is fine for now
@@ -69,3 +60,4 @@ graphics:
 
 - at this point tough to optimize anything, should do multithreaded rendering
 - might also eg shade 4 pixels at once the same way, and interpolate 16
+- would tiling be beneficial?

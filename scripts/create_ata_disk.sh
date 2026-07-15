@@ -2,8 +2,12 @@
 # Usage: ./scripts/create_ata_disk.sh [output_file] [size_mb]
 set -e
 
-OUTPUT="${1:-ata_disk.img}"
+OUTPUT_FILENAME="${1:-ata_disk.img}"
 SIZE_MB="${2:-256}"
+
+OUT_DIR="storage"
+mkdir -p "${OUT_DIR}"
+OUTPUT="${OUT_DIR}/${OUTPUT_FILENAME}"
 
 echo "Creating ${SIZE_MB}MB FAT32 disk image: ${OUTPUT}"
 

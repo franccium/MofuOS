@@ -7,8 +7,9 @@ notes.md
 architecture.md
 esp
 notes/
-os_disk_fat32
 
 kernel/kernel
 logs
 scripts/__pycache__
+
+storage/
