@@ -27,13 +27,14 @@ run-hdd: run-hdd-$(KARCH)
 .PHONY: fat32-image
 fat32-image: test_disk_image.fat32.img
 
+ATA_DISK_IMG_TEMPLATE := disk_templates/fat32_os_disk_template_default
 ATA_DISK_IMG := ata_disk.img
 
 .PHONY: ata-disk
 ata-disk: $(ATA_DISK_IMG)
 
 $(ATA_DISK_IMG):
-	bash scripts/create_ata_disk.sh $(ATA_DISK_IMG) 64
+	bash scripts/create_ata_disk.sh -i $(ATA_DISK_IMG_TEMPLATE) -o $(ATA_DISK_IMG) -s 64
 
 SOCKET1 := /tmp/mofuos_com1.sock
 SOCKET2 := /tmp/mofuos_com2.sock
