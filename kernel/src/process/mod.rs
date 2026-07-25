@@ -15,4 +15,3 @@ pub use kernel_thread::{KernelThread, ThreadGroup, ThreadState};
 pub use process::{PID, Process};
 pub use process_manager::ProcessManager;
 pub use scheduler::{SCHEDULER, Scheduler, SchedulerStats};
-pub use syscall::SystemCall;

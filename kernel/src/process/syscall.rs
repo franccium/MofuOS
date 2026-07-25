@@ -17,9 +17,9 @@ use crate::{
     serial_println_core,
     util::cpuinfo::get_current_core_id,
 };
+use alloc::string::String;
 use core::arch::naked_asm;
 use core::sync::atomic::Ordering;
-use alloc::string::String;
 use x86_64::registers::model_specific::{Efer, EferFlags};
 
 #[cfg(feature = "use_cached_fs")]
@@ -95,52 +95,6 @@ pub enum SyscallNumber {
     Exit = 999,
 }
 
-impl SystemCall {
-    pub fn from_number_and_args(
-        num: usize,
-        arg1: usize,
-        arg2: usize,
-        arg3: usize,
-        arg4: usize,
-        _arg5: usize,
-        _arg6: usize,
-    ) -> Option<Self> {
-        match num {
-            0 => Some(SystemCall::CreateProcess {
-                parent_pid: arg1,
-                name_ptr: arg2 as *const u8,
-                name_len: arg3 as u8,
-                is_out: arg4 != 0,
-            }),
-            1 => Some(SystemCall::TerminateProcess {
-                pid_to_kill: arg1,
-                exit_code: arg2 as i32,
-                kill_children: arg3 != 0,
-            }),
-            2 => Some(SystemCall::Write {
-                fd: arg1,
-                buffer_ptr: arg2,
-                n_bytes: arg3,
-            }),
-            3 => Some(SystemCall::Read {
-                fd: arg1,
-                buffer_ptr: arg2,
-                n_bytes: arg3,
-            }),
-            4 => Some(SystemCall::GetLine {
-                fd: arg1,
-                buffer_ptr: arg2,
-                n_bytes: arg3,
-            }),
-            5 => Some(SystemCall::Allocate { size: arg1 }),
-            999 => Some(SystemCall::Exit {
-                return_code: arg1 as u32,
-            }),
-            _ => None,
-        }
-    }
-}
-
 #[repr(C, align(64))]
 struct PerCoreSyscallData {
     stack_top: u64,
@@ -171,15 +125,15 @@ pub struct SyscallFrame {
     pub rbp: u64,
     pub rbx: u64,
 
-    pub arg6: u64, // r9
-    pub arg5: u64, // r8
-    pub arg4: u64, // r10
-    pub arg3: u64, // rdx
-    pub arg2: u64, // rsi
-    pub arg1: u64, // rdi
+    pub arg6: u64,        // r9
+    pub arg5: u64,        // r8
+    pub arg4: u64,        // r10
+    pub arg3: u64,        // rdx
+    pub arg2: u64,        // rsi
+    pub arg1: u64,        // rdi
     pub syscall_num: u64, // rax
 
-    pub rflags: u64, // r11
+    pub rflags: u64,   // r11
     pub user_rip: u64, // rcx
     pub user_rsp: u64, // r15
 }
@@ -425,32 +379,47 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
                 | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
 
-            for i in 0..page_count {
-                let page_vaddr = back_vaddr + (i * 0x1000) as u64;
-                let front_page_vaddr = front_vaddr + (i * 0x1000) as u64;
-                let phys = umm.translate_kernel_heap_virt_to_phys(page_vaddr);
-                let front_phys = umm.translate_kernel_heap_virt_to_phys(front_page_vaddr);
-                let user_virt = x86_64::VirtAddr::new(user_base + (i * 0x1000) as u64);
-                let front_user_virt =
-                    x86_64::VirtAddr::new(user_base + MAX_WINDOW_BUFFER_SIZE + (i * 0x1000) as u64);
+            {
+                let mut frame_allocator = get_frame_allocator();
 
-                if let Err(e) = umm.map_specific_frame(pml4_phys, user_virt, phys, flags) {
-                    serial_println_core!(
-                        "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
-                        i,
-                        e
+                for i in 0..page_count {
+                    let page_vaddr = back_vaddr + (i * 0x1000) as u64;
+                    let front_page_vaddr = front_vaddr + (i * 0x1000) as u64;
+                    let phys = umm.translate_kernel_heap_virt_to_phys(page_vaddr);
+                    let front_phys = umm.translate_kernel_heap_virt_to_phys(front_page_vaddr);
+                    let user_virt = x86_64::VirtAddr::new(user_base + (i * 0x1000) as u64);
+                    let front_user_virt = x86_64::VirtAddr::new(
+                        user_base + MAX_WINDOW_BUFFER_SIZE + (i * 0x1000) as u64,
                     );
-                    return u64::MAX;
-                }
-                if let Err(e) =
-                    umm.map_specific_frame(pml4_phys, front_user_virt, front_phys, flags)
-                {
-                    serial_println_core!(
-                        "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
-                        i,
-                        e
-                    );
-                    return u64::MAX;
+
+                    if let Err(e) = umm.map_specific_frame(
+                        pml4_phys,
+                        user_virt,
+                        phys,
+                        flags,
+                        &mut frame_allocator,
+                    ) {
+                        serial_println_core!(
+                            "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
+                            i,
+                            e
+                        );
+                        return u64::MAX;
+                    }
+                    if let Err(e) = umm.map_specific_frame(
+                        pml4_phys,
+                        front_user_virt,
+                        front_phys,
+                        flags,
+                        &mut frame_allocator,
+                    ) {
+                        serial_println_core!(
+                            "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
+                            i,
+                            e
+                        );
+                        return u64::MAX;
+                    }
                 }
             }
 
@@ -919,7 +888,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 match sirius.reserve_cache(&path, importance) {
                     Ok(()) => {
                         serial_println_core!(
-                            "sys_reserve_cache: '{}' reserved with importance {:?}",
+                            "sys_reserve_cache: '{}' reserved with importance {}",
                             path,
                             importance
                         );

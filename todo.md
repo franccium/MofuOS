@@ -11,6 +11,8 @@ REAL TODO:
 
 - !! file caching
 
+- hash algorithms
+
 - !!! MAX_CORES set to the actual count of the cores causes a page fault on the (MAX_CORES-1) core after entering scheduler loop now, it used to work fine
 
 - now that we can redirect logs, write automated tests for cretain parts of kernel and for userspace programs
