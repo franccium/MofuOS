@@ -1,6 +1,3 @@
-// sirius/syscall.rs
-// Syscall module with optional file cache integration
-
 use crate::filesystem::sirius::{DirEntryFlat, FS_NAME_LEN, StatFlat};
 use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
 use crate::memory::get_frame_allocator;
@@ -22,27 +19,27 @@ use crate::{
 };
 use core::arch::naked_asm;
 use core::sync::atomic::Ordering;
+use alloc::string::String;
 use x86_64::registers::model_specific::{Efer, EferFlags};
 
-// Conditionally import cache types
 #[cfg(feature = "use_cached_fs")]
 use crate::filesystem::file_cache::CacheImportance;
 
-/// Check that a userspace pointer + length is entirely within canonical user address space
+const SYSCALL_STACK_SIZE: usize = 4096 * 16; // 64 KiB per core
+
 #[inline]
 fn validate_user_ptr(ptr: usize, len: usize) -> bool {
     let end = ptr.saturating_add(len);
     ptr != 0 && end <= USER_MEM_MAX_ADDRESS && end >= ptr
 }
 
-// Helper to read a user-space string, returning a String
-fn read_user_string(ptr: usize, len: usize) -> Option<alloc::string::String> {
+fn read_user_string(ptr: usize, len: usize) -> Option<String> {
     if !validate_user_ptr(ptr, len) {
         return None;
     }
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
     match core::str::from_utf8(bytes) {
-        Ok(s) => Some(alloc::string::String::from(s)),
+        Ok(s) => Some(String::from(s)),
         Err(_) => None,
     }
 }
@@ -57,62 +54,6 @@ pub enum SyscallError {
     ProcessNotFound = 4,
     InvalidFd = 5,
     SyscallNotFound = 999,
-}
-
-pub enum SystemCall {
-    CreateProcess {
-        parent_pid: usize,
-        name_ptr: *const u8,
-        name_len: u8,
-        is_out: bool,
-    },
-    TerminateProcess {
-        pid_to_kill: usize,
-        exit_code: i32,
-        kill_children: bool,
-    },
-    Write {
-        fd: usize,
-        buffer_ptr: usize,
-        n_bytes: usize,
-    },
-    Read {
-        fd: usize,
-        buffer_ptr: usize,
-        n_bytes: usize,
-    },
-    GetLine {
-        fd: usize,
-        buffer_ptr: usize,
-        n_bytes: usize,
-    },
-    Allocate {
-        size: usize,
-    },
-    CreateFile {
-        path_ptr: usize,
-        path_len: usize,
-    },
-    RemoveFile {
-        path_ptr: usize,
-        path_len: usize,
-    },
-    LoadFile {
-        path_ptr: usize,
-        path_len: usize,
-    },
-    UnloadFile {
-        fd: usize,
-    },
-    CreateWindow {
-        process_id: usize,
-    },
-    GetProcessInfo {
-        pid: usize,
-    },
-    Exit {
-        return_code: u32,
-    },
 }
 
 #[repr(u64)]
@@ -200,64 +141,6 @@ impl SystemCall {
     }
 }
 
-pub fn handle_syscall(pid: usize, call: SystemCall) -> Result<(), SyscallError> {
-    assert!(pid != INVALID_PID);
-
-    let mut pm = PROCESS_MANAGER.lock();
-
-    match call {
-        SystemCall::CreateProcess {
-            parent_pid,
-            name_ptr,
-            name_len,
-            is_out,
-        } => {
-            let priority = 0;
-            if pid != parent_pid && pid != ARCHE_PID {
-                return Err(SyscallError::PermissionDenied);
-            }
-            match pm.create_process(
-                parent_pid, priority, name_ptr, name_len, is_out,
-                0, // entry_point (placeholder - will be set by ELF loader)
-                0, // stack_top (placeholder - will be set by ELF loader)
-                0, // page_table_base (placeholder - will be set by ELF loader)
-            ) {
-                Ok(new_pid) => {
-                    serial_println!("Created process with PID: {}", new_pid);
-                    Ok(())
-                }
-                Err(e) => {
-                    serial_println!("Failed to create process: {:?}", e);
-                    Err(SyscallError::ProcessNotFound)
-                }
-            }
-        }
-        SystemCall::TerminateProcess {
-            pid_to_kill,
-            exit_code,
-            kill_children,
-        } => {
-            if pid != pid_to_kill {
-                return Err(SyscallError::PermissionDenied);
-            }
-            match pm.terminate_process(pid_to_kill, exit_code, kill_children) {
-                Ok(_) => {
-                    serial_println!("Terminated process, PID: {}", pid_to_kill);
-                    Ok(())
-                }
-                Err(e) => {
-                    serial_println!("Failed to terminate process: {:?}", e);
-                    Err(SyscallError::ProcessNotFound)
-                }
-            }
-        }
-
-        _ => Err(SyscallError::SyscallNotFound),
-    }
-}
-
-const SYSCALL_STACK_SIZE: usize = 4096 * 16; // 64 KiB per core
-
 #[repr(C, align(64))]
 struct PerCoreSyscallData {
     stack_top: u64,
@@ -288,15 +171,15 @@ pub struct SyscallFrame {
     pub rbp: u64,
     pub rbx: u64,
 
-    pub arg6: u64,        // r9
-    pub arg5: u64,        // r8
-    pub arg4: u64,        // r10
-    pub arg3: u64,        // rdx
-    pub arg2: u64,        // rsi
-    pub arg1: u64,        // rdi
+    pub arg6: u64, // r9
+    pub arg5: u64, // r8
+    pub arg4: u64, // r10
+    pub arg3: u64, // rdx
+    pub arg2: u64, // rsi
+    pub arg1: u64, // rdi
     pub syscall_num: u64, // rax
 
-    pub rflags: u64,   // r11
+    pub rflags: u64, // r11
     pub user_rip: u64, // rcx
     pub user_rsp: u64, // r15
 }
@@ -492,10 +375,92 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             result
         }
         SyscallNumber::MapWindowBuffer => {
-            // ... (unchanged, omitted for brevity but keep your existing code)
             let window_id = frame.arg1 as u32;
-            // ... existing implementation ...
-            0 // placeholder - keep your existing code
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+
+            // User virtual base for window pixel buffers.
+            // Chosen to be above the heap and well below the stack.
+            const USER_WINDOW_BUFFER_BASE: u64 = 0x0000_0001_0000_0000;
+            const MAX_WINDOW_BUFFER_SIZE: u64 = 8 * 1024 * 1024; // 8 MB per window slot
+
+            let user_base = USER_WINDOW_BUFFER_BASE + (window_id as u64) * MAX_WINDOW_BUFFER_SIZE;
+
+            // Retrieve the WindowBuffer Arc from the compositor, then release the compositor lock.
+            let buffer_arc = {
+                let compositor = crate::graphics::compositor::get_compositor();
+                let windows = compositor.windows.read();
+                match windows.get(window_id as usize) {
+                    Some(w) if w.is_visible => alloc::sync::Arc::clone(&w.buffer),
+                    _ => {
+                        serial_println_core!(
+                            "sys_map_window_buffer: window_id={} not found",
+                            window_id
+                        );
+                        return u64::MAX;
+                    }
+                }
+            };
+
+            let back_vaddr = buffer_arc.back_buffer_virt_addr();
+            let front_vaddr = buffer_arc.front_buffer_virt_addr();
+            let pixel_count = buffer_arc.pixel_count();
+            let byte_count = pixel_count * 4;
+            let page_count = (byte_count + 0xFFF) / 0x1000;
+
+            let pml4_phys = {
+                let pm = PROCESS_MANAGER.lock();
+                match pm.get_process(pid) {
+                    Ok(p) => p.memory_layout.top_page_table_phys,
+                    Err(_) => {
+                        serial_println_core!("sys_map_window_buffer: pid={} not found", pid);
+                        return u64::MAX;
+                    }
+                }
+            };
+
+            let umm = crate::memory::get_user_mem_mgr();
+            let flags = x86_64::structures::paging::PageTableFlags::PRESENT
+                | x86_64::structures::paging::PageTableFlags::WRITABLE
+                | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
+                | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
+
+            for i in 0..page_count {
+                let page_vaddr = back_vaddr + (i * 0x1000) as u64;
+                let front_page_vaddr = front_vaddr + (i * 0x1000) as u64;
+                let phys = umm.translate_kernel_heap_virt_to_phys(page_vaddr);
+                let front_phys = umm.translate_kernel_heap_virt_to_phys(front_page_vaddr);
+                let user_virt = x86_64::VirtAddr::new(user_base + (i * 0x1000) as u64);
+                let front_user_virt =
+                    x86_64::VirtAddr::new(user_base + MAX_WINDOW_BUFFER_SIZE + (i * 0x1000) as u64);
+
+                if let Err(e) = umm.map_specific_frame(pml4_phys, user_virt, phys, flags) {
+                    serial_println_core!(
+                        "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
+                        i,
+                        e
+                    );
+                    return u64::MAX;
+                }
+                if let Err(e) =
+                    umm.map_specific_frame(pml4_phys, front_user_virt, front_phys, flags)
+                {
+                    serial_println_core!(
+                        "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
+                        i,
+                        e
+                    );
+                    return u64::MAX;
+                }
+            }
+
+            serial_println_core!(
+                "sys_map_window_buffer: window_id={} mapped {} pages at user {:#x}",
+                window_id,
+                page_count,
+                user_base
+            );
+            user_base
         }
         SyscallNumber::PresentWindow => {
             let window_id = frame.arg1 as u32;
@@ -531,7 +496,6 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             0
         }
 
-        // ---- Filesystem Syscalls (with optional cache) ----
         SyscallNumber::OpenFile => {
             let path = match read_user_string(frame.arg1 as usize, frame.arg2 as usize) {
                 Some(s) => s,
@@ -864,7 +828,6 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             }
         }
 
-        // ---- Cache Control Syscalls ----
         SyscallNumber::PinFile => {
             #[cfg(not(feature = "use_cached_fs"))]
             {
@@ -1005,7 +968,6 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
         SyscallNumber::GetCacheStats => {
             #[cfg(not(feature = "use_cached_fs"))]
             {
-                // Return zeros when cache is disabled
                 0
             }
 
@@ -1071,8 +1033,6 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
     }
 }
 
-// ---- Cache stats structure for userspace ----
-
 #[cfg(feature = "use_cached_fs")]
 #[repr(C)]
 pub struct CacheStatsFlat {
@@ -1106,6 +1066,16 @@ pub fn init_syscall() {
         });
     }
 
+    // STAR MSR layout:
+    // https://www.felixcloutier.com/x86/sysret
+    // Bits 63:48 = User CS base for sysretq
+    // Bits 47:32 = Kernel CS base for syscall
+    //
+    // GDT layout:
+    //   0x08 = kernel code, 0x10 = kernel data
+    //   0x18 = user code, 0x20 = user data
+    //
+    // sysretq sets CS = (STAR[63:48] + 16) | 3 = 0x23, SS = (STAR[63:48] + 8) | 3 = 0x1B
     let star_value = (0x10u64 << 48) | (0x08u64 << 32);
     let sfmask: u64 = 1 << 9;
     unsafe {

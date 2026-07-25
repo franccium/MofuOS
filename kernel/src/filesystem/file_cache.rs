@@ -984,7 +984,7 @@ struct DirectoryHint {
 
 // ---- Main Cache ----
 
-pub struct Fat32OptimizedCache {
+pub struct FAT32Cache {
     /// The hash trie storing all cached file data
     trie: HashTrie,
     /// Directory-level hints for eviction priority
@@ -999,7 +999,7 @@ pub struct Fat32OptimizedCache {
     current_memory: usize,
 }
 
-impl Fat32OptimizedCache {
+impl FAT32Cache {
     pub fn new(max_memory: usize) -> Self {
         Self {
             trie: HashTrie::new(),
@@ -1360,7 +1360,7 @@ impl Fat32OptimizedCache {
 //         let mut driver = MockDriver::new();
 //         driver.add_file("/test.txt", b"Hello, World!".to_vec());
 
-//         let mut cache = Fat32OptimizedCache::new(1024 * 1024);
+//         let mut cache = FAT32Cache::new(1024 * 1024);
 
 //         let data = cache.read_file(&mut driver, "/test.txt");
 //         assert!(data.is_ok());
@@ -1377,7 +1377,7 @@ impl Fat32OptimizedCache {
 //         let mut driver = MockDriver::new();
 //         driver.add_file("/pinned.txt", b"Pinned data".to_vec());
 
-//         let mut cache = Fat32OptimizedCache::new(1024 * 1024);
+//         let mut cache = FAT32Cache::new(1024 * 1024);
 
 //         // Pin the file
 //         let result = cache.pin_file(&mut driver, "/pinned.txt");
@@ -1390,7 +1390,7 @@ impl Fat32OptimizedCache {
 
 //     #[test]
 //     fn test_reserve_directory() {
-//         let mut cache = Fat32OptimizedCache::new(1024 * 1024);
+//         let mut cache = FAT32Cache::new(1024 * 1024);
 
 //         let result = cache.reserve_directory("/important/data", CacheImportance::VeryHigh);
 //         assert!(result.is_ok());

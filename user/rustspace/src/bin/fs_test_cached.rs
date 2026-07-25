@@ -779,8 +779,6 @@ unsafe fn suite_overwrite() {
     unsafe { sys_delete(PATH) };
 }
 
-// ===== Main =====
-
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
     println!("cached_fs_test: starting");

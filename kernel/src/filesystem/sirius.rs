@@ -1,5 +1,7 @@
 use crate::filesystem::fat32::Fat32Driver;
 use crate::filesystem::fat32::FileNodeHandle;
+#[cfg(feature = "use_cached_fs")]
+use crate::filesystem::file_cache::FAT32Cache;
 use crate::io::ata::AtaPioDriver;
 use crate::io::disk::{DiskOpError, MockDiskDevice, SECTOR_SIZE, get_disk_mgr, init_disk};
 use crate::serial_println_core;
@@ -14,7 +16,9 @@ use lazy_static::lazy_static;
 use spin::{Mutex, Once};
 
 #[cfg(feature = "use_cached_fs")]
-use crate::filesystem::file_cache::{CacheFilesystemDriver, CacheImportance, Fat32OptimizedCache};
+use {CacheFilesystemDriver, CacheImportance, FAT32Cache, CacheStats};
+
+pub const FS_CACHE_SIZE: usize = 64 * 1024 * 1024;
 
 lazy_static! {
     pub static ref SIRIUS: Once<Mutex<Sirius>> = Once::new();
@@ -177,7 +181,7 @@ pub trait FilesystemDriver: Send + Sync {
 #[cfg(feature = "use_cached_fs")]
 struct CachedDriver {
     inner: Box<dyn FilesystemDriver>,
-    cache: Fat32OptimizedCache,
+    cache: FAT32Cache,
     path_cache: BTreeMap<FileNodeHandle, String>,
 }
 
@@ -186,7 +190,7 @@ impl CachedDriver {
     fn new(inner: Box<dyn FilesystemDriver>, cache_size: usize) -> Self {
         Self {
             inner,
-            cache: Fat32OptimizedCache::new(cache_size),
+            cache: FAT32Cache::new(cache_size),
             path_cache: BTreeMap::new(),
         }
     }
@@ -375,8 +379,6 @@ impl<'a> CacheFilesystemDriver for DriverAdapter<'a> {
     }
 }
 
-// ---- Sirius with optional caching ----
-
 pub struct Sirius {
     pub driver: Box<dyn FilesystemDriver>,
 
@@ -394,7 +396,7 @@ impl Sirius {
     pub fn new(driver: Box<dyn FilesystemDriver>) -> Self {
         Self {
             driver,
-            cache_enabled: true, // Enabled by default when feature is on
+            cache_enabled: true,
         }
     }
 
@@ -415,22 +417,6 @@ impl Sirius {
                 cache_enabled: false,
             }
         }
-    }
-
-    #[cfg(feature = "use_cached_fs")]
-    pub fn enable_caching(&mut self, cache_size: usize) -> Result<(), &'static str> {
-        if self.cache_enabled {
-            return Ok(());
-        }
-
-        // This would require extracting the inner driver from the Box
-        // For now, we just mark it as enabled if it's already a CachedDriver
-        Err("Cannot enable caching after initialization")
-    }
-
-    #[cfg(feature = "use_cached_fs")]
-    pub fn is_cache_enabled(&self) -> bool {
-        self.cache_enabled
     }
 
     pub fn resolve_path(&self, path: &str) -> FileSystemResult<FileNode> {
@@ -569,9 +555,6 @@ impl Sirius {
         self.driver.delete(node.node_id)
     }
 
-    // ---- Cache-specific public API (only available with feature) ----
-
-    /// Pin a file in cache - it will never be evicted
     #[cfg(feature = "use_cached_fs")]
     pub fn pin_file(&mut self, path: &str) -> FileSystemResult<()> {
         if let Some(cached) = self.as_cached_driver_mut() {
@@ -583,7 +566,6 @@ impl Sirius {
         }
     }
 
-    /// Unpin a previously pinned file
     #[cfg(feature = "use_cached_fs")]
     pub fn unpin_file(&mut self, path: &str) -> FileSystemResult<()> {
         if let Some(cached) = self.as_cached_driver_mut() {
@@ -593,7 +575,6 @@ impl Sirius {
         }
     }
 
-    /// Reserve cache space for a directory with given importance
     #[cfg(feature = "use_cached_fs")]
     pub fn reserve_cache(
         &mut self,
@@ -607,7 +588,6 @@ impl Sirius {
         }
     }
 
-    /// Evict all cached files under a directory
     #[cfg(feature = "use_cached_fs")]
     pub fn evict_directory(&mut self, path: &str) -> FileSystemResult<usize> {
         if let Some(cached) = self.as_cached_driver_mut() {
@@ -617,17 +597,13 @@ impl Sirius {
         }
     }
 
-    /// Get cache statistics
     #[cfg(feature = "use_cached_fs")]
-    pub fn cache_stats(&self) -> Option<crate::filesystem::file_cache::CacheStats> {
+    pub fn cache_stats(&self) -> Option<CacheStats> {
         self.as_cached_driver().map(|c| c.cache_stats())
     }
 
-    /// Helper to get mutable reference to CachedDriver if available
     #[cfg(feature = "use_cached_fs")]
     fn as_cached_driver_mut(&mut self) -> Option<&mut CachedDriver> {
-        // Use unsafe to downcast the trait object
-        // This is safe because we control the type and know it's CachedDriver
         let driver_ref: &mut dyn FilesystemDriver = &mut *self.driver;
         unsafe {
             let ptr = driver_ref as *mut dyn FilesystemDriver as *mut CachedDriver;
@@ -678,7 +654,6 @@ impl Sirius {
     }
 }
 
-// Add cache-specific methods to CachedDriver
 #[cfg(feature = "use_cached_fs")]
 impl CachedDriver {
     pub fn pin_file(&mut self, path: &str) -> FileSystemResult<()> {
@@ -704,12 +679,10 @@ impl CachedDriver {
         self.cache.evict_directory(path)
     }
 
-    pub fn cache_stats(&self) -> crate::filesystem::file_cache::CacheStats {
+    pub fn cache_stats(&self) -> CacheStats {
         self.cache.stats()
     }
 }
-
-// ---- Initialization ----
 
 #[cfg(not(feature = "use_cached_fs"))]
 pub fn init_filesystem(fat32_image: &[u8]) -> Result<(), &'static str> {
@@ -731,7 +704,7 @@ pub fn init_filesystem(fat32_image: &[u8]) -> Result<(), &'static str> {
 
 #[cfg(feature = "use_cached_fs")]
 pub fn init_filesystem(fat32_image: &[u8]) -> Result<(), &'static str> {
-    init_filesystem_with_cache(fat32_image, 64 * 1024 * 1024, true)
+    init_filesystem_with_cache(fat32_image, FS_CACHE_SIZE, true)
 }
 
 #[cfg(feature = "use_cached_fs")]
@@ -760,8 +733,8 @@ pub fn init_filesystem_with_cache(
 
     if enable_cache {
         serial_println_core!(
-            "Filesystem initialized with cache ({}MB)",
-            cache_size / (1024 * 1024)
+            "Filesystem initialized with cache size: {}",
+            cache_size
         );
     } else {
         serial_println_core!("Filesystem initialized (cache disabled)");
@@ -794,7 +767,7 @@ pub fn init_filesystem_ata() -> Result<(), &'static str> {
 
 #[cfg(feature = "use_cached_fs")]
 pub fn init_filesystem_ata() -> Result<(), &'static str> {
-    init_filesystem_ata_with_cache(64 * 1024 * 1024, true)
+    init_filesystem_ata_with_cache(FS_CACHE_SIZE, true)
 }
 
 #[cfg(feature = "use_cached_fs")]
@@ -827,8 +800,8 @@ pub fn init_filesystem_ata_with_cache(
 
     if enable_cache {
         serial_println_core!(
-            "Filesystem initialized from ATA drive with cache ({}MB)",
-            cache_size / (1024 * 1024)
+            "Filesystem initialized from ATA drive with cache size: {}",
+            cache_size
         );
     } else {
         serial_println_core!("Filesystem initialized from ATA drive (cache disabled)");
