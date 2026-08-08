@@ -1,4 +1,4 @@
-use crate::filesystem::sirius::{DirEntryFlat, FS_NAME_LEN, StatFlat};
+use crate::filesystem::sirius::{DirEntryFlat, FilesystemDriver, FS_NAME_LEN, StatFlat};
 use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
 use crate::memory::get_frame_allocator;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
@@ -949,27 +949,24 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 }
 
                 let sirius = crate::filesystem::sirius::get_sirius();
-                if let Some(stats) = sirius.cache_stats() {
-                    let flat = CacheStatsFlat {
-                        total_files: stats.total_files as u64,
-                        total_bytes: stats.total_bytes as u64,
-                        max_bytes: stats.max_bytes as u64,
-                    };
+                let stats = sirius.cache_stats();
+                let flat = CacheStatsFlat {
+                    total_files: stats.total_files as u64,
+                    total_bytes: stats.total_bytes as u64,
+                    max_bytes: stats.max_bytes as u64,
+                };
 
-                    unsafe {
-                        core::ptr::write(stats_ptr as *mut CacheStatsFlat, flat);
-                    }
-
-                    serial_println_core!(
-                        "sys_get_cache_stats: {} files, {} / {} bytes",
-                        stats.total_files,
-                        stats.total_bytes,
-                        stats.max_bytes
-                    );
-                    0
-                } else {
-                    u64::MAX
+                unsafe {
+                    core::ptr::write(stats_ptr as *mut CacheStatsFlat, flat);
                 }
+
+                serial_println_core!(
+                    "sys_get_cache_stats: {} files, {} / {} bytes",
+                    stats.total_files,
+                    stats.total_bytes,
+                    stats.max_bytes
+                );
+                0
             }
         }
 
