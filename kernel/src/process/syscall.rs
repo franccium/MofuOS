@@ -18,6 +18,7 @@ use crate::{
     util::cpuinfo::get_current_core_id,
 };
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::arch::naked_asm;
 use core::sync::atomic::Ordering;
 use x86_64::registers::model_specific::{Efer, EferFlags};
@@ -88,6 +89,7 @@ pub enum SyscallNumber {
     ReserveCache = 32,
     EvictDirectory = 33,
     GetCacheStats = 34,
+    FlushFileCache = 35,
     GetCpuInfo = 970,
     GetProcessInfo = 996,
     GetPID = 997,
@@ -970,6 +972,39 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             }
         }
 
+        SyscallNumber::FlushFileCache => {
+            #[cfg(not(feature = "use_cached_fs"))]
+            {
+                0
+            }
+
+            #[cfg(feature = "use_cached_fs")]
+            {
+                let core_id = get_current_core_id();
+                let pid = scheduler::get_current_process_for_core(core_id);
+
+                let node_ids: Vec<crate::filesystem::fat32::FileNodeHandle> = {
+                    let pm = PROCESS_MANAGER.lock();
+                    match pm.get_process(pid) {
+                        Ok(proc) => proc.file_descriptors.iter().map(|fd| fd.node_id as crate::filesystem::fat32::FileNodeHandle).collect(),
+                        Err(_) => return u64::MAX,
+                    }
+                };
+
+                let mut sirius = crate::filesystem::sirius::get_sirius();
+                match sirius.flush_nodes(&node_ids) {
+                    Ok(()) => {
+                        serial_println_core!("sys_flush_file_cache: pid={} flushed {} nodes", pid, node_ids.len());
+                        0
+                    }
+                    Err(e) => {
+                        serial_println_core!("sys_flush_file_cache: pid={} error: {:?}", pid, e);
+                        u64::MAX
+                    }
+                }
+            }
+        }
+
         SyscallNumber::GetCpuInfo => {
             let buffer_ptr = frame.arg1 as usize;
             let buffer_len = frame.arg2 as usize;
@@ -1051,4 +1086,16 @@ pub fn init_syscall() {
     }
 
     serial_println_core!("Syscall MSRs initialized");
+}
+
+/// Flush all dirty cached files to disk. Call this from the kernel whenever a
+/// global writeback is needed (e.g., before shutdown or unmount).
+#[cfg(feature = "use_cached_fs")]
+pub fn flush_all_file_caches() {
+    let mut sirius = crate::filesystem::sirius::get_sirius();
+    if let Err(e) = sirius.flush_all() {
+        serial_println_core!("flush_all_file_caches: error: {:?}", e);
+    } else {
+        serial_println_core!("flush_all_file_caches: all dirty files flushed");
+    }
 }

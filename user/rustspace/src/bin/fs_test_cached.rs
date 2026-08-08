@@ -6,32 +6,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use rustspace::{
-    CacheImportance,
-    CacheStatsFlat,
-    CpuInfoFlat,
-    DirEntryFlat,
-    FD_FLAG_READ,
-    FD_FLAG_WRITE,
-    StatFlat,
-    println,
-    sys_close_file,
-    sys_create_dir,
-    sys_create_file,
-    sys_delete,
-    sys_evict_directory,
-    sys_exit,
-    sys_get_cache_stats,
-    sys_get_cpu_info,
-    sys_list_dir,
-    sys_open_file,
-    // Cache syscalls
-    sys_pin_file,
-    sys_read_file,
-    sys_reserve_cache,
-    sys_stat_file,
-    sys_unpin_file,
-    sys_write_file,
-    tsc_read,
+    CacheImportance, CacheStatsFlat, CpuInfoFlat, DirEntryFlat, FD_FLAG_READ, FD_FLAG_WRITE,
+    StatFlat, println, sys_close_file, sys_create_dir, sys_create_file, sys_delete,
+    sys_evict_directory, sys_exit, sys_flush_file_cache, sys_get_cache_stats, sys_get_cpu_info,
+    sys_list_dir, sys_open_file, sys_pin_file, sys_read_file, sys_reserve_cache, sys_stat_file,
+    sys_unpin_file, sys_write_file, tsc_read,
 };
 
 global_asm!(
@@ -110,16 +89,12 @@ unsafe fn print_cache_stats(label: &str) {
     let ok = unsafe { sys_get_cache_stats(&mut stats) };
     if ok {
         println!(
-            "  [cache] {}: {} files, {} KB / {} KB ({:.1}% used)",
+            "  [cache] {}: {} files ({} dirty), {} KB / {} KB",
             label,
             stats.total_files,
+            stats.dirty_files,
             stats.total_bytes / 1024,
             stats.max_bytes / 1024,
-            if stats.max_bytes > 0 {
-                (stats.total_bytes as f64 / stats.max_bytes as f64) * 100.0
-            } else {
-                0.0
-            }
         );
     } else {
         println!("  [cache] {}: stats unavailable", label);
@@ -779,6 +754,263 @@ unsafe fn suite_overwrite() {
     unsafe { sys_delete(PATH) };
 }
 
+unsafe fn suite_write_throughput() {
+    suite_header("write throughput: cached vs uncached");
+
+    const PATH: &str = "/wrthrpt.txt";
+    const CHUNK: &[u8] = b"0123456789ABCDEF";
+    const ITERATIONS: usize = 64;
+
+    unsafe { sys_delete(PATH) };
+    unsafe { sys_create_file(PATH) };
+
+    let fd = unsafe { sys_open_file(PATH, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd == usize::MAX {
+        println!("  SKIP (open failed)");
+        return;
+    }
+
+    let (start_cached, _) = unsafe { tsc_read() };
+    for _ in 0..ITERATIONS {
+        unsafe { sys_write_file(fd, CHUNK) };
+    }
+    let (end_cached, _) = unsafe { tsc_read() };
+    let cached_cycles = end_cached - start_cached;
+    let cached_per_write = cached_cycles / ITERATIONS as u64;
+
+    println!(
+        "  [perf] {} cached writes: {} cycles total, {} cycles/write",
+        ITERATIONS, cached_cycles, cached_per_write
+    );
+
+    unsafe { print_cache_stats("after cached writes") };
+
+    let (start_flush, _) = unsafe { tsc_read() };
+    let flushed = unsafe { sys_flush_file_cache() };
+    let (end_flush, _) = unsafe { tsc_read() };
+    let flush_cycles = end_flush - start_flush;
+
+    expect_true!("flush succeeds", flushed);
+    println!(
+        "  [perf] flush {} bytes to disk: {} cycles",
+        CHUNK.len() * ITERATIONS,
+        flush_cycles
+    );
+
+    unsafe { print_cache_stats("after flush") };
+
+    unsafe { sys_close_file(fd) };
+    unsafe { sys_delete(PATH) };
+}
+
+unsafe fn suite_sequential_write_batching() {
+    suite_header("sequential write batching");
+
+    const PATH_BATCH: &str = "/wbatch.txt";
+    const PATH_EAGER: &str = "/weager.txt";
+    const CHUNK: &[u8] = b"DATADATADATADATA";
+    const ITERATIONS: usize = 32;
+
+    // write all, flush once
+    unsafe { sys_delete(PATH_BATCH) };
+    unsafe { sys_create_file(PATH_BATCH) };
+
+    let fd_batch = unsafe { sys_open_file(PATH_BATCH, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd_batch == usize::MAX {
+        println!("  SKIP (batch open failed)");
+        return;
+    }
+
+    let (start_batch, _) = unsafe { tsc_read() };
+    for _ in 0..ITERATIONS {
+        unsafe { sys_write_file(fd_batch, CHUNK) };
+    }
+    unsafe { sys_flush_file_cache() };
+    let (end_batch, _) = unsafe { tsc_read() };
+    let batch_cycles = end_batch - start_batch;
+
+    unsafe { sys_close_file(fd_batch) };
+
+    // open, write, flush, close per iteration
+    unsafe { sys_delete(PATH_EAGER) };
+    unsafe { sys_create_file(PATH_EAGER) };
+
+    let (start_eager, _) = unsafe { tsc_read() };
+    for _ in 0..ITERATIONS {
+        let fd = unsafe { sys_open_file(PATH_EAGER, FD_FLAG_READ | FD_FLAG_WRITE) };
+        if fd == usize::MAX {
+            break;
+        }
+        unsafe { sys_write_file(fd, CHUNK) };
+        unsafe { sys_flush_file_cache() };
+        unsafe { sys_close_file(fd) };
+    }
+    let (end_eager, _) = unsafe { tsc_read() };
+    let eager_cycles = end_eager - start_eager;
+
+    println!(
+        "  [perf] batched ({} writes + 1 flush): {} cycles, {} cycles/write",
+        ITERATIONS,
+        batch_cycles,
+        batch_cycles / ITERATIONS as u64
+    );
+    println!(
+        "  [perf] eager ({} write+flush pairs): {} cycles, {} cycles/write",
+        ITERATIONS,
+        eager_cycles,
+        eager_cycles / ITERATIONS as u64
+    );
+
+    if eager_cycles > 0 {
+        let pct = batch_cycles * 100 / eager_cycles;
+        println!("  [perf] batched is {}% of eager cost", pct);
+        expect_true!("batched cheaper than eager", batch_cycles < eager_cycles);
+    }
+
+    // Verify both files have correct size
+    let expected_size = (CHUNK.len() * ITERATIONS) as u64;
+    let mut stat = StatFlat::zeroed();
+    unsafe { sys_stat_file(PATH_BATCH, &mut stat) };
+    expect_eq!("batch file size", stat.size, expected_size);
+
+    let mut stat2 = StatFlat::zeroed();
+    unsafe { sys_stat_file(PATH_EAGER, &mut stat2) };
+    expect_eq!("eager file size", stat2.size, expected_size);
+
+    unsafe { sys_delete(PATH_BATCH) };
+    unsafe { sys_delete(PATH_EAGER) };
+}
+
+unsafe fn suite_dirty_state() {
+    suite_header("dirty state tracking");
+
+    const PATH: &str = "/dirty.txt";
+
+    unsafe { sys_delete(PATH) };
+    unsafe { sys_create_file(PATH) };
+
+    // Check initial dirty count
+    let mut stats = CacheStatsFlat::zeroed();
+    unsafe { sys_get_cache_stats(&mut stats) };
+    let dirty_before = stats.dirty_files;
+    println!("  dirty files before write: {}", dirty_before);
+
+    // Open and write, should create a dirty cache entry
+    let fd = unsafe { sys_open_file(PATH, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd == usize::MAX {
+        println!("  SKIP (open failed)");
+        return;
+    }
+    unsafe { sys_write_file(fd, b"dirty content") };
+
+    let mut stats2 = CacheStatsFlat::zeroed();
+    unsafe { sys_get_cache_stats(&mut stats2) };
+    println!("  dirty files after write: {}", stats2.dirty_files);
+    expect_true!(
+        "dirty count increased after write",
+        stats2.dirty_files > dirty_before
+    );
+
+    // Flush, dirty count should drop
+    let flushed = unsafe { sys_flush_file_cache() };
+    expect_true!("flush succeeds", flushed);
+
+    let mut stats3 = CacheStatsFlat::zeroed();
+    unsafe { sys_get_cache_stats(&mut stats3) };
+    println!("  dirty files after flush: {}", stats3.dirty_files);
+    expect_true!(
+        "dirty count cleared after flush",
+        stats3.dirty_files < stats2.dirty_files
+    );
+
+    // Verify content persisted
+    unsafe { sys_close_file(fd) };
+    let fd2 = unsafe { sys_open_file(PATH, FD_FLAG_READ) };
+    if fd2 != usize::MAX {
+        let mut buf = [0u8; 16];
+        let n = unsafe { sys_read_file(fd2, &mut buf) };
+        expect_eq!("read back: correct length", n, b"dirty content".len());
+        expect_true!("read back: content matches", &buf[..n] == b"dirty content");
+        unsafe { sys_close_file(fd2) };
+    }
+
+    unsafe { sys_delete(PATH) };
+}
+
+unsafe fn suite_multi_file_flush() {
+    suite_header("multi-file write then flush");
+
+    // Open several files simultaneously, write to all, then flush in one call.
+    const PATHS: &[&str] = &["/mfw0.txt", "/mfw1.txt", "/mfw2.txt", "/mfw3.txt"];
+    const DATA: &[u8] = b"multi-file-write";
+    const WRITE_ROUNDS: usize = 8;
+
+    // Setup
+    for path in PATHS {
+        unsafe { sys_delete(path) };
+        unsafe { sys_create_file(path) };
+    }
+
+    let mut fds = [usize::MAX; 4];
+    for (i, path) in PATHS.iter().enumerate() {
+        fds[i] = unsafe { sys_open_file(path, FD_FLAG_READ | FD_FLAG_WRITE) };
+    }
+
+    let (start_writes, _) = unsafe { tsc_read() };
+    for _ in 0..WRITE_ROUNDS {
+        for &fd in &fds {
+            if fd != usize::MAX {
+                unsafe { sys_write_file(fd, DATA) };
+            }
+        }
+    }
+    let (end_writes, _) = unsafe { tsc_read() };
+    let write_cycles = end_writes - start_writes;
+
+    unsafe { print_cache_stats("before multi-flush") };
+
+    let (start_flush, _) = unsafe { tsc_read() };
+    let ok = unsafe { sys_flush_file_cache() };
+    let (end_flush, _) = unsafe { tsc_read() };
+    let flush_cycles = end_flush - start_flush;
+
+    expect_true!("multi-file flush succeeds", ok);
+    println!(
+        "  [perf] {} files x {} writes: {} cycles",
+        PATHS.len(),
+        WRITE_ROUNDS,
+        write_cycles
+    );
+    println!(
+        "  [perf] flush {} files: {} cycles",
+        PATHS.len(),
+        flush_cycles
+    );
+    println!(
+        "  [perf] write cycles/op: {}",
+        write_cycles / (PATHS.len() * WRITE_ROUNDS) as u64
+    );
+
+    unsafe { print_cache_stats("after multi-flush") };
+
+    // Verify sizes
+    let expected = (DATA.len() * WRITE_ROUNDS) as u64;
+    for path in PATHS {
+        let mut stat = StatFlat::zeroed();
+        unsafe { sys_stat_file(path, &mut stat) };
+        expect_eq!("file size after flush", stat.size, expected);
+    }
+
+    for &fd in &fds {
+        if fd != usize::MAX {
+            unsafe { sys_close_file(fd) };
+        }
+    }
+    for path in PATHS {
+        unsafe { sys_delete(path) };
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
     println!("cached_fs_test: starting");
@@ -801,13 +1033,11 @@ pub extern "C" fn main() -> ! {
         let (start_cycle, core) = rustspace::tsc_read();
         println!("Core: {}, Start Cycle: {}", core, start_cycle);
 
-        // ---- Cache-specific tests ----
         suite_cache_basics();
         suite_repeated_reads();
         suite_directory_eviction();
         suite_game_loading_pattern();
 
-        // ---- Standard FS tests (with cache profiling) ----
         suite_stat_and_list();
         suite_create_write_read_delete();
         suite_sequential_reads();

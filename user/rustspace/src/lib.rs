@@ -637,6 +637,7 @@ pub struct CacheStatsFlat {
     pub total_files: u64,
     pub total_bytes: u64,
     pub max_bytes: u64,
+    pub dirty_files: u64,
 }
 
 impl CacheStatsFlat {
@@ -645,6 +646,7 @@ impl CacheStatsFlat {
             total_files: 0,
             total_bytes: 0,
             max_bytes: 0,
+            dirty_files: 0,
         }
     }
 }
@@ -709,4 +711,10 @@ pub unsafe fn sys_evict_directory(path: &str) -> u64 {
 pub unsafe fn sys_get_cache_stats(stats: &mut CacheStatsFlat) -> bool {
     let ret = syscall4(34, stats as *mut CacheStatsFlat as u64, 0, 0, 0);
     ret == 0
+}
+
+/// Flush all dirty cached files belonging to the calling process's open fds.
+/// Returns true on success.
+pub unsafe fn sys_flush_file_cache() -> bool {
+    syscall1(35, 0) == 0
 }

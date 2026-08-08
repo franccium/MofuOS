@@ -165,39 +165,92 @@ pub trait FilesystemDriver: Send + Sync {
 }
 
 #[cfg(feature = "use_cached_fs")]
+pub struct FsDriverAdapter<D: FilesystemDriver>(pub D);
+
+#[cfg(feature = "use_cached_fs")]
+impl<D: FilesystemDriver> CacheFilesystemDriver for FsDriverAdapter<D> {
+    fn read_file(&mut self, node_id: FileNodeHandle) -> FileSystemResult<Vec<u8>> {
+        let node = self.0.get_node(node_id).map_err(|_| FileSystemError::NotFound)?;
+        let mut buffer = vec![0u8; node.size];
+        self.0.read_file(node_id, 0, &mut buffer).map_err(|_| FileSystemError::IoError)?;
+        Ok(buffer)
+    }
+
+    fn read_file_range(
+        &mut self,
+        node_id: FileNodeHandle,
+        offset: usize,
+        len: usize,
+    ) -> FileSystemResult<Vec<u8>> {
+        let node = self.0.get_node(node_id).map_err(|_| FileSystemError::NotFound)?;
+        let read_len = len.min(node.size.saturating_sub(offset));
+        let mut buffer = vec![0u8; read_len];
+        self.0.read_file(node_id, offset, &mut buffer).map_err(|_| FileSystemError::IoError)?;
+        Ok(buffer)
+    }
+
+    fn write_file(
+        &mut self,
+        node_id: FileNodeHandle,
+        offset: usize,
+        data: &[u8],
+    ) -> FileSystemResult<usize> {
+        self.0.write_file(node_id, offset, data).map_err(|_| FileSystemError::IoError)
+    }
+
+    fn file_size(&self, node_id: FileNodeHandle) -> FileSystemResult<usize> {
+        self.0.get_node(node_id).map(|n| n.size).map_err(|_| FileSystemError::NotFound)
+    }
+
+    fn read_dir(&mut self, node_id: FileNodeHandle) -> FileSystemResult<Vec<String>> {
+        let nodes = self.0.list_directory(node_id).map_err(|_| FileSystemError::IoError)?;
+        Ok(nodes.into_iter().map(|n| n.name).collect())
+    }
+}
+
+#[cfg(feature = "use_cached_fs")]
 pub struct CachedDriver<D: FilesystemDriver> {
-    pub inner: D,
-    pub cache: FileCache,
+    pub cache: FileCache<FsDriverAdapter<D>>,
 }
 
 #[cfg(feature = "use_cached_fs")]
 impl<D: FilesystemDriver> CachedDriver<D> {
     pub fn new(inner: D, cache_size: usize) -> Self {
         Self {
-            inner,
-            cache: FileCache::new(cache_size),
+            cache: FileCache::new(FsDriverAdapter(inner), cache_size),
         }
     }
 
     pub fn pin_file(&mut self, path: &str) -> FileSystemResult<()> {
-        let node_id = self.inner.find_node(path)?;
-        let mut adapter = DriverAdapter { inner: &mut self.inner };
-        self.cache.pin_file(&mut adapter, node_id)
+        let node_id = self.cache.driver.0.find_node(path)?;
+        self.cache.pin_file(node_id)
     }
 
     pub fn unpin_file(&mut self, path: &str) -> FileSystemResult<()> {
-        let node_id = self.inner.find_node(path)?;
+        let node_id = self.cache.driver.0.find_node(path)?;
         self.cache.unpin_file(node_id)
     }
 
     pub fn reserve_cache(&mut self, path: &str, importance: CacheImportance) -> FileSystemResult<()> {
-        let node_id = self.inner.find_node(path)?;
+        let node_id = self.cache.driver.0.find_node(path)?;
         self.cache.reserve_cache(node_id, importance)
     }
 
     pub fn evict_directory(&mut self, path: &str) -> FileSystemResult<usize> {
-        let node_id = self.inner.find_node(path)?;
+        let node_id = self.cache.driver.0.find_node(path)?;
         self.cache.evict_directory(node_id)
+    }
+
+    pub fn flush_node(&mut self, node_id: FileNodeHandle) -> FileSystemResult<()> {
+        self.cache.flush_file(node_id)
+    }
+
+    pub fn flush_nodes(&mut self, node_ids: &[FileNodeHandle]) -> FileSystemResult<()> {
+        self.cache.flush_nodes(node_ids)
+    }
+
+    pub fn flush_all(&mut self) -> FileSystemResult<()> {
+        self.cache.flush_all()
     }
 
     pub fn cache_stats(&self) -> CacheStats {
@@ -213,10 +266,9 @@ impl<D: FilesystemDriver> FilesystemDriver for CachedDriver<D> {
         offset: usize,
         out_buffer: &mut [u8],
     ) -> FileSystemResult<usize> {
-        let _ = self.inner.get_node(node_id)?;
-        let mut adapter = DriverAdapter { inner: &mut self.inner };
+        let _ = self.cache.driver.0.get_node(node_id)?;
 
-        match self.cache.read_file(&mut adapter, node_id) {
+        match self.cache.read_file(node_id) {
             Ok(cached_data) => {
                 if cached_data.is_empty() || offset >= cached_data.len() {
                     return Ok(0);
@@ -246,75 +298,36 @@ impl<D: FilesystemDriver> FilesystemDriver for CachedDriver<D> {
         offset: usize,
         data: &[u8],
     ) -> FileSystemResult<usize> {
-        let written = self.inner.write_file(node_id, offset, data)?;
-        self.cache.invalidate(node_id);
-        Ok(written)
+        self.cache.write_file(node_id, offset, data)
     }
 
     fn find_node(&self, path: &str) -> FileSystemResult<FileNodeHandle> {
-        self.inner.find_node(path)
+        self.cache.driver.0.find_node(path)
     }
 
     fn get_node(&self, node_id: FileNodeHandle) -> FileSystemResult<FileNode> {
-        self.inner.get_node(node_id)
+        self.cache.driver.0.get_node(node_id)
     }
 
     fn list_directory(&self, node_id: FileNodeHandle) -> FileSystemResult<Vec<FileNode>> {
-        self.inner.list_directory(node_id)
+        self.cache.driver.0.list_directory(node_id)
     }
 
     fn create_file(&mut self, parent_id: FileNodeHandle, name: &str) -> FileSystemResult<FileNodeHandle> {
-        self.inner.create_file(parent_id, name)
+        self.cache.driver.0.create_file(parent_id, name)
     }
 
     fn create_directory(&mut self, parent_id: FileNodeHandle, name: &str) -> FileSystemResult<FileNodeHandle> {
-        self.inner.create_directory(parent_id, name)
+        self.cache.driver.0.create_directory(parent_id, name)
     }
 
     fn delete(&mut self, node_id: FileNodeHandle) -> FileSystemResult<()> {
         self.cache.invalidate(node_id);
-        self.inner.delete(node_id)
+        self.cache.driver.0.delete(node_id)
     }
 
     fn root_node(&self) -> FileNodeHandle {
-        self.inner.root_node()
-    }
-}
-
-#[cfg(feature = "use_cached_fs")]
-struct DriverAdapter<'a, D: FilesystemDriver> {
-    inner: &'a mut D,
-}
-
-#[cfg(feature = "use_cached_fs")]
-impl<'a, D: FilesystemDriver> CacheFilesystemDriver for DriverAdapter<'a, D> {
-    fn read_file(&mut self, node_id: FileNodeHandle) -> FileSystemResult<Vec<u8>> {
-        let node = self.inner.get_node(node_id).map_err(|_| FileSystemError::NotFound)?;
-        let mut buffer = vec![0u8; node.size];
-        self.inner.read_file(node_id, 0, &mut buffer).map_err(|_| FileSystemError::IoError)?;
-        Ok(buffer)
-    }
-
-    fn read_file_range(
-        &mut self,
-        node_id: FileNodeHandle,
-        offset: usize,
-        len: usize,
-    ) -> FileSystemResult<Vec<u8>> {
-        let node = self.inner.get_node(node_id).map_err(|_| FileSystemError::NotFound)?;
-        let read_len = len.min(node.size.saturating_sub(offset));
-        let mut buffer = vec![0u8; read_len];
-        self.inner.read_file(node_id, offset, &mut buffer).map_err(|_| FileSystemError::IoError)?;
-        Ok(buffer)
-    }
-
-    fn file_size(&self, node_id: FileNodeHandle) -> FileSystemResult<usize> {
-        self.inner.get_node(node_id).map(|n| n.size).map_err(|_| FileSystemError::NotFound)
-    }
-
-    fn read_dir(&mut self, node_id: FileNodeHandle) -> FileSystemResult<Vec<String>> {
-        let nodes = self.inner.list_directory(node_id).map_err(|_| FileSystemError::IoError)?;
-        Ok(nodes.into_iter().map(|n| n.name).collect())
+        self.cache.driver.0.root_node()
     }
 }
 
@@ -454,6 +467,18 @@ impl<D: FilesystemDriver> Sirius<CachedDriver<D>> {
 
     pub fn evict_directory(&mut self, path: &str) -> FileSystemResult<usize> {
         self.driver.evict_directory(path)
+    }
+
+    pub fn flush_node(&mut self, node_id: FileNodeHandle) -> FileSystemResult<()> {
+        self.driver.flush_node(node_id)
+    }
+
+    pub fn flush_nodes(&mut self, node_ids: &[FileNodeHandle]) -> FileSystemResult<()> {
+        self.driver.flush_nodes(node_ids)
+    }
+
+    pub fn flush_all(&mut self) -> FileSystemResult<()> {
+        self.driver.flush_all()
     }
 
     pub fn cache_stats(&self) -> CacheStats {
