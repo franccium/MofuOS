@@ -337,140 +337,6 @@ unsafe fn suite_directory_eviction() {
     unsafe { sys_delete(DIR) };
 }
 
-// ===== Suite 4: Game-Like Loading Pattern =====
-
-unsafe fn suite_game_loading_pattern() {
-    suite_header("game loading pattern");
-
-    // Simulate a game loading screen:
-    // 1. Reserve cache for level assets
-    // 2. Pin critical files (audio, UI)
-    // 3. Load level data (textures, meshes)
-    // 4. Play level (reads from cache)
-    // 5. Transition: evict old level, pin new level
-
-    const LEVEL_DIR: &str = "/gamelvl";
-    const AUDIO_DIR: &str = "/gameaud";
-    const LEVEL_FILES: &[&str] = &[
-        "/gamelvl/textures.dat",
-        "/gamelvl/meshes.dat",
-        "/gamelvl/collider.dat",
-    ];
-    const AUDIO_FILES: &[&str] = &["/gameaud/music.ogg", "/gameaud/sfx_hit.ogg"];
-
-    let level_data = b"LEVEL_ASSET_DATA_32_BYTES_HERE!!";
-    let audio_data = b"AUDIO_DATA_32_BYTES_PLACEHOLDER!";
-
-    // Setup directories
-    unsafe { sys_delete(LEVEL_FILES[2]) };
-    unsafe { sys_delete(LEVEL_FILES[1]) };
-    unsafe { sys_delete(LEVEL_FILES[0]) };
-    unsafe { sys_delete(AUDIO_FILES[1]) };
-    unsafe { sys_delete(AUDIO_FILES[0]) };
-    unsafe { sys_delete(LEVEL_DIR) };
-    unsafe { sys_delete(AUDIO_DIR) };
-    unsafe { sys_create_dir(LEVEL_DIR) };
-    unsafe { sys_create_dir(AUDIO_DIR) };
-
-    // Create files
-    for path in LEVEL_FILES.iter().chain(AUDIO_FILES.iter()) {
-        unsafe { sys_create_file(path) };
-        let data = if path.starts_with("/gameaud") {
-            audio_data
-        } else {
-            level_data
-        };
-        let fd = unsafe { sys_open_file(path, FD_FLAG_READ | FD_FLAG_WRITE) };
-        if fd != usize::MAX {
-            unsafe { sys_write_file(fd, data) };
-            unsafe { sys_close_file(fd) };
-        }
-    }
-
-    // ---- Phase 1: Loading Screen ----
-
-    println!("  --- Loading Screen ---");
-    let load_start = unsafe { tsc_read().0 };
-
-    // Reserve cache with high importance for level
-    unsafe { sys_reserve_cache(LEVEL_DIR, CacheImportance::High as u8) };
-
-    // Pin audio (must never miss cache)
-    unsafe { sys_reserve_cache(AUDIO_DIR, CacheImportance::Resident as u8) };
-    for path in AUDIO_FILES {
-        unsafe { sys_pin_file(path) };
-    }
-
-    // Load all level files (first read = cache miss)
-    for path in LEVEL_FILES {
-        let fd = unsafe { sys_open_file(path, FD_FLAG_READ) };
-        if fd != usize::MAX {
-            let _ = unsafe { read_all(fd, level_data.len()) };
-            unsafe { sys_close_file(fd) };
-        }
-    }
-
-    let load_end = unsafe { tsc_read().0 };
-    println!("  [perf] loading phase: {} cycles", load_end - load_start);
-    unsafe { print_cache_stats("after loading") };
-
-    // ---- Phase 2: Gameplay (repeated reads) ----
-
-    println!("  --- Gameplay ---");
-    let gameplay_start = unsafe { tsc_read().0 };
-
-    // Simulate reading level data multiple times (should hit cache)
-    for _ in 0..5 {
-        for path in LEVEL_FILES {
-            let fd = unsafe { sys_open_file(path, FD_FLAG_READ) };
-            if fd != usize::MAX {
-                let _ = unsafe { read_all(fd, level_data.len()) };
-                unsafe { sys_close_file(fd) };
-            }
-        }
-        // Simulate audio playback (should always hit cache due to pin)
-        for path in AUDIO_FILES {
-            let fd = unsafe { sys_open_file(path, FD_FLAG_READ) };
-            if fd != usize::MAX {
-                let _ = unsafe { read_all(fd, audio_data.len()) };
-                unsafe { sys_close_file(fd) };
-            }
-        }
-    }
-
-    let gameplay_end = unsafe { tsc_read().0 };
-    println!(
-        "  [perf] gameplay phase: {} cycles",
-        gameplay_end - gameplay_start
-    );
-    println!(
-        "  [perf] average per-frame: {} cycles",
-        (gameplay_end - gameplay_start) / 5
-    );
-
-    // ---- Phase 3: Level Transition ----
-
-    println!("  --- Level Transition ---");
-
-    // Evict old level
-    let freed = unsafe { sys_evict_directory(LEVEL_DIR) };
-    println!("  freed {} bytes from old level", freed);
-
-    // Unpin old audio (in real game, would pin new level's audio)
-    for path in AUDIO_FILES {
-        unsafe { sys_unpin_file(path) };
-    }
-
-    unsafe { print_cache_stats("after transition") };
-
-    // Cleanup
-    for path in LEVEL_FILES.iter().chain(AUDIO_FILES.iter()) {
-        unsafe { sys_delete(path) };
-    }
-    unsafe { sys_delete(LEVEL_DIR) };
-    unsafe { sys_delete(AUDIO_DIR) };
-}
-
 // ===== Suite 5: Standard Tests (from original) =====
 
 unsafe fn suite_stat_and_list() {
@@ -1036,7 +902,6 @@ pub extern "C" fn main() -> ! {
         suite_cache_basics();
         suite_repeated_reads();
         suite_directory_eviction();
-        suite_game_loading_pattern();
 
         suite_stat_and_list();
         suite_create_write_read_delete();
@@ -1044,6 +909,11 @@ pub extern "C" fn main() -> ! {
         suite_directories();
         suite_error_cases();
         suite_overwrite();
+
+        suite_write_throughput();
+        suite_sequential_write_batching();
+        suite_dirty_state();
+        suite_multi_file_flush();
 
         let (end_cycle, _) = rustspace::tsc_read();
         let total_cycles = end_cycle - start_cycle;

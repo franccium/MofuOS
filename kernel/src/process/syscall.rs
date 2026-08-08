@@ -956,6 +956,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                     total_files: stats.total_files as u64,
                     total_bytes: stats.total_bytes as u64,
                     max_bytes: stats.max_bytes as u64,
+                    dirty_files: stats.dirty_files as u64,
                 };
 
                 unsafe {
@@ -1040,6 +1041,7 @@ pub struct CacheStatsFlat {
     pub total_files: u64,
     pub total_bytes: u64,
     pub max_bytes: u64,
+    pub dirty_files: u64,
 }
 
 pub fn init_syscall() {
