@@ -1,14 +1,15 @@
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::min;
 use core::fmt;
 
+use crate::data_structures::hash_map_fx::FxHashMap;
 use crate::filesystem::fat32::{FileNodeHandle, INVALID_NODE_HANDLE};
 use crate::filesystem::sirius::FileSystemError;
 use crate::serial_println_core;
 
 pub const FS_CACHE_SIZE: usize = 64 * 1024 * 1024;
+pub const FS_CACHE_MAP_FILE_COUNT: usize = 1024;
 
 const DEBUG_LOGS: bool = false;
 
@@ -143,18 +144,18 @@ pub struct FileCache<D: CacheFilesystemDriver> {
     current_memory: usize,
     max_memory: usize,
     access_tick: u64,
-    files: BTreeMap<FileNodeHandle, CachedFile>,
-    directory_children: BTreeMap<FileNodeHandle, Vec<FileNodeHandle>>,
-    directory_hints: BTreeMap<FileNodeHandle, CacheImportance>,
+    files: FxHashMap<FileNodeHandle, CachedFile>,
+    directory_children: FxHashMap<FileNodeHandle, Vec<FileNodeHandle>>,
+    directory_hints: FxHashMap<FileNodeHandle, CacheImportance>,
 }
 
 impl<D: CacheFilesystemDriver> FileCache<D> {
     pub fn new(driver: D, max_memory: usize) -> Self {
         Self {
             driver,
-            files: BTreeMap::new(),
-            directory_children: BTreeMap::new(),
-            directory_hints: BTreeMap::new(),
+            files: FxHashMap::with_capacity(FS_CACHE_MAP_FILE_COUNT),
+            directory_children: FxHashMap::default(),
+            directory_hints: FxHashMap::default(),
             current_memory: 0,
             max_memory,
             access_tick: 0,
@@ -164,7 +165,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
     pub fn read_file(&mut self, node_id: FileNodeHandle) -> Result<Vec<u8>, FileSystemError> {
         self.access_tick = self.access_tick.wrapping_add(1);
 
-        if let Some(cached) = self.files.get_mut(&node_id) {
+        if let Some(cached) = self.files.get_mut(node_id) {
             serial_println_core!(
                 "file_cache: cache hit node={:#x} size={} importance={}",
                 node_id,
@@ -208,7 +209,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
     ) -> Result<Vec<u8>, FileSystemError> {
         self.access_tick = self.access_tick.wrapping_add(1);
 
-        if let Some(cached) = self.files.get_mut(&node_id) {
+        if let Some(cached) = self.files.get_mut(node_id) {
             cached.last_access = self.access_tick;
             let mut result = Vec::with_capacity(len);
             result.extend_from_slice(cached.get_slice(offset, len));
@@ -232,7 +233,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
     ) -> Result<usize, FileSystemError> {
         self.access_tick = self.access_tick.wrapping_add(1);
 
-        if !self.files.contains_key(&node_id) {
+        if !self.files.contains_key(node_id) {
             let existing = self.driver.read_file(node_id).unwrap_or_default();
             let existing_len = existing.len();
             self.ensure_space(existing_len);
@@ -244,7 +245,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             );
         }
 
-        let cached = self.files.get_mut(&node_id).unwrap();
+        let cached = self.files.get_mut(node_id).unwrap();
         let old_size = cached.data.len();
         let written = cached.apply_write_inmem(offset, data);
 
@@ -263,7 +264,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
     }
 
     pub fn flush_file(&mut self, node_id: FileNodeHandle) -> Result<(), FileSystemError> {
-        if let Some(cached) = self.files.get_mut(&node_id) {
+        if let Some(cached) = self.files.get_mut(node_id) {
             if cached.is_dirty {
                 self.driver.write_file(node_id, 0, &cached.data)?;
                 cached.is_dirty = false;
@@ -275,7 +276,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
 
     pub fn flush_nodes(&mut self, node_ids: &[FileNodeHandle]) -> Result<(), FileSystemError> {
         for &node_id in node_ids {
-            if let Some(cached) = self.files.get_mut(&node_id) {
+            if let Some(cached) = self.files.get_mut(node_id) {
                 if cached.is_dirty {
                     self.driver.write_file(node_id, 0, &cached.data)?;
                     cached.is_dirty = false;
@@ -295,7 +296,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             .collect();
 
         for node_id in dirty_ids {
-            if let Some(cached) = self.files.get_mut(&node_id) {
+            if let Some(cached) = self.files.get_mut(node_id) {
                 self.driver.write_file(node_id, 0, &cached.data)?;
                 cached.is_dirty = false;
                 serial_println_core!("file_cache: flush_all: flushed node={:#x}", node_id);
@@ -305,10 +306,10 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
     }
 
     pub fn pin_file(&mut self, node_id: FileNodeHandle) -> Result<(), FileSystemError> {
-        if !self.files.contains_key(&node_id) {
+        if !self.files.contains_key(node_id) {
             self.read_file(node_id)?;
         }
-        if let Some(cached) = self.files.get_mut(&node_id) {
+        if let Some(cached) = self.files.get_mut(node_id) {
             cached.pinned = true;
             cached.importance = CacheImportance::Resident;
             serial_println_core!("file_cache: pinned node={:#x}", node_id);
@@ -317,7 +318,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
     }
 
     pub fn unpin_file(&mut self, node_id: FileNodeHandle) -> Result<(), FileSystemError> {
-        if let Some(cached) = self.files.get_mut(&node_id) {
+        if let Some(cached) = self.files.get_mut(node_id) {
             cached.pinned = false;
             cached.importance = CacheImportance::Normal;
             serial_println_core!("file_cache: unpinned node={:#x}", node_id);
@@ -331,10 +332,10 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         importance: CacheImportance,
     ) -> Result<(), FileSystemError> {
         self.directory_hints.insert(node_id, importance);
-        if let Some(children) = self.directory_children.get(&node_id) {
+        if let Some(children) = self.directory_children.get(node_id) {
             let children: Vec<FileNodeHandle> = children.clone();
             for child_id in children {
-                if let Some(cached) = self.files.get_mut(&child_id) {
+                if let Some(cached) = self.files.get_mut(child_id) {
                     if !cached.pinned {
                         cached.importance = importance;
                     }
@@ -346,9 +347,9 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
 
     pub fn evict_directory(&mut self, node_id: FileNodeHandle) -> Result<usize, FileSystemError> {
         let mut freed = 0usize;
-        if let Some(children) = self.directory_children.remove(&node_id) {
+        if let Some(children) = self.directory_children.remove(node_id) {
             for child_id in children {
-                if let Some(cached) = self.files.remove(&child_id) {
+                if let Some(cached) = self.files.remove(child_id) {
                     if !cached.pinned {
                         freed += cached.data.len();
                     } else {
@@ -358,7 +359,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             }
         }
         self.current_memory -= freed;
-        self.directory_hints.remove(&node_id);
+        self.directory_hints.remove(node_id);
         Ok(freed)
     }
 
@@ -370,7 +371,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
     }
 
     pub fn is_cached(&self, node_id: FileNodeHandle) -> bool {
-        self.files.contains_key(&node_id)
+        self.files.contains_key(node_id)
     }
 
     pub fn stats(&self) -> CacheStats {
@@ -384,7 +385,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
     }
 
     pub fn invalidate(&mut self, node_id: FileNodeHandle) {
-        if let Some(cached) = self.files.remove(&node_id) {
+        if let Some(cached) = self.files.remove(node_id) {
             self.current_memory -= cached.data.len();
             serial_println_core!("file_cache: invalidated node={:#x}", node_id);
         }
@@ -399,7 +400,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
 
     fn get_effective_importance(&self, node_id: FileNodeHandle) -> CacheImportance {
         self.directory_hints
-            .get(&node_id)
+            .get(node_id)
             .copied()
             .unwrap_or(CacheImportance::Normal)
     }
@@ -417,7 +418,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         let mut best_score: u64 = 0;
         let mut best_node_handle: FileNodeHandle = INVALID_NODE_HANDLE;
 
-        for (&node_id, cached) in &self.files {
+        for (&node_id, cached) in self.files.iter() {
             if cached.pinned {
                 continue;
             }
@@ -434,7 +435,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         }
 
         if best_node_handle != INVALID_NODE_HANDLE {
-            if let Some(cached) = self.files.get(&best_node_handle) {
+            if let Some(cached) = self.files.get(best_node_handle) {
                 if cached.is_dirty {
                     let data = cached.data.clone();
                     if self.driver.write_file(best_node_handle, 0, &data).is_err() {
@@ -446,7 +447,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                     }
                 }
             }
-            if let Some(cached) = self.files.remove(&best_node_handle) {
+            if let Some(cached) = self.files.remove(best_node_handle) {
                 self.current_memory -= cached.data.len();
                 serial_println_core!("file_cache: evicted node={:#x}", best_node_handle);
                 return true;
