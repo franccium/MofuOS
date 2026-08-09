@@ -25,6 +25,10 @@ REAL TODO:
 
 - multithreaded filesystem access
 
+- key cursor navigation in terminal
+
+- mouse support
+
 - !!! MAX_CORES set to the actual count of the cores causes a page fault on the (MAX_CORES-1) core after entering scheduler loop now, it used to work fine
 
 - validating user memory areas

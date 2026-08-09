@@ -10,7 +10,7 @@ use crate::serial_println_core;
 pub const FS_CACHE_SIZE: usize = 16 * 1024 * 1024;
 pub const FS_CACHE_MAP_FILE_COUNT: usize = 1024;
 
-const DEBUG_LOGS: bool = false;
+const DEBUG_LOGS: bool = true;
 
 macro_rules! serial_println_core {
     ($($arg:tt)*) => {
@@ -290,8 +290,16 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
     ) -> Result<usize, FileSystemError> {
         self.access_tick = self.access_tick.wrapping_add(1);
 
+        serial_println_core!(
+            "file_cache: write node={:#x} offset={} len={}",
+            node_id,
+            offset,
+            data.len()
+        );
+
         // ensure file is in cache before patching
         if !self.files.contains_key(node_id) {
+            serial_println_core!("file_cache: write miss node={:#x}", node_id);
             let file_size = self.driver.file_size(node_id).unwrap_or(0);
             if file_size > 0 {
                 self.ensure_space(file_size);
@@ -302,6 +310,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                     self.current_memory_used += read;
                 }
             } else {
+                serial_println_core!("file_cache: created new file after write miss");
                 // new/empty file: allocate space for the incoming write
                 let needed = offset + data.len();
                 self.ensure_space(needed);
@@ -316,6 +325,14 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
 
         let write_end = offset + data.len();
 
+        serial_println_core!(
+            "file_cache: write node={:#x} offset={} len={} write_end={}",
+            node_id,
+            offset,
+            data.len(),
+            write_end
+        );
+
         // if the write extends beyond current allocation evict this entry, compact, 
         // reallocate with the new size, copy old data back, then apply the write
         let needs_grow = {
@@ -326,6 +343,11 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                 false
             }
         };
+        serial_println_core!(
+            "file_cache: write node={:#x} needs_grow={}",
+            node_id,
+            needs_grow
+        );
 
         if needs_grow {
             let (old_off, old_len) = {
@@ -339,15 +361,23 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
 
             if at_tail && self.arena_push_offset + extra <= self.max_memory {
                 // file is at the top of the arena, just extend in-place
+                serial_println_core!(
+                    "file_cache: write node={:#x} growing in-place at tail",
+                    node_id
+                );
                 self.arena[self.arena_push_offset..self.arena_push_offset + extra].fill(0);
                 self.arena_push_offset += extra;
                 self.current_memory_used += extra;
                 if let Some(f) = self.files.get_mut(node_id) {
                     f.len = new_len;
                 }
-            } else if self.arena_push_offset + new_len <= self.max_memory {
-                // arena tail has enough free space to hold the grown file directly:
-                // copy old data to the tail, zero-fill the extension, update metadata.
+            } else if self.max_memory - self.arena_push_offset >= new_len {
+                // arena tail has enough contiguous free space to hold the grown file:
+                // copy old data to the tail, zero-fill the extension, no compaction.
+                serial_println_core!(
+                    "file_cache: write node={:#x} growing by copying to tail",
+                    node_id
+                );
                 let new_off = self.arena_push_offset;
                 self.arena.copy_within(old_off..old_off + old_len, new_off);
                 self.arena[new_off + old_len..new_off + new_len].fill(0);
@@ -360,6 +390,10 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             } else {
                 // no room at the tail; compact with sort_last so this file ends up
                 // at the arena tail with its data intact, then extend in-place.
+                serial_println_core!(
+                    "file_cache: write node={:#x} growing by compacting to tail",
+                    node_id
+                );
                 self.compact(node_id);
 
                 // evict if the extra bytes still don't fit
@@ -387,6 +421,14 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
 
         if let Some(cached) = self.files.get_mut(node_id) {
             let dst_off = cached.arena_offset + offset;
+            serial_println_core!(
+                "file_cache: write copy_from_slice data: node={:#x} offset={} len={} dst_off={} cached_len={}",
+                node_id,
+                offset,
+                data.len(),
+                dst_off,
+                cached.len
+            );
             self.arena[dst_off..dst_off + data.len()].copy_from_slice(data);
             if write_end > cached.len {
                 self.current_memory_used += write_end - cached.len;

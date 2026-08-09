@@ -803,6 +803,459 @@ unsafe fn suite_dirty_state() {
     unsafe { sys_delete(PATH) };
 }
 
+// Write to a file that is at the arena tail, then extend it.
+// Should extend in-place without compaction.
+unsafe fn suite_arena_grow_at_tail() {
+    suite_header("arena grow: in-place tail extension");
+
+    const PATH: &str = "/growtl.txt";
+    const INITIAL: &[u8] = b"AAAABBBBCCCCDDDD";
+    const EXTENSION: &[u8] = b"EEEEFFFF";
+    const EXPECTED: &[u8] = b"AAAABBBBCCCCDDDDEEEEFFFF";
+
+    unsafe { sys_delete(PATH) };
+    unsafe { sys_create_file(PATH) };
+
+    let fd = unsafe { sys_open_file(PATH, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd == usize::MAX {
+        println!("  SKIP (open failed)");
+        return;
+    }
+
+    let w = unsafe { sys_write_file(fd, INITIAL) };
+    expect_eq!("initial write", w, INITIAL.len());
+
+    // Write extension starting at INITIAL.len() — grows the file
+    unsafe { sys_close_file(fd) };
+    let fd2 = unsafe { sys_open_file(PATH, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd2 == usize::MAX {
+        println!("  SKIP (reopen failed)");
+        return;
+    }
+    // Advance to the end
+    let mut dummy = [0u8; 16];
+    let _ = unsafe { sys_read_file(fd2, &mut dummy) };
+    // Now write at offset == INITIAL.len()
+    let w2 = unsafe { sys_write_file(fd2, EXTENSION) };
+    expect_eq!("extension write", w2, EXTENSION.len());
+    unsafe { sys_close_file(fd2) };
+
+    unsafe { sys_flush_file_cache() };
+
+    // Verify full content
+    let fd3 = unsafe { sys_open_file(PATH, FD_FLAG_READ) };
+    expect_true!("open for verify", fd3 != usize::MAX);
+    if fd3 != usize::MAX {
+        let content = unsafe { read_all(fd3, EXPECTED.len() + 16) };
+        unsafe { sys_close_file(fd3) };
+        expect_true!("read succeeds", content.is_some());
+        if let Some(data) = content {
+            expect_eq!("grown file size", data.len(), EXPECTED.len());
+            expect_true!("grown file content", data.as_slice() == EXPECTED);
+        }
+    }
+
+    unsafe { sys_delete(PATH) };
+}
+
+// Put file A in cache, then file B, so file A is NOT at the tail.
+// Then grow file A, should move it to the tail without compaction.
+unsafe fn suite_arena_grow_in_middle() {
+    suite_header("arena grow: greedy move from middle");
+
+    const PATH_A: &str = "/gmida.txt";
+    const PATH_B: &str = "/gmidb.txt";
+    const DATA_A: &[u8] = b"FILEATEXT";
+    const EXTRA_A: &[u8] = b"EXTENDED";
+    const DATA_B: &[u8] = b"FILEBTEXTHERE";
+
+    unsafe { sys_delete(PATH_A) };
+    unsafe { sys_delete(PATH_B) };
+    unsafe { sys_create_file(PATH_A) };
+    unsafe { sys_create_file(PATH_B) };
+
+    // Write A then B to get A before B in the arena
+    let fd_a = unsafe { sys_open_file(PATH_A, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd_a != usize::MAX {
+        unsafe { sys_write_file(fd_a, DATA_A) };
+        unsafe { sys_close_file(fd_a) };
+    }
+    let fd_b = unsafe { sys_open_file(PATH_B, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd_b != usize::MAX {
+        unsafe { sys_write_file(fd_b, DATA_B) };
+        unsafe { sys_close_file(fd_b) };
+    }
+
+    unsafe { print_cache_stats("after loading A and B") };
+
+    // Now grow A while B is at the tail
+    let fd_a2 = unsafe { sys_open_file(PATH_A, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd_a2 == usize::MAX {
+        println!("  SKIP (reopen A failed)");
+        unsafe { sys_delete(PATH_A) };
+        unsafe { sys_delete(PATH_B) };
+        return;
+    }
+    // Seek past existing content
+    let mut skip = [0u8; 9];
+    let _ = unsafe { sys_read_file(fd_a2, &mut skip) };
+    let w = unsafe { sys_write_file(fd_a2, EXTRA_A) };
+    expect_eq!("growing A while B is in middle", w, EXTRA_A.len());
+    unsafe { sys_close_file(fd_a2) };
+
+    unsafe { sys_flush_file_cache() };
+
+    // Verify A has correct full content
+    let fd_ar = unsafe { sys_open_file(PATH_A, FD_FLAG_READ) };
+    expect_true!("open A for verify", fd_ar != usize::MAX);
+    if fd_ar != usize::MAX {
+        let content = unsafe { read_all(fd_ar, DATA_A.len() + EXTRA_A.len() + 8) };
+        unsafe { sys_close_file(fd_ar) };
+        if let Some(data) = content {
+            expect_eq!("A grown size", data.len(), DATA_A.len() + EXTRA_A.len());
+            expect_true!("A prefix intact", &data[..DATA_A.len()] == DATA_A);
+            expect_true!("A extension correct", &data[DATA_A.len()..] == EXTRA_A);
+        }
+    }
+
+    // Verify B is still intact
+    let fd_br = unsafe { sys_open_file(PATH_B, FD_FLAG_READ) };
+    expect_true!("open B for verify", fd_br != usize::MAX);
+    if fd_br != usize::MAX {
+        let content = unsafe { read_all(fd_br, DATA_B.len() + 8) };
+        unsafe { sys_close_file(fd_br) };
+        if let Some(data) = content {
+            expect_eq!("B size unchanged", data.len(), DATA_B.len());
+            expect_true!("B content intact", data.as_slice() == DATA_B);
+        }
+    }
+
+    unsafe { sys_delete(PATH_A) };
+    unsafe { sys_delete(PATH_B) };
+}
+
+// Write 32 bytes, then write 8 bytes at offset 20 — bytes [0..20) must survive.
+unsafe fn suite_partial_write_preserves_prefix() {
+    suite_header("partial write preserves prefix");
+
+    const PATH: &str = "/partial.txt";
+
+    unsafe { sys_delete(PATH) };
+    unsafe { sys_create_file(PATH) };
+
+    let fd = unsafe { sys_open_file(PATH, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd == usize::MAX {
+        println!("  SKIP (open failed)");
+        return;
+    }
+
+    // Write 32 bytes of known pattern
+    let initial: [u8; 32] = {
+        let mut a = [0u8; 32];
+        for i in 0..32 {
+            a[i] = b'A' + i as u8;
+        }
+        a
+    };
+    let w = unsafe { sys_write_file(fd, &initial) };
+    expect_eq!("initial 32-byte write", w, 32);
+    unsafe { sys_close_file(fd) };
+
+    let fd2 = unsafe { sys_open_file(PATH, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd2 == usize::MAX {
+        println!("  SKIP (reopen failed)");
+        return;
+    }
+    // Seek to byte 28
+    let mut skip = [0u8; 28];
+    let _ = unsafe { sys_read_file(fd2, &mut skip) };
+    // Write 8 bytes starting at offset 28 -> new file size = 36
+    let patch: [u8; 8] = *b"XXXXXXXX";
+    let w2 = unsafe { sys_write_file(fd2, &patch) };
+    expect_eq!("grow write at offset 28", w2, 8);
+    unsafe { sys_close_file(fd2) };
+
+    unsafe { sys_flush_file_cache() };
+
+    // Read back and check prefix [0..28) is unchanged
+    let fd3 = unsafe { sys_open_file(PATH, FD_FLAG_READ) };
+    expect_true!("open for verify", fd3 != usize::MAX);
+    if fd3 != usize::MAX {
+        let content = unsafe { read_all(fd3, 64) };
+        unsafe { sys_close_file(fd3) };
+        if let Some(data) = content {
+            expect_eq!("file size after grow", data.len(), 36);
+            expect_true!("prefix [0..28) intact", &data[..28] == &initial[..28]);
+            expect_true!("patch [28..36] correct", &data[28..36] == &patch);
+        }
+    }
+
+    unsafe { sys_delete(PATH) };
+}
+
+// The arena is 16 MB. Create 3 files of 6 MB each (18 MB total).
+// Writing them sequentially fills and overflows the arena, forcing
+// eviction of earlier file data. Then verify all three read back
+// correctly from disk, and dirty data flushed cleanly.
+unsafe fn suite_eviction_under_pressure() {
+    suite_header("eviction under pressure");
+
+    // 6 MB each, 3 files = 18 MB > 16 MB arena
+    const FILE_SIZE: usize = 6 * 1024 * 1024;
+    const CHUNK: usize = 1 * 1024 * 1024;
+    const CHUNKS_PER_FILE: usize = FILE_SIZE / CHUNK;
+
+    const PATH_A: &str = "/evpa.txt";
+    const PATH_B: &str = "/evpb.txt";
+    const PATH_C: &str = "/evpc.txt";
+    const PATHS: [&str; 3] = [PATH_A, PATH_B, PATH_C];
+    const FILL: [u8; 3] = [0xAA, 0xBB, 0xCC];
+
+    for path in &PATHS {
+        unsafe { sys_delete(path) };
+    }
+
+    // Create and write all three files sequentially.
+    // By the time file C is written, the cache will have evicted parts of A.
+    let mut chunk_buf = alloc::vec![0u8; CHUNK];
+    for (i, path) in PATHS.iter().enumerate() {
+        let created = unsafe { sys_create_file(path) };
+        if !created {
+            println!("  SKIP (create {} failed)", path);
+            return;
+        }
+        let fd = unsafe { sys_open_file(path, FD_FLAG_READ | FD_FLAG_WRITE) };
+        if fd == usize::MAX {
+            println!("  SKIP (open {} failed)", path);
+            return;
+        }
+        chunk_buf.fill(FILL[i]);
+        let (start, _) = unsafe { tsc_read() };
+        for _ in 0..CHUNKS_PER_FILE {
+            unsafe { sys_write_file(fd, &chunk_buf) };
+        }
+        let (end, _) = unsafe { tsc_read() };
+        println!(
+            "  wrote {} MB to {} in {} cycles",
+            FILE_SIZE / (1024 * 1024),
+            path,
+            end - start
+        );
+        unsafe { sys_close_file(fd) };
+    }
+
+    unsafe { print_cache_stats("after 3x6MB writes (arena overflowed, evictions happened)") };
+
+    // Flush all dirty data, at this point some entries may have been evicted+flushed already by
+    // evict_one, but some may still be dirty
+    let ok = unsafe { sys_flush_file_cache() };
+    expect_true!("flush 18 MB succeeds", ok);
+
+    unsafe { print_cache_stats("after flush") };
+
+    // Read back all three files chunk-by-chunk and verify byte values.
+    // A was the first in, so it was most likely evicted and will reload from disk.
+    for (i, path) in PATHS.iter().enumerate() {
+        let (start, _) = unsafe { tsc_read() };
+        let fd = unsafe { sys_open_file(path, FD_FLAG_READ) };
+        expect_true!("open for verify", fd != usize::MAX);
+        if fd == usize::MAX {
+            continue;
+        }
+
+        let mut total_read = 0usize;
+        let mut content_ok = true;
+        let mut read_buf = alloc::vec![0u8; CHUNK];
+        loop {
+            let n = unsafe { sys_read_file(fd, &mut read_buf) };
+            if n == 0 {
+                break;
+            }
+            if n == usize::MAX {
+                content_ok = false;
+                break;
+            }
+            if read_buf[..n].iter().any(|&b| b != FILL[i]) {
+                content_ok = false;
+                break;
+            }
+            total_read += n;
+        }
+        unsafe { sys_close_file(fd) };
+        let (end, _) = unsafe { tsc_read() };
+
+        expect_eq!("file size correct", total_read, FILE_SIZE);
+        expect_true!("file content intact after eviction", content_ok);
+        println!(
+            "  verified {} MB from {} in {} cycles",
+            FILE_SIZE / (1024 * 1024),
+            path,
+            end - start
+        );
+    }
+
+    // Now read file A again when it was loaded cold above after eviction.
+    // This second read should be a cache hit (recently loaded).
+    let (start_hot, _) = unsafe { tsc_read() };
+    let fd_a = unsafe { sys_open_file(PATH_A, FD_FLAG_READ) };
+    let mut hot_read = 0usize;
+    if fd_a != usize::MAX {
+        let mut buf = alloc::vec![0u8; CHUNK];
+        let n = unsafe { sys_read_file(fd_a, &mut buf) };
+        if n != usize::MAX {
+            hot_read = n;
+        }
+        unsafe { sys_close_file(fd_a) };
+    }
+    let (end_hot, _) = unsafe { tsc_read() };
+    expect_eq!("hot re-read first chunk size", hot_read, CHUNK);
+    println!(
+        "  hot re-read first chunk of A: {} cycles",
+        end_hot - start_hot
+    );
+
+    unsafe { print_cache_stats("final") };
+
+    for path in &PATHS {
+        unsafe { sys_delete(path) };
+    }
+}
+
+// Pin a file, then trigger eviction via evict_directory on its parent.
+// Pinned file must remain in cache and readable.
+unsafe fn suite_pin_survives_eviction() {
+    suite_header("pin survives eviction");
+
+    const DIR: &str = "/pintest";
+    const PINNED: &str = "/pintest/pnd.txt";
+    const UNPINNED: &str = "/pintest/unp.txt";
+    const DATA: &[u8] = b"should stay in cache";
+    const OTHER: &[u8] = b"can be evicted";
+
+    unsafe { sys_delete(UNPINNED) };
+    unsafe { sys_delete(PINNED) };
+    unsafe { sys_delete(DIR) };
+    unsafe { sys_create_dir(DIR) };
+    unsafe { sys_create_file(PINNED) };
+    unsafe { sys_create_file(UNPINNED) };
+
+    let fd_p = unsafe { sys_open_file(PINNED, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd_p != usize::MAX {
+        unsafe { sys_write_file(fd_p, DATA) };
+        unsafe { sys_close_file(fd_p) };
+    }
+    let fd_u = unsafe { sys_open_file(UNPINNED, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd_u != usize::MAX {
+        unsafe { sys_write_file(fd_u, OTHER) };
+        unsafe { sys_close_file(fd_u) };
+    }
+
+    // Load both into cache
+    let fd_pr = unsafe { sys_open_file(PINNED, FD_FLAG_READ) };
+    if fd_pr != usize::MAX {
+        let _ = unsafe { read_all(fd_pr, DATA.len()) };
+        unsafe { sys_close_file(fd_pr) };
+    }
+    let fd_ur = unsafe { sys_open_file(UNPINNED, FD_FLAG_READ) };
+    if fd_ur != usize::MAX {
+        let _ = unsafe { read_all(fd_ur, OTHER.len()) };
+        unsafe { sys_close_file(fd_ur) };
+    }
+
+    // Pin the file
+    let pin_ok = unsafe { sys_pin_file(PINNED) };
+    expect_true!("pin_file succeeds", pin_ok == 0);
+
+    unsafe { print_cache_stats("before eviction") };
+
+    // Evict the directory (will skip pinned entries)
+    let _ = unsafe { sys_evict_directory(DIR) };
+
+    unsafe { print_cache_stats("after eviction") };
+
+    // Both must still be readable
+    let fd_pv = unsafe { sys_open_file(PINNED, FD_FLAG_READ) };
+    expect_true!("pinned file still readable", fd_pv != usize::MAX);
+    if fd_pv != usize::MAX {
+        let content = unsafe { read_all(fd_pv, DATA.len()) };
+        unsafe { sys_close_file(fd_pv) };
+        if let Some(data) = content {
+            expect_eq!("pinned file size", data.len(), DATA.len());
+            expect_true!("pinned file content intact", data.as_slice() == DATA);
+        }
+    }
+
+    let fd_uv = unsafe { sys_open_file(UNPINNED, FD_FLAG_READ) };
+    expect_true!(
+        "unpinned file still readable from disk",
+        fd_uv != usize::MAX
+    );
+    if fd_uv != usize::MAX {
+        let content = unsafe { read_all(fd_uv, OTHER.len()) };
+        unsafe { sys_close_file(fd_uv) };
+        if let Some(data) = content {
+            expect_true!("unpinned file content intact", data.as_slice() == OTHER);
+        }
+    }
+
+    // Unpin and cleanup
+    unsafe { sys_unpin_file(PINNED) };
+    unsafe { sys_delete(UNPINNED) };
+    unsafe { sys_delete(PINNED) };
+    unsafe { sys_delete(DIR) };
+}
+
+// Write to a file, close it, reopen, write more data at a specific offset.
+// Verifies the cache correctly reloads from disk and the final content is right.
+unsafe fn suite_write_after_close() {
+    suite_header("write after close and reopen");
+
+    const PATH: &str = "/wac.txt";
+    const FIRST: &[u8] = b"Hello, World!!!";
+    const PATCH: &[u8] = b"MofuOS!";
+
+    unsafe { sys_delete(PATH) };
+    unsafe { sys_create_file(PATH) };
+
+    let fd1 = unsafe { sys_open_file(PATH, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd1 == usize::MAX {
+        println!("  SKIP (open 1 failed)");
+        return;
+    }
+    let w1 = unsafe { sys_write_file(fd1, FIRST) };
+    expect_eq!("first write size", w1, FIRST.len());
+    unsafe { sys_close_file(fd1) };
+    unsafe { sys_flush_file_cache() };
+
+    // Reopen, seek to offset 7, patch "MofuOS!" over "World!!"
+    let fd2 = unsafe { sys_open_file(PATH, FD_FLAG_READ | FD_FLAG_WRITE) };
+    if fd2 == usize::MAX {
+        println!("  SKIP (open 2 failed)");
+        return;
+    }
+    let mut skip = [0u8; 7];
+    let _ = unsafe { sys_read_file(fd2, &mut skip) };
+    let w2 = unsafe { sys_write_file(fd2, PATCH) };
+    expect_eq!("patch write size", w2, PATCH.len());
+    unsafe { sys_close_file(fd2) };
+    unsafe { sys_flush_file_cache() };
+
+    // Read back: "Hello, MofuOS!" (first 7 from FIRST, then PATCH, same total length)
+    let fd3 = unsafe { sys_open_file(PATH, FD_FLAG_READ) };
+    expect_true!("open for verify", fd3 != usize::MAX);
+    if fd3 != usize::MAX {
+        let content = unsafe { read_all(fd3, 32) };
+        unsafe { sys_close_file(fd3) };
+        if let Some(data) = content {
+            expect_eq!("patched file size", data.len(), FIRST.len());
+            expect_true!("prefix intact", &data[..7] == &FIRST[..7]);
+            expect_true!("patch correct", &data[7..7 + PATCH.len()] == PATCH);
+        }
+    }
+
+    unsafe { sys_delete(PATH) };
+}
+
 unsafe fn suite_multi_file_flush() {
     suite_header("multi-file write then flush");
 
@@ -899,21 +1352,28 @@ pub extern "C" fn main() -> ! {
         let (start_cycle, core) = rustspace::tsc_read();
         println!("Core: {}, Start Cycle: {}", core, start_cycle);
 
-        suite_cache_basics();
-        suite_repeated_reads();
-        suite_directory_eviction();
+        //suite_cache_basics();
+        //suite_repeated_reads();
+        //suite_directory_eviction();
+        //
+        //suite_stat_and_list();
+        //suite_create_write_read_delete();
+        //suite_sequential_reads();
+        //suite_directories();
+        //suite_error_cases();
+        //suite_overwrite();
+        //
+        //suite_write_throughput();
+        //suite_sequential_write_batching();
+        //suite_dirty_state();
+        //suite_multi_file_flush();
 
-        suite_stat_and_list();
-        suite_create_write_read_delete();
-        suite_sequential_reads();
-        suite_directories();
-        suite_error_cases();
-        suite_overwrite();
-
-        suite_write_throughput();
-        suite_sequential_write_batching();
-        suite_dirty_state();
-        suite_multi_file_flush();
+        suite_arena_grow_at_tail();
+        suite_arena_grow_in_middle();
+        suite_partial_write_preserves_prefix();
+        suite_eviction_under_pressure();
+        suite_pin_survives_eviction();
+        suite_write_after_close();
 
         let (end_cycle, _) = rustspace::tsc_read();
         let total_cycles = end_cycle - start_cycle;

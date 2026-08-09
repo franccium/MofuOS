@@ -1062,6 +1062,28 @@ extern "x86-interrupt" fn pagefault_handler(
     serial_println_core!("Accessed Address: {:?}", Cr2::read());
     serial_println_core!("Error Code: {:?}", error_code);
     serial_println_core!("{:#?}", stack_frame);
+
+    if error_code.contains(PageFaultErrorCode::USER_MODE) {
+        serial_println_core!(
+            "REMINDER: User stack is {} bytes wide",
+            DEFAULT_NEW_PROCESS_STACK_SIZE
+        );
+
+        // Check if the faulting address is near the user stack limit
+        let accessed_addr = Cr2::read().unwrap_or(VirtAddr::zero());
+        let stack_pointer = stack_frame.stack_pointer;
+
+        if stack_pointer.as_u64() > accessed_addr.as_u64() {
+            let stack_usage = stack_pointer.as_u64() - accessed_addr.as_u64();
+            if stack_usage > DEFAULT_NEW_PROCESS_STACK_SIZE {
+                serial_println_core!(
+                    "WARNING: Stack pointer exceeds {} limit! Possible stack overflow.",
+                    DEFAULT_NEW_PROCESS_STACK_SIZE
+                );
+            }
+        }
+    }
+
     hlt_loop();
 }
 
