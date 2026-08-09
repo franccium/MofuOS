@@ -167,14 +167,16 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         }
     }
 
-    /// Slide all live file data down to fill gaps left by evicted entries
-    fn compact(&mut self) {
+    /// i hate this but its tough to do something here
+    fn compact(&mut self, sort_last: FileNodeHandle) {
         let mut live: Vec<(FileNodeHandle, usize, usize)> = self
             .files
             .iter()
             .map(|(&id, f)| (id, f.arena_offset, f.len))
             .collect();
-        live.sort_by_key(|&(_, offset, _)| offset);
+        live.sort_by_key(|&(id, offset, _)| {
+            if id != sort_last { offset } else { usize::MAX }
+        });
 
         let mut write_offset = 0usize;
         for (id, old_offset, len) in live {
@@ -195,15 +197,13 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
     }
 
     fn ensure_space(&mut self, needed: usize) {
-        // first try to evict without compaction
         while self.arena_push_offset + needed > self.max_memory && self.current_memory_used > 0 {
             if !self.evict_one() {
                 break;
             }
         }
-        // if still not enough contiguous space at the top, compact and retry
         if self.arena_push_offset + needed > self.max_memory && self.current_memory_used + needed <= self.max_memory {
-            self.compact();
+            self.compact(INVALID_NODE_HANDLE);
         }
     }
 
@@ -328,30 +328,60 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         };
 
         if needs_grow {
-            // save old data
             let (old_off, old_len) = {
                 let f = self.files.get(node_id).unwrap();
                 (f.arena_offset, f.len)
             };
             let new_len = write_end.max(old_len);
-            // stash old bytes into a temporary vec, remove entry, compact, re-insert
-            //TODO: stream from a CPU scratch buffer
-            let mut old_data = alloc::vec![0u8; old_len];
-            old_data.copy_from_slice(&self.arena[old_off..old_off + old_len]);
+            let extra = new_len - old_len;
 
-            if let Some(f) = self.files.remove(node_id) {
-                self.current_memory_used -= f.len;
-            }
-            self.compact();
-            self.ensure_space(new_len);
-            if let Some(arena_off) = self.arena_push_alloc(new_len) {
-                self.arena[arena_off..arena_off + old_len].copy_from_slice(&old_data);
-                if new_len > old_len {
-                    self.arena[arena_off + old_len..arena_off + new_len].fill(0);
+            let at_tail = old_off + old_len == self.arena_push_offset;
+
+            if at_tail && self.arena_push_offset + extra <= self.max_memory {
+                // file is at the top of the arena, just extend in-place
+                self.arena[self.arena_push_offset..self.arena_push_offset + extra].fill(0);
+                self.arena_push_offset += extra;
+                self.current_memory_used += extra;
+                if let Some(f) = self.files.get_mut(node_id) {
+                    f.len = new_len;
                 }
-                let importance = self.get_effective_importance(node_id);
-                self.files.insert(node_id, CachedFile::new(arena_off, new_len, self.access_tick, importance));
-                self.current_memory_used += new_len;
+            } else if self.arena_push_offset + new_len <= self.max_memory {
+                // arena tail has enough free space to hold the grown file directly:
+                // copy old data to the tail, zero-fill the extension, update metadata.
+                let new_off = self.arena_push_offset;
+                self.arena.copy_within(old_off..old_off + old_len, new_off);
+                self.arena[new_off + old_len..new_off + new_len].fill(0);
+                self.arena_push_offset += new_len;
+                self.current_memory_used += extra;
+                if let Some(f) = self.files.get_mut(node_id) {
+                    f.arena_offset = new_off;
+                    f.len = new_len;
+                }
+            } else {
+                // no room at the tail; compact with sort_last so this file ends up
+                // at the arena tail with its data intact, then extend in-place.
+                self.compact(node_id);
+
+                // evict if the extra bytes still don't fit
+                while self.arena_push_offset + extra > self.max_memory {
+                    if !self.evict_one() {
+                        break;
+                    }
+                }
+
+                if self.arena_push_offset + extra <= self.max_memory {
+                    debug_assert_eq!(
+                        self.files.get(node_id).map(|f| f.arena_offset + f.len),
+                        Some(self.arena_push_offset),
+                        "file must be at arena tail after sort_last compact"
+                    );
+                    self.arena[self.arena_push_offset..self.arena_push_offset + extra].fill(0);
+                    self.arena_push_offset += extra;
+                    self.current_memory_used += extra;
+                    if let Some(f) = self.files.get_mut(node_id) {
+                        f.len = new_len;
+                    }
+                }
             }
         }
 
