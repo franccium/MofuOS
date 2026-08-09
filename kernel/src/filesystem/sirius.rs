@@ -11,7 +11,9 @@ use lazy_static::lazy_static;
 use spin::{Mutex, Once};
 
 #[cfg(feature = "use_cached_fs")]
-use crate::filesystem::file_cache::{CacheFilesystemDriver, CacheImportance, CacheStats, FileCache, FS_CACHE_SIZE};
+use crate::filesystem::file_cache::{
+    CacheFilesystemDriver, CacheImportance, CacheStats, FS_CACHE_SIZE, FileCache,
+};
 
 const DEBUG_LOGS: bool = false;
 
@@ -22,7 +24,6 @@ macro_rules! serial_println_core {
         }
     };
 }
-
 
 #[cfg(feature = "use_cached_fs")]
 lazy_static! {
@@ -154,8 +155,16 @@ pub trait FilesystemDriver: Send + Sync {
     fn get_node(&self, node_id: FileNodeHandle) -> FileSystemResult<FileNode>;
     fn list_directory(&self, node_id: FileNodeHandle) -> FileSystemResult<Vec<FileNode>>;
 
-    fn create_file(&mut self, parent_id: FileNodeHandle, name: &str) -> FileSystemResult<FileNodeHandle>;
-    fn create_directory(&mut self, parent_id: FileNodeHandle, name: &str) -> FileSystemResult<FileNodeHandle>;
+    fn create_file(
+        &mut self,
+        parent_id: FileNodeHandle,
+        name: &str,
+    ) -> FileSystemResult<FileNodeHandle>;
+    fn create_directory(
+        &mut self,
+        parent_id: FileNodeHandle,
+        name: &str,
+    ) -> FileSystemResult<FileNodeHandle>;
 
     fn delete(&mut self, node_id: FileNodeHandle) -> FileSystemResult<()>;
     fn root_node(&self) -> FileNodeHandle;
@@ -166,8 +175,14 @@ pub struct FsDriverAdapter<D: FilesystemDriver>(pub D);
 
 #[cfg(feature = "use_cached_fs")]
 impl<D: FilesystemDriver> CacheFilesystemDriver for FsDriverAdapter<D> {
-    fn read_file_into(&mut self, node_id: FileNodeHandle, out: &mut [u8]) -> FileSystemResult<usize> {
-        self.0.read_file(node_id, 0, out).map_err(|_| FileSystemError::IoError)
+    fn read_file_into(
+        &mut self,
+        node_id: FileNodeHandle,
+        out: &mut [u8],
+    ) -> FileSystemResult<usize> {
+        self.0
+            .read_file(node_id, 0, out)
+            .map_err(|_| FileSystemError::IoError)
     }
 
     fn write_file(
@@ -176,15 +191,23 @@ impl<D: FilesystemDriver> CacheFilesystemDriver for FsDriverAdapter<D> {
         offset: usize,
         data: &[u8],
     ) -> FileSystemResult<usize> {
-        self.0.write_file(node_id, offset, data).map_err(|_| FileSystemError::IoError)
+        self.0
+            .write_file(node_id, offset, data)
+            .map_err(|_| FileSystemError::IoError)
     }
 
     fn file_size(&self, node_id: FileNodeHandle) -> FileSystemResult<usize> {
-        self.0.get_node(node_id).map(|n| n.size).map_err(|_| FileSystemError::NotFound)
+        self.0
+            .get_node(node_id)
+            .map(|n| n.size)
+            .map_err(|_| FileSystemError::NotFound)
     }
 
     fn read_dir(&mut self, node_id: FileNodeHandle) -> FileSystemResult<Vec<String>> {
-        let nodes = self.0.list_directory(node_id).map_err(|_| FileSystemError::IoError)?;
+        let nodes = self
+            .0
+            .list_directory(node_id)
+            .map_err(|_| FileSystemError::IoError)?;
         Ok(nodes.into_iter().map(|n| n.name).collect())
     }
 }
@@ -212,7 +235,11 @@ impl<D: FilesystemDriver> CachedDriver<D> {
         self.cache.unpin_file(node_id)
     }
 
-    pub fn reserve_cache(&mut self, path: &str, importance: CacheImportance) -> FileSystemResult<()> {
+    pub fn reserve_cache(
+        &mut self,
+        path: &str,
+        importance: CacheImportance,
+    ) -> FileSystemResult<()> {
         let node_id = self.cache.driver.0.find_node(path)?;
         self.cache.reserve_cache(node_id, importance)
     }
@@ -247,7 +274,6 @@ impl<D: FilesystemDriver> FilesystemDriver for CachedDriver<D> {
         offset: usize,
         out_buffer: &mut [u8],
     ) -> FileSystemResult<usize> {
-        // read directly into caller's buffer — no intermediate Vec, no clone
         self.cache.read_file_range(node_id, offset, out_buffer)
     }
 
@@ -272,11 +298,19 @@ impl<D: FilesystemDriver> FilesystemDriver for CachedDriver<D> {
         self.cache.driver.0.list_directory(node_id)
     }
 
-    fn create_file(&mut self, parent_id: FileNodeHandle, name: &str) -> FileSystemResult<FileNodeHandle> {
+    fn create_file(
+        &mut self,
+        parent_id: FileNodeHandle,
+        name: &str,
+    ) -> FileSystemResult<FileNodeHandle> {
         self.cache.driver.0.create_file(parent_id, name)
     }
 
-    fn create_directory(&mut self, parent_id: FileNodeHandle, name: &str) -> FileSystemResult<FileNodeHandle> {
+    fn create_directory(
+        &mut self,
+        parent_id: FileNodeHandle,
+        name: &str,
+    ) -> FileSystemResult<FileNodeHandle> {
         self.cache.driver.0.create_directory(parent_id, name)
     }
 
@@ -328,7 +362,12 @@ impl<D: FilesystemDriver> Sirius<D> {
         }
     }
 
-    pub fn read_file(&mut self, path: &str, offset: usize, buffer: &mut [u8]) -> FileSystemResult<usize> {
+    pub fn read_file(
+        &mut self,
+        path: &str,
+        offset: usize,
+        buffer: &mut [u8],
+    ) -> FileSystemResult<usize> {
         let node = self.resolve_path(path)?;
         serial_println_core!(
             "Sirius: read_file: '{}' node={:#x} offset={} buf={}",
@@ -343,7 +382,12 @@ impl<D: FilesystemDriver> Sirius<D> {
         self.driver.read_file(node.node_id, offset, buffer)
     }
 
-    pub fn write_file(&mut self, path: &str, offset: usize, data: &[u8]) -> FileSystemResult<usize> {
+    pub fn write_file(
+        &mut self,
+        path: &str,
+        offset: usize,
+        data: &[u8],
+    ) -> FileSystemResult<usize> {
         let node = self.resolve_path(path)?;
         if node.file_type != FileType::File {
             return Err(FileSystemError::IsDirectory);
@@ -395,7 +439,11 @@ impl<D: FilesystemDriver> Sirius<D> {
         if path.is_empty() || path == "/" {
             return Err(FileSystemError::InvalidPath);
         }
-        let trimmed = if path.starts_with('/') { &path[1..] } else { path };
+        let trimmed = if path.starts_with('/') {
+            &path[1..]
+        } else {
+            path
+        };
         match trimmed.rfind('/') {
             Some(pos) => {
                 let parent = if pos == 0 {
@@ -420,7 +468,11 @@ impl<D: FilesystemDriver> Sirius<CachedDriver<D>> {
         self.driver.unpin_file(path)
     }
 
-    pub fn reserve_cache(&mut self, path: &str, importance: CacheImportance) -> FileSystemResult<()> {
+    pub fn reserve_cache(
+        &mut self,
+        path: &str,
+        importance: CacheImportance,
+    ) -> FileSystemResult<()> {
         self.driver.reserve_cache(path, importance)
     }
 
@@ -448,11 +500,12 @@ impl<D: FilesystemDriver> Sirius<CachedDriver<D>> {
 #[cfg(not(feature = "use_cached_fs"))]
 pub fn init_filesystem(fat32_image: &[u8]) -> Result<(), &'static str> {
     let mut disk = MockDiskDevice::new(fat32_image.len() / 512 + 1);
-    disk.load_image(fat32_image).map_err(|_| "Failed to load disk image")?;
+    disk.load_image(fat32_image)
+        .map_err(|_| "Failed to load disk image")?;
     init_disk(alloc::boxed::Box::new(disk));
 
-    let fat32_driver = Fat32Driver::new(&fat32_image[..512])
-        .map_err(|_| "Failed to initialize FAT32 driver")?;
+    let fat32_driver =
+        Fat32Driver::new(&fat32_image[..512]).map_err(|_| "Failed to initialize FAT32 driver")?;
 
     SIRIUS.call_once(|| Mutex::new(Sirius::new(fat32_driver)));
     serial_println_core!("Filesystem initialized (no cache)");
@@ -462,23 +515,22 @@ pub fn init_filesystem(fat32_image: &[u8]) -> Result<(), &'static str> {
 #[cfg(feature = "use_cached_fs")]
 pub fn init_filesystem(fat32_image: &[u8]) -> Result<(), &'static str> {
     let mut disk = MockDiskDevice::new(fat32_image.len() / 512 + 1);
-    disk.load_image(fat32_image).map_err(|_| "Failed to load disk image")?;
+    disk.load_image(fat32_image)
+        .map_err(|_| "Failed to load disk image")?;
     init_disk(alloc::boxed::Box::new(disk));
 
-    let fat32_driver = Fat32Driver::new(&fat32_image[..512])
-        .map_err(|_| "Failed to initialize FAT32 driver")?;
+    let fat32_driver =
+        Fat32Driver::new(&fat32_image[..512]).map_err(|_| "Failed to initialize FAT32 driver")?;
 
-    SIRIUS.call_once(|| {
-        Mutex::new(Sirius::new(CachedDriver::new(fat32_driver, FS_CACHE_SIZE)))
-    });
+    SIRIUS.call_once(|| Mutex::new(Sirius::new(CachedDriver::new(fat32_driver, FS_CACHE_SIZE))));
     serial_println_core!("Filesystem initialized with cache size: {}", FS_CACHE_SIZE);
     Ok(())
 }
 
 #[cfg(not(feature = "use_cached_fs"))]
 pub fn init_filesystem_ata() -> Result<(), &'static str> {
-    let ata_driver = AtaPioDriver::check_primary_bus_present()
-        .ok_or("No ATA drive found on primary bus")?;
+    let ata_driver =
+        AtaPioDriver::check_primary_bus_present().ok_or("No ATA drive found on primary bus")?;
     init_disk(alloc::boxed::Box::new(ata_driver));
 
     let mut boot_sector_buf = [0u8; SECTOR_SIZE];
@@ -503,8 +555,8 @@ pub fn init_filesystem_ata() -> Result<(), &'static str> {
 
 #[cfg(feature = "use_cached_fs")]
 pub fn init_filesystem_ata_with_cache(cache_size: usize) -> Result<(), &'static str> {
-    let ata_driver = AtaPioDriver::check_primary_bus_present()
-        .ok_or("No ATA drive found on primary bus")?;
+    let ata_driver =
+        AtaPioDriver::check_primary_bus_present().ok_or("No ATA drive found on primary bus")?;
     init_disk(alloc::boxed::Box::new(ata_driver));
 
     let mut boot_sector_buf = [0u8; SECTOR_SIZE];
@@ -517,9 +569,7 @@ pub fn init_filesystem_ata_with_cache(cache_size: usize) -> Result<(), &'static 
     let fat32_driver = Fat32Driver::new(&boot_sector_buf)
         .map_err(|_| "Failed to initialize FAT32 driver from ATA")?;
 
-    SIRIUS.call_once(|| {
-        Mutex::new(Sirius::new(CachedDriver::new(fat32_driver, cache_size)))
-    });
+    SIRIUS.call_once(|| Mutex::new(Sirius::new(CachedDriver::new(fat32_driver, cache_size))));
     serial_println_core!(
         "Filesystem initialized from ATA drive with cache size: {}",
         cache_size

@@ -5,6 +5,10 @@ name = "rustspace"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["test_big_files"]
+test_big_files = []
+
 [lib]
 name = "rustspace"
 path = "src/lib.rs"

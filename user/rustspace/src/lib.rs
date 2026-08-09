@@ -303,14 +303,35 @@ pub unsafe fn sys_close_file(fd: usize) -> bool {
     unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) != u64::MAX }
 }
 
-/// Read up to buf.len() bytes from an open fd at the current offset.
+/// Read up to buf.len() bytes from an open fd
 /// Returns the number of bytes read, or usize::MAX on failure.
 #[inline(always)]
 pub unsafe fn sys_read_file(fd: usize, buf: &mut [u8]) -> usize {
     let ret = unsafe {
-        syscall3(
+        syscall4(
             SYS_READ_FILE,
             fd as u64,
+            0,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if ret == u64::MAX {
+        usize::MAX
+    } else {
+        ret as usize
+    }
+}
+
+/// Read up to buf.len() bytes from an open fd at the current offset.
+/// Returns the number of bytes read, or usize::MAX on failure.
+#[inline(always)]
+pub unsafe fn sys_read_file_at(fd: usize, offset: usize, buf: &mut [u8]) -> usize {
+    let ret = unsafe {
+        syscall4(
+            SYS_READ_FILE,
+            fd as u64,
+            offset as u64,
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
         )
@@ -325,11 +346,12 @@ pub unsafe fn sys_read_file(fd: usize, buf: &mut [u8]) -> usize {
 /// Write buf to an open fd at the current offset.
 /// Returns the number of bytes written, or usize::MAX on failure.
 #[inline(always)]
-pub unsafe fn sys_write_file(fd: usize, buf: &[u8]) -> usize {
+pub unsafe fn sys_write_file(fd: usize, offset: usize, buf: &[u8]) -> usize {
     let ret = unsafe {
-        syscall3(
+        syscall4(
             SYS_WRITE_FILE,
             fd as u64,
+            offset as u64,
             buf.as_ptr() as u64,
             buf.len() as u64,
         )

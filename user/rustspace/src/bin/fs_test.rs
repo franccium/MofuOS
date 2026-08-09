@@ -143,7 +143,7 @@ unsafe fn suite_create_write_read_delete() {
         return;
     }
 
-    let written = unsafe { sys_write_file(fd_w, WRITE_DATA) };
+    let written = unsafe { sys_write_file(fd_w, 0, WRITE_DATA) };
     expect_eq!("write byte count", written, WRITE_DATA.len());
     unsafe { sys_close_file(fd_w) };
 
@@ -198,7 +198,7 @@ unsafe fn suite_sequential_reads() {
         println!("  SKIP (open failed)");
         return;
     }
-    unsafe { sys_write_file(fd, DATA) };
+    unsafe { sys_write_file(fd, 0, DATA) };
     unsafe { sys_close_file(fd) };
 
     let fd_r = unsafe { sys_open_file(PATH, FD_FLAG_READ) };
@@ -250,7 +250,7 @@ unsafe fn suite_directories() {
 
     let fd = unsafe { sys_open_file(FILE_IN_DIR, FD_FLAG_READ | FD_FLAG_WRITE) };
     if fd != usize::MAX {
-        unsafe { sys_write_file(fd, b"hi subdir") };
+        unsafe { sys_write_file(fd, 0, b"hi subdir") };
         unsafe { sys_close_file(fd) };
     }
 
@@ -311,7 +311,7 @@ unsafe fn suite_error_cases() {
     // write to read-only fd
     let fd_r = unsafe { sys_open_file(PATH, FD_FLAG_READ) };
     if fd_r != usize::MAX {
-        let n = unsafe { sys_write_file(fd_r, b"bad write") };
+        let n = unsafe { sys_write_file(fd_r, 0, b"bad write") };
         expect_true!("write to read-only fd fails", n == usize::MAX);
         unsafe { sys_close_file(fd_r) };
     }
@@ -339,7 +339,7 @@ unsafe fn suite_overwrite() {
         println!("  SKIP (open failed)");
         return;
     }
-    unsafe { sys_write_file(fd, FIRST) };
+    unsafe { sys_write_file(fd, 0, FIRST) };
     unsafe { sys_close_file(fd) };
 
     let fd2 = unsafe { sys_open_file(PATH, FD_FLAG_READ | FD_FLAG_WRITE) };
@@ -347,7 +347,7 @@ unsafe fn suite_overwrite() {
         println!("  SKIP (second open failed)");
         return;
     }
-    let w = unsafe { sys_write_file(fd2, SECOND) };
+    let w = unsafe { sys_write_file(fd2, 0, SECOND) };
     expect_eq!("overwrite byte count", w, SECOND.len());
     unsafe { sys_close_file(fd2) };
 

@@ -751,7 +751,7 @@ impl FilesystemDriver for Fat32Driver {
         let file_size = entry.file_size as usize;
 
         if offset >= file_size {
-            // EOF or empty file — not an error, just no bytes to read
+            // EOF or empty file, no bytes to read
             return Ok(0);
         }
 
@@ -780,51 +780,52 @@ impl FilesystemDriver for Fat32Driver {
             curr_cluster
         );
 
-        // Read cluster and offset
+        let mut total_read = 0;
+        let mut current_offset = offset_in_cluster;
+        let max_to_read = core::cmp::min(out_buffer.len(), file_size - offset);
+
         let mut temp_buffer = alloc::vec![0u8; self.cluster_size];
-        let sector = self.cluster_to_sector(curr_cluster);
-        serial_println_verbose!(
-            "FAT32Driver: Reading cluster {}, sector {}, offset_in_cluster {}",
-            curr_cluster,
-            sector,
-            offset_in_cluster
-        );
 
-        {
+        while total_read < max_to_read {
+            let sector = self.cluster_to_sector(curr_cluster);
             serial_println_verbose!(
-                "FAT32Driver: Issuing read_sectors for sector {}, count {}, temp_buffer size {}",
-                sector,
-                self.sectors_per_cluster,
-                temp_buffer.len()
+                "FAT32Driver: Reading cluster {}, sector {}",
+                curr_cluster,
+                sector
             );
-            //let mut disk_mgr = get_disk_mgr();
-            disk_mgr.read_sectors(sector, self.sectors_per_cluster as usize, &mut temp_buffer)?
+
+            {
+                disk_mgr.read_sectors(
+                    sector,
+                    self.sectors_per_cluster as usize,
+                    &mut temp_buffer,
+                )?;
+            }
+
+            let available_in_cluster = self.cluster_size - current_offset;
+            let bytes_from_cluster = core::cmp::min(available_in_cluster, max_to_read - total_read);
+
+            out_buffer[total_read..total_read + bytes_from_cluster]
+                .copy_from_slice(&temp_buffer[current_offset..current_offset + bytes_from_cluster]);
+
+            total_read += bytes_from_cluster;
+            current_offset = 0;
+
+            if total_read < max_to_read {
+                match self.get_next_cluster(curr_cluster, &mut disk_mgr)? {
+                    Some(next) => curr_cluster = next,
+                    None => break,
+                }
+            }
         }
-
-        let available = self.cluster_size - offset_in_cluster;
-        let bytes_to_read = core::cmp::min(
-            available,
-            core::cmp::min(out_buffer.len(), file_size - offset),
-        );
-
-        serial_println_verbose!(
-            "FAT32Driver: Reading cluster {}, sector {}, offset_in_cluster {}, bytes_to_read {}",
-            curr_cluster,
-            sector,
-            offset_in_cluster,
-            bytes_to_read
-        );
-
-        out_buffer[..bytes_to_read]
-            .copy_from_slice(&temp_buffer[offset_in_cluster..offset_in_cluster + bytes_to_read]);
 
         serial_println_verbose!(
             "FAT32Driver: Read {} bytes from file (offset {})",
-            bytes_to_read,
+            total_read,
             offset
         );
 
-        Ok(bytes_to_read)
+        Ok(total_read)
     }
 
     fn write_file(

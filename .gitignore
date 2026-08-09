@@ -12,4 +12,5 @@ kernel/kernel
 logs
 scripts/__pycache__
 
-storage/
+
+temp/

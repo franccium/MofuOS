@@ -97,7 +97,7 @@ pub const FD_FLAG_WRITE: u8 = 0x02;
 #[derive(Debug, Clone, Copy)]
 pub struct FileDescriptor {
     pub node_id: usize,
-    pub offset: usize,
+    //pub offset: usize,
     pub flags: u8,
 }
 

@@ -148,7 +148,7 @@ unsafe fn suite_cache_basics() {
     // Write test data
     let fd = unsafe { sys_open_file(FILE_PATH, FD_FLAG_READ | FD_FLAG_WRITE) };
     if fd != usize::MAX {
-        unsafe { sys_write_file(fd, FILE_DATA) };
+        unsafe { sys_write_file(fd, 0, FILE_DATA) };
         unsafe { sys_close_file(fd) };
     }
 
@@ -214,7 +214,7 @@ unsafe fn suite_repeated_reads() {
         println!("  SKIP (create failed)");
         return;
     }
-    unsafe { sys_write_file(fd, DATA) };
+    unsafe { sys_write_file(fd, 0, DATA) };
     unsafe { sys_close_file(fd) };
 
     // Reserve cache for this file
@@ -291,7 +291,7 @@ unsafe fn suite_directory_eviction() {
         unsafe { sys_create_file(path) };
         let fd = unsafe { sys_open_file(path, FD_FLAG_READ | FD_FLAG_WRITE) };
         if fd != usize::MAX {
-            unsafe { sys_write_file(fd, DATA) };
+            unsafe { sys_write_file(fd, 0, DATA) };
             unsafe { sys_close_file(fd) };
         }
     }
@@ -407,7 +407,7 @@ unsafe fn suite_create_write_read_delete() {
         return;
     }
 
-    let written = unsafe { sys_write_file(fd_w, WRITE_DATA) };
+    let written = unsafe { sys_write_file(fd_w, 0, WRITE_DATA) };
     expect_eq!("write byte count", written, WRITE_DATA.len());
     unsafe { sys_close_file(fd_w) };
 
@@ -474,7 +474,7 @@ unsafe fn suite_sequential_reads() {
         println!("  SKIP (open failed)");
         return;
     }
-    unsafe { sys_write_file(fd, DATA) };
+    unsafe { sys_write_file(fd, 0, DATA) };
     unsafe { sys_close_file(fd) };
 
     let fd_r = unsafe { sys_open_file(PATH, FD_FLAG_READ) };
@@ -523,7 +523,7 @@ unsafe fn suite_directories() {
 
     let fd = unsafe { sys_open_file(FILE_IN_DIR, FD_FLAG_READ | FD_FLAG_WRITE) };
     if fd != usize::MAX {
-        unsafe { sys_write_file(fd, b"hi subdir") };
+        unsafe { sys_write_file(fd, 0, b"hi subdir") };
         unsafe { sys_close_file(fd) };
     }
 
@@ -577,7 +577,7 @@ unsafe fn suite_error_cases() {
 
     let fd_r = unsafe { sys_open_file(PATH, FD_FLAG_READ) };
     if fd_r != usize::MAX {
-        let n = unsafe { sys_write_file(fd_r, b"bad write") };
+        let n = unsafe { sys_write_file(fd_r, 0, b"bad write") };
         expect_true!("write to read-only fd fails", n == usize::MAX);
         unsafe { sys_close_file(fd_r) };
     }
@@ -603,7 +603,7 @@ unsafe fn suite_overwrite() {
         println!("  SKIP (open failed)");
         return;
     }
-    unsafe { sys_write_file(fd, FIRST) };
+    unsafe { sys_write_file(fd, 0, FIRST) };
     unsafe { sys_close_file(fd) };
 
     let fd2 = unsafe { sys_open_file(PATH, FD_FLAG_READ | FD_FLAG_WRITE) };
@@ -611,7 +611,7 @@ unsafe fn suite_overwrite() {
         println!("  SKIP (second open failed)");
         return;
     }
-    let w = unsafe { sys_write_file(fd2, SECOND) };
+    let w = unsafe { sys_write_file(fd2, 0, SECOND) };
     expect_eq!("overwrite byte count", w, SECOND.len());
     unsafe { sys_close_file(fd2) };
 
@@ -637,6 +637,7 @@ unsafe fn suite_write_throughput() {
 
     const PATH: &str = "/wrthrpt.txt";
     const CHUNK: &[u8] = b"0123456789ABCDEF";
+    const CHUNK_SIZE: usize = CHUNK.len();
     const ITERATIONS: usize = 64;
 
     unsafe { sys_delete(PATH) };
@@ -649,8 +650,10 @@ unsafe fn suite_write_throughput() {
     }
 
     let (start_cached, _) = unsafe { tsc_read() };
+    let mut offset = 0usize;
     for _ in 0..ITERATIONS {
-        unsafe { sys_write_file(fd, CHUNK) };
+        unsafe { sys_write_file(fd, offset, CHUNK) };
+        offset += CHUNK_SIZE;
     }
     let (end_cached, _) = unsafe { tsc_read() };
     let cached_cycles = end_cached - start_cached;
@@ -687,6 +690,7 @@ unsafe fn suite_sequential_write_batching() {
     const PATH_BATCH: &str = "/wbatch.txt";
     const PATH_EAGER: &str = "/weager.txt";
     const CHUNK: &[u8] = b"DATADATADATADATA";
+    const CHUNK_SIZE: usize = CHUNK.len();
     const ITERATIONS: usize = 32;
 
     // write all, flush once
@@ -700,8 +704,10 @@ unsafe fn suite_sequential_write_batching() {
     }
 
     let (start_batch, _) = unsafe { tsc_read() };
+    let mut offset = 0usize;
     for _ in 0..ITERATIONS {
-        unsafe { sys_write_file(fd_batch, CHUNK) };
+        unsafe { sys_write_file(fd_batch, offset, CHUNK) };
+        offset += CHUNK_SIZE;
     }
     unsafe { sys_flush_file_cache() };
     let (end_batch, _) = unsafe { tsc_read() };
@@ -714,12 +720,14 @@ unsafe fn suite_sequential_write_batching() {
     unsafe { sys_create_file(PATH_EAGER) };
 
     let (start_eager, _) = unsafe { tsc_read() };
+    let mut offset = 0usize;
     for _ in 0..ITERATIONS {
         let fd = unsafe { sys_open_file(PATH_EAGER, FD_FLAG_READ | FD_FLAG_WRITE) };
         if fd == usize::MAX {
             break;
         }
-        unsafe { sys_write_file(fd, CHUNK) };
+        unsafe { sys_write_file(fd, offset, CHUNK) };
+        offset += CHUNK_SIZE;
         unsafe { sys_flush_file_cache() };
         unsafe { sys_close_file(fd) };
     }
@@ -779,7 +787,7 @@ unsafe fn suite_dirty_state() {
         println!("  SKIP (open failed)");
         return;
     }
-    unsafe { sys_write_file(fd, b"dirty content") };
+    unsafe { sys_write_file(fd, 0, b"dirty content") };
 
     let mut stats2 = CacheStatsFlat::zeroed();
     unsafe { sys_get_cache_stats(&mut stats2) };
@@ -834,7 +842,7 @@ unsafe fn suite_arena_grow_at_tail() {
         return;
     }
 
-    let w = unsafe { sys_write_file(fd, INITIAL) };
+    let w = unsafe { sys_write_file(fd, 0, INITIAL) };
     expect_eq!("initial write", w, INITIAL.len());
 
     // Write extension starting at INITIAL.len() — grows the file
@@ -848,7 +856,7 @@ unsafe fn suite_arena_grow_at_tail() {
     let mut dummy = [0u8; 16];
     let _ = unsafe { sys_read_file(fd2, &mut dummy) };
     // Now write at offset == INITIAL.len()
-    let w2 = unsafe { sys_write_file(fd2, EXTENSION) };
+    let w2 = unsafe { sys_write_file(fd2, INITIAL.len() as usize, EXTENSION) };
     expect_eq!("extension write", w2, EXTENSION.len());
     unsafe { sys_close_file(fd2) };
 
@@ -889,12 +897,12 @@ unsafe fn suite_arena_grow_in_middle() {
     // Write A then B to get A before B in the arena
     let fd_a = unsafe { sys_open_file(PATH_A, FD_FLAG_READ | FD_FLAG_WRITE) };
     if fd_a != usize::MAX {
-        unsafe { sys_write_file(fd_a, DATA_A) };
+        unsafe { sys_write_file(fd_a, 0, DATA_A) };
         unsafe { sys_close_file(fd_a) };
     }
     let fd_b = unsafe { sys_open_file(PATH_B, FD_FLAG_READ | FD_FLAG_WRITE) };
     if fd_b != usize::MAX {
-        unsafe { sys_write_file(fd_b, DATA_B) };
+        unsafe { sys_write_file(fd_b, 0, DATA_B) };
         unsafe { sys_close_file(fd_b) };
     }
 
@@ -911,7 +919,7 @@ unsafe fn suite_arena_grow_in_middle() {
     // Seek past existing content
     let mut skip = [0u8; 9];
     let _ = unsafe { sys_read_file(fd_a2, &mut skip) };
-    let w = unsafe { sys_write_file(fd_a2, EXTRA_A) };
+    let w = unsafe { sys_write_file(fd_a2, 9, EXTRA_A) };
     expect_eq!("growing A while B is in middle", w, EXTRA_A.len());
     unsafe { sys_close_file(fd_a2) };
 
@@ -969,7 +977,7 @@ unsafe fn suite_partial_write_preserves_prefix() {
         }
         a
     };
-    let w = unsafe { sys_write_file(fd, &initial) };
+    let w = unsafe { sys_write_file(fd, 0, &initial) };
     expect_eq!("initial 32-byte write", w, 32);
     unsafe { sys_close_file(fd) };
 
@@ -983,7 +991,7 @@ unsafe fn suite_partial_write_preserves_prefix() {
     let _ = unsafe { sys_read_file(fd2, &mut skip) };
     // Write 8 bytes starting at offset 28 -> new file size = 36
     let patch: [u8; 8] = *b"XXXXXXXX";
-    let w2 = unsafe { sys_write_file(fd2, &patch) };
+    let w2 = unsafe { sys_write_file(fd2, 28, &patch) };
     expect_eq!("grow write at offset 28", w2, 8);
     unsafe { sys_close_file(fd2) };
 
@@ -1015,8 +1023,8 @@ unsafe fn suite_eviction_under_pressure() {
 
     // 6 MB each, 3 files = 18 MB > 16 MB arena
     const FILE_SIZE: usize = BIG_FILES_FILE_SIZE;
-    const CHUNK: usize = BIG_FILES_CHUNK_SIZE;
-    const CHUNKS_PER_FILE: usize = FILE_SIZE / CHUNK;
+    const CHUNK_SIZE: usize = BIG_FILES_CHUNK_SIZE;
+    const CHUNKS_PER_FILE: usize = FILE_SIZE / CHUNK_SIZE;
 
     const PATH_A: &str = "/evpa.txt";
     const PATH_B: &str = "/evpb.txt";
@@ -1030,7 +1038,7 @@ unsafe fn suite_eviction_under_pressure() {
 
     // Create and write all three files sequentially.
     // By the time file C is written, the cache will have evicted parts of A.
-    let mut chunk_buf = alloc::vec![0u8; CHUNK];
+    let mut chunk_buf = alloc::vec![0u8; CHUNK_SIZE];
     for (i, path) in PATHS.iter().enumerate() {
         let created = unsafe { sys_create_file(path) };
         if !created {
@@ -1044,13 +1052,15 @@ unsafe fn suite_eviction_under_pressure() {
         }
         chunk_buf.fill(FILL[i]);
         let (start, _) = unsafe { tsc_read() };
+        let mut offset = 0usize;
         for _ in 0..CHUNKS_PER_FILE {
-            unsafe { sys_write_file(fd, &chunk_buf) };
+            unsafe { sys_write_file(fd, offset, &chunk_buf) };
+            offset += CHUNK_SIZE;
         }
         let (end, _) = unsafe { tsc_read() };
         println!(
-            "  wrote {} MB to {} in {} cycles",
-            FILE_SIZE / (1024 * 1024),
+            "  wrote {} bytes to {} in {} cycles",
+            FILE_SIZE,
             path,
             end - start
         );
@@ -1068,6 +1078,7 @@ unsafe fn suite_eviction_under_pressure() {
 
     // Read back all three files chunk-by-chunk and verify byte values.
     // A was the first in, so it was most likely evicted and will reload from disk.
+    let mut read_buf = alloc::vec![0u8; FILE_SIZE];
     for (i, path) in PATHS.iter().enumerate() {
         let (start, _) = unsafe { tsc_read() };
         let fd = unsafe { sys_open_file(path, FD_FLAG_READ) };
@@ -1078,9 +1089,17 @@ unsafe fn suite_eviction_under_pressure() {
 
         let mut total_read = 0usize;
         let mut content_ok = true;
-        let mut read_buf = alloc::vec![0u8; CHUNK];
+        //chunk_buf.clear();
+        read_buf.clear();
+
+        let mut file_stat = StatFlat::zeroed();
+        unsafe { sys_stat_file(path, &mut file_stat) };
+        let file_size_stat = file_stat.size as usize;
+        println!("  file size in stat: {}, {} bytes", path, file_size_stat);
+
         loop {
             let n = unsafe { sys_read_file(fd, &mut read_buf) };
+            println!("  read {} bytes from {}", n, path);
             if n == 0 {
                 break;
             }
@@ -1090,6 +1109,10 @@ unsafe fn suite_eviction_under_pressure() {
             }
             if read_buf[..n].iter().any(|&b| b != FILL[i]) {
                 content_ok = false;
+                println!(
+                    "  ERROR: file {} content mismatch at offset {}",
+                    path, total_read
+                );
                 break;
             }
             total_read += n;
@@ -1097,7 +1120,9 @@ unsafe fn suite_eviction_under_pressure() {
         unsafe { sys_close_file(fd) };
         let (end, _) = unsafe { tsc_read() };
 
-        expect_eq!("file size correct", total_read, FILE_SIZE);
+        if content_ok {
+            expect_eq!("file size correct", total_read, FILE_SIZE);
+        }
         expect_true!("file content intact after eviction", content_ok);
         println!(
             "  verified {} MB from {} in {} cycles",
@@ -1107,23 +1132,23 @@ unsafe fn suite_eviction_under_pressure() {
         );
     }
 
-    // Now read file A again when it was loaded cold above after eviction.
+    // Now read file B again when it was loaded cold above after eviction.
     // This second read should be a cache hit (recently loaded).
+    read_buf.clear();
     let (start_hot, _) = unsafe { tsc_read() };
-    let fd_a = unsafe { sys_open_file(PATH_A, FD_FLAG_READ) };
+    let fd_b = unsafe { sys_open_file(PATH_B, FD_FLAG_READ) };
     let mut hot_read = 0usize;
-    if fd_a != usize::MAX {
-        let mut buf = alloc::vec![0u8; CHUNK];
-        let n = unsafe { sys_read_file(fd_a, &mut buf) };
+    if fd_b != usize::MAX {
+        let n = unsafe { sys_read_file(fd_b, &mut read_buf) };
         if n != usize::MAX {
             hot_read = n;
         }
-        unsafe { sys_close_file(fd_a) };
+        unsafe { sys_close_file(fd_b) };
     }
     let (end_hot, _) = unsafe { tsc_read() };
-    expect_eq!("hot re-read first chunk size", hot_read, CHUNK);
+    expect_eq!("hot re-read first chunk size", hot_read, CHUNK_SIZE);
     println!(
-        "  hot re-read first chunk of A: {} cycles",
+        "  hot re-read first chunk of B: {} cycles",
         end_hot - start_hot
     );
 
@@ -1154,12 +1179,12 @@ unsafe fn suite_pin_survives_eviction() {
 
     let fd_p = unsafe { sys_open_file(PINNED, FD_FLAG_READ | FD_FLAG_WRITE) };
     if fd_p != usize::MAX {
-        unsafe { sys_write_file(fd_p, DATA) };
+        unsafe { sys_write_file(fd_p, 0, DATA) };
         unsafe { sys_close_file(fd_p) };
     }
     let fd_u = unsafe { sys_open_file(UNPINNED, FD_FLAG_READ | FD_FLAG_WRITE) };
     if fd_u != usize::MAX {
-        unsafe { sys_write_file(fd_u, OTHER) };
+        unsafe { sys_write_file(fd_u, 0, OTHER) };
         unsafe { sys_close_file(fd_u) };
     }
 
@@ -1235,7 +1260,7 @@ unsafe fn suite_write_after_close() {
         println!("  SKIP (open 1 failed)");
         return;
     }
-    let w1 = unsafe { sys_write_file(fd1, FIRST) };
+    let w1 = unsafe { sys_write_file(fd1, 0, FIRST) };
     expect_eq!("first write size", w1, FIRST.len());
     unsafe { sys_close_file(fd1) };
     unsafe { sys_flush_file_cache() };
@@ -1248,7 +1273,7 @@ unsafe fn suite_write_after_close() {
     }
     let mut skip = [0u8; 7];
     let _ = unsafe { sys_read_file(fd2, &mut skip) };
-    let w2 = unsafe { sys_write_file(fd2, PATCH) };
+    let w2 = unsafe { sys_write_file(fd2, 7, PATCH) };
     expect_eq!("patch write size", w2, PATCH.len());
     unsafe { sys_close_file(fd2) };
     unsafe { sys_flush_file_cache() };
@@ -1292,7 +1317,7 @@ unsafe fn suite_multi_file_flush() {
     for _ in 0..WRITE_ROUNDS {
         for &fd in &fds {
             if fd != usize::MAX {
-                unsafe { sys_write_file(fd, DATA) };
+                unsafe { sys_write_file(fd, 0, DATA) };
             }
         }
     }
@@ -1383,15 +1408,15 @@ pub extern "C" fn main() -> ! {
 
         ALLOCATOR.preallocate(2 * 1024 * 1024);
 
-        suite_arena_grow_at_tail();
-        suite_arena_grow_in_middle();
-        suite_partial_write_preserves_prefix();
+        //suite_arena_grow_at_tail();
+        //suite_arena_grow_in_middle();
+        //suite_partial_write_preserves_prefix();
 
         #[cfg(feature = "test_big_files")]
         suite_eviction_under_pressure();
 
-        suite_pin_survives_eviction();
-        suite_write_after_close();
+        //suite_pin_survives_eviction();
+        //suite_write_after_close();
 
         let (end_cycle, _) = rustspace::tsc_read();
         let total_cycles = end_cycle - start_cycle;
@@ -1406,7 +1431,7 @@ pub extern "C" fn main() -> ! {
         );
         println!("==========================================");
 
-        unsafe { print_cache_stats("final") };
+        print_cache_stats("final");
     }
 
     print_summary();

@@ -7,8 +7,8 @@ use crate::filesystem::fat32::{FileNodeHandle, INVALID_NODE_HANDLE};
 use crate::filesystem::sirius::FileSystemError;
 use crate::serial_println_core;
 
-pub const FS_CACHE_SIZE: usize = 16 * 1024 * 1024;
-//pub const FS_CACHE_SIZE: usize = 32 * 1024;
+//pub const FS_CACHE_SIZE: usize = 16 * 1024 * 1024;
+pub const FS_CACHE_SIZE: usize = 32 * 1024;
 pub const FS_CACHE_MAP_FILE_COUNT: usize = 1024;
 
 const DEBUG_LOGS: bool = true;
@@ -273,12 +273,23 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         // cache miss: load the whole file
         serial_println_core!("file_cache: miss node={:#x}", node_id);
         let file_size = self.driver.file_size(node_id)?;
+        serial_println_core!(
+            "file_cache: miss node={:#x} file_size={}",
+            node_id,
+            file_size
+        );
 
         if file_size == 0 {
             return Ok(0);
         }
 
         if !self.ensure_space(file_size, INVALID_NODE_HANDLE, true) {
+            serial_println_core!(
+                "file_cache: arena full, cannot ensure space for node={:#x} size={}",
+                node_id,
+                file_size
+            );
+            //TODO: read file into the buffer from disk
             return Err(FileSystemError::CacheFull);
         }
 
@@ -298,28 +309,34 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             }
         };
 
-        let read = self
-            .driver
-            .read_file_into(node_id, &mut self.arena[arena_off..arena_off + file_size])?;
+        let mut arena_slice = &mut self.arena[arena_off..arena_off + file_size];
+        serial_println_core!(
+            "file_cache: loading node={:#x} from driver into arena at arena_offset={} file_size={}, arena_slice.len()={}",
+            node_id,
+            arena_off,
+            file_size,
+            arena_slice.len()
+        );
+        let read_bytes = self.driver.read_file_into(node_id, arena_slice)?;
         let importance = self.get_effective_importance(node_id);
         self.files.insert(
             node_id,
-            CachedFile::new(arena_off, read, self.access_tick, importance),
+            CachedFile::new(arena_off, read_bytes, self.access_tick, importance),
         );
-        self.current_memory_used += read;
+        self.current_memory_used += read_bytes;
 
         serial_println_core!(
-            "file_cache: loaded node={:#x} size={} mem={}/{}",
+            "file_cache: loaded node={:#x} read_bytes={} mem={}/{}",
             node_id,
-            read,
+            read_bytes,
             self.current_memory_used,
             self.max_memory
         );
 
-        if offset >= read {
+        if offset >= read_bytes {
             return Ok(0);
         }
-        let copy_len = out.len().min(read - offset);
+        let copy_len = out.len().min(read_bytes - offset);
         out[..copy_len]
             .copy_from_slice(&self.arena[arena_off + offset..arena_off + offset + copy_len]);
         Ok(copy_len)

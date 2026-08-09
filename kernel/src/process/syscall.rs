@@ -1,4 +1,4 @@
-use crate::filesystem::sirius::{DirEntryFlat, FilesystemDriver, FS_NAME_LEN, StatFlat};
+use crate::filesystem::sirius::{DirEntryFlat, FS_NAME_LEN, FilesystemDriver, StatFlat};
 use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
 use crate::memory::get_frame_allocator;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
@@ -495,7 +495,6 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                         let idx = proc.file_descriptors.size;
                         proc.file_descriptors.push(FileDescriptor {
                             node_id,
-                            offset: 0,
                             flags,
                         });
                         idx
@@ -534,8 +533,9 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
 
         SyscallNumber::ReadFile => {
             let fd = frame.arg1 as usize;
-            let buffer_ptr = frame.arg2 as usize;
-            let count = frame.arg3 as usize;
+            let offset = frame.arg2 as usize;
+            let buffer_ptr = frame.arg3 as usize;
+            let count = frame.arg4 as usize;
 
             if !validate_user_ptr(buffer_ptr, count) {
                 return FileDescriptor::INVALID_FD;
@@ -544,7 +544,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
 
-            let (node_id, offset, flags) = {
+            let (node_id, flags) = {
                 let pm = PROCESS_MANAGER.lock();
                 match pm.get_process(pid) {
                     Ok(proc) => {
@@ -552,7 +552,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                             return FileDescriptor::INVALID_FD;
                         }
                         let d = proc.file_descriptors.get(fd);
-                        (d.node_id, d.offset, d.flags)
+                        (d.node_id, d.flags)
                     }
                     Err(_) => return FileDescriptor::INVALID_FD,
                 }
@@ -570,9 +570,6 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
 
                 #[cfg(feature = "use_cached_fs")]
                 {
-                    // Try cached read first
-                    // We need the path for cache lookup - in a full implementation,
-                    // you'd store the path in the file descriptor or resolve node_id to path
                     match sirius.driver.read_file(node_id, offset, buffer) {
                         Ok(n) => n,
                         Err(e) => {
@@ -594,23 +591,14 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 }
             };
 
-            // Advance the stored offset
-            {
-                let mut pm = PROCESS_MANAGER.lock();
-                if let Ok(proc) = pm.get_process_mut(pid) {
-                    if fd < proc.file_descriptors.size {
-                        proc.file_descriptors.get_mut(fd).offset += bytes_read;
-                    }
-                }
-            }
-
             bytes_read as u64
         }
 
         SyscallNumber::WriteFile => {
             let fd = frame.arg1 as usize;
-            let buffer_ptr = frame.arg2 as usize;
-            let count = frame.arg3 as usize;
+            let offset = frame.arg2 as usize;
+            let buffer_ptr = frame.arg3 as usize;
+            let count = frame.arg4 as usize;
 
             if !validate_user_ptr(buffer_ptr, count) {
                 return FileDescriptor::INVALID_FD;
@@ -619,7 +607,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
 
-            let (node_id, offset, flags) = {
+            let (node_id, flags) = {
                 let pm = PROCESS_MANAGER.lock();
                 match pm.get_process(pid) {
                     Ok(proc) => {
@@ -627,7 +615,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                             return FileDescriptor::INVALID_FD;
                         }
                         let descriptor = proc.file_descriptors.get(fd);
-                        (descriptor.node_id, descriptor.offset, descriptor.flags)
+                        (descriptor.node_id, descriptor.flags)
                     }
                     Err(_) => return FileDescriptor::INVALID_FD,
                 }
@@ -649,14 +637,14 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 }
             };
 
-            {
-                let mut pm = PROCESS_MANAGER.lock();
-                if let Ok(proc) = pm.get_process_mut(pid) {
-                    if fd < proc.file_descriptors.size {
-                        proc.file_descriptors.get_mut(fd).offset += bytes_written;
-                    }
-                }
-            }
+            // {
+            //     let mut pm = PROCESS_MANAGER.lock();
+            //     if let Ok(proc) = pm.get_process_mut(pid) {
+            //         if fd < proc.file_descriptors.size {
+            //             proc.file_descriptors.get_mut(fd).offset += bytes_written;
+            //         }
+            //     }
+            // }
 
             bytes_written as u64
         }
@@ -987,7 +975,11 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 let node_ids: Vec<crate::filesystem::fat32::FileNodeHandle> = {
                     let pm = PROCESS_MANAGER.lock();
                     match pm.get_process(pid) {
-                        Ok(proc) => proc.file_descriptors.iter().map(|fd| fd.node_id as crate::filesystem::fat32::FileNodeHandle).collect(),
+                        Ok(proc) => proc
+                            .file_descriptors
+                            .iter()
+                            .map(|fd| fd.node_id as crate::filesystem::fat32::FileNodeHandle)
+                            .collect(),
                         Err(_) => return u64::MAX,
                     }
                 };
@@ -995,7 +987,11 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 let mut sirius = crate::filesystem::sirius::get_sirius();
                 match sirius.flush_nodes(&node_ids) {
                     Ok(()) => {
-                        serial_println_core!("sys_flush_file_cache: pid={} flushed {} nodes", pid, node_ids.len());
+                        serial_println_core!(
+                            "sys_flush_file_cache: pid={} flushed {} nodes",
+                            pid,
+                            node_ids.len()
+                        );
                         0
                     }
                     Err(e) => {
