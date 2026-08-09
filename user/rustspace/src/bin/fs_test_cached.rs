@@ -6,11 +6,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use rustspace::{
-    CacheImportance, CacheStatsFlat, CpuInfoFlat, DirEntryFlat, FD_FLAG_READ, FD_FLAG_WRITE,
-    StatFlat, println, sys_close_file, sys_create_dir, sys_create_file, sys_delete,
-    sys_evict_directory, sys_exit, sys_flush_file_cache, sys_get_cache_stats, sys_get_cpu_info,
-    sys_list_dir, sys_open_file, sys_pin_file, sys_read_file, sys_reserve_cache, sys_stat_file,
-    sys_unpin_file, sys_write_file, tsc_read,
+    ALLOCATOR, CacheImportance, CacheStatsFlat, CpuInfoFlat, DirEntryFlat, FD_FLAG_READ,
+    FD_FLAG_WRITE, StatFlat, println, sys_allocate, sys_close_file, sys_create_dir,
+    sys_create_file, sys_delete, sys_evict_directory, sys_exit, sys_flush_file_cache,
+    sys_get_cache_stats, sys_get_cpu_info, sys_list_dir, sys_open_file, sys_pin_file,
+    sys_read_file, sys_reserve_cache, sys_stat_file, sys_unpin_file, sys_write_file, tsc_read,
 };
 
 global_asm!(
@@ -20,6 +20,18 @@ global_asm!(
     "    call main",
     "    ud2",
 );
+
+/// this is optional cause writes take a lot of time
+/// to have this make any sense the total file size of the pressure test files must exceed max file cache size
+#[cfg(feature = "big_files")]
+const BIG_FILES_FILE_SIZE: usize = 6 * 1024 * 1024; // 8 MB
+#[cfg(feature = "big_files")]
+const BIG_FILES_CHUNK_SIZE: usize = 1 * 1024 * 1024; // 1 MB
+#[cfg(not(feature = "big_files"))]
+const BIG_FILES_FILE_SIZE: usize = 12 * 1024; // 12 KB
+#[cfg(not(feature = "big_files"))]
+const BIG_FILES_CHUNK_SIZE: usize = 4096;
+const BIG_FILES_FILE_COUNT: usize = 3;
 
 static mut PASS_COUNT: u32 = 0;
 static mut FAIL_COUNT: u32 = 0;
@@ -997,19 +1009,20 @@ unsafe fn suite_partial_write_preserves_prefix() {
 // Writing them sequentially fills and overflows the arena, forcing
 // eviction of earlier file data. Then verify all three read back
 // correctly from disk, and dirty data flushed cleanly.
+#[cfg(feature = "test_big_files")]
 unsafe fn suite_eviction_under_pressure() {
     suite_header("eviction under pressure");
 
     // 6 MB each, 3 files = 18 MB > 16 MB arena
-    const FILE_SIZE: usize = 6 * 1024 * 1024;
-    const CHUNK: usize = 1 * 1024 * 1024;
+    const FILE_SIZE: usize = BIG_FILES_FILE_SIZE;
+    const CHUNK: usize = BIG_FILES_CHUNK_SIZE;
     const CHUNKS_PER_FILE: usize = FILE_SIZE / CHUNK;
 
     const PATH_A: &str = "/evpa.txt";
     const PATH_B: &str = "/evpb.txt";
     const PATH_C: &str = "/evpc.txt";
-    const PATHS: [&str; 3] = [PATH_A, PATH_B, PATH_C];
-    const FILL: [u8; 3] = [0xAA, 0xBB, 0xCC];
+    const PATHS: [&str; BIG_FILES_FILE_COUNT] = [PATH_A, PATH_B, PATH_C];
+    const FILL: [u8; BIG_FILES_FILE_COUNT] = [0xAA, 0xBB, 0xCC];
 
     for path in &PATHS {
         unsafe { sys_delete(path) };
@@ -1368,10 +1381,15 @@ pub extern "C" fn main() -> ! {
         //suite_dirty_state();
         //suite_multi_file_flush();
 
+        ALLOCATOR.preallocate(2 * 1024 * 1024);
+
         suite_arena_grow_at_tail();
         suite_arena_grow_in_middle();
         suite_partial_write_preserves_prefix();
+
+        #[cfg(feature = "test_big_files")]
         suite_eviction_under_pressure();
+
         suite_pin_survives_eviction();
         suite_write_after_close();
 

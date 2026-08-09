@@ -833,6 +833,12 @@ impl FilesystemDriver for Fat32Driver {
         offset: usize,
         data: &[u8],
     ) -> FileSystemResult<usize> {
+        serial_println!(
+            "FAT32Driver: write_file called with node_id={:#x}, offset={}, data_len={}",
+            node_id,
+            offset,
+            data.len()
+        );
         if data.is_empty() {
             return Ok(0);
         }

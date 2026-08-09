@@ -2,6 +2,25 @@ use crate::io::disk::{DiskDevice, DiskOpError, DiskOpResult, SECTOR_SIZE};
 use crate::{serial_println, serial_println_core};
 use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
 
+const DEBUG_LOGS: bool = true;
+const DEBUG_LOGS_VERBOSE: bool = false;
+
+macro_rules! serial_println {
+    ($($arg:tt)*) => {
+        if DEBUG_LOGS {
+            $crate::serial_println!($($arg)*);
+        }
+    };
+}
+
+macro_rules! serial_println_verbose {
+    ($($arg:tt)*) => {
+        if DEBUG_LOGS && DEBUG_LOGS_VERBOSE {
+            $crate::serial_println!($($arg)*);
+        }
+    };
+}
+
 const ATA_PRIMARY_DATA: u16 = 0x1F0;
 const ATA_PRIMARY_ERROR: u16 = 0x1F1;
 const ATA_PRIMARY_SECTOR_COUNT: u16 = 0x1F2;
@@ -277,6 +296,12 @@ impl DiskDevice for AtaPioDriver {
     }
 
     fn write_sectors(&mut self, start_sector: u64, count: usize, data: &[u8]) -> DiskOpResult<()> {
+        serial_println_verbose!(
+            "AtaPioDriver: write_sectors called with start_sector={}, count={}, data_len={}",
+            start_sector,
+            count,
+            data.len()
+        );
         if start_sector + count as u64 > self.sector_count {
             return Err(DiskOpError::InvalidSector);
         }

@@ -39,6 +39,8 @@ REAL TODO:
 
 - make sure loaded program sections get page-aligned and have actual proper protection flags
 
+- a way to prealloc space for userspace process, let the process specify a requested preallocated size that sys_allocate and the user arena global allocator will know about
+
 - thread context switching, two processes running on 1 core
 - upstream bigos compositor and terminal (no not yet, we will do userspace shell, doing it kernel mode now would couple things i dont want coupled and that would be problematic in the future) to this
 - enable sse builds?

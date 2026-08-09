@@ -8,6 +8,7 @@ use crate::filesystem::sirius::FileSystemError;
 use crate::serial_println_core;
 
 pub const FS_CACHE_SIZE: usize = 16 * 1024 * 1024;
+//pub const FS_CACHE_SIZE: usize = 32 * 1024;
 pub const FS_CACHE_MAP_FILE_COUNT: usize = 1024;
 
 const DEBUG_LOGS: bool = true;
@@ -125,8 +126,8 @@ impl CachedFile {
     }
 }
 
-/// On eviction the entry is removed from the map and its arena region is marked free 
-/// The arena is compacted when a new file would exceed max_memory but there is 
+/// On eviction the entry is removed from the map and its arena region is marked free
+/// The arena is compacted when a new file would exceed max_memory but there is
 /// enough free space fragmented across evicted regions
 pub struct FileCache<D: CacheFilesystemDriver> {
     pub driver: D,
@@ -174,14 +175,17 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             .iter()
             .map(|(&id, f)| (id, f.arena_offset, f.len))
             .collect();
-        live.sort_by_key(|&(id, offset, _)| {
-            if id != sort_last { offset } else { usize::MAX }
-        });
+        live.sort_by_key(
+            |&(id, offset, _)| {
+                if id != sort_last { offset } else { usize::MAX }
+            },
+        );
 
         let mut write_offset = 0usize;
         for (id, old_offset, len) in live {
             if old_offset != write_offset {
-                self.arena.copy_within(old_offset..old_offset + len, write_offset);
+                self.arena
+                    .copy_within(old_offset..old_offset + len, write_offset);
                 if let Some(f) = self.files.get_mut(id) {
                     f.arena_offset = write_offset;
                 }
@@ -196,15 +200,46 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         );
     }
 
-    fn ensure_space(&mut self, needed: usize) {
-        while self.arena_push_offset + needed > self.max_memory && self.current_memory_used > 0 {
-            if !self.evict_one() {
-                break;
+    fn ensure_space(
+        &mut self,
+        needed: usize,
+        file_to_end: FileNodeHandle,
+        force_eviction: bool,
+    ) -> bool {
+        while self.arena_push_offset + needed > self.max_memory {
+            serial_println_core!(
+                "file_cache: arena full, need={} used={}/{}",
+                needed,
+                self.current_memory_used,
+                self.max_memory
+            );
+            let evicted_size = self.evict_one_keep_alive(file_to_end, force_eviction);
+            serial_println_core!(
+                "file_cache: evicted {} bytes, new used={}/{}",
+                evicted_size,
+                self.current_memory_used,
+                self.max_memory
+            );
+            if evicted_size != 0 {
+                if self.current_memory_used + needed - evicted_size <= self.max_memory {
+                    // we have evicted enough, need to compact now to move the push offset
+                    serial_println_core!(
+                        "file_cache: evicted enough, compacting arena to make room for {} bytes",
+                        needed
+                    );
+                    self.compact(file_to_end);
+                }
+            } else {
+                serial_println_core!(
+                    "file_cache: arena full, cannot evict more files, needed={} used={}/{}",
+                    needed,
+                    self.current_memory_used,
+                    self.max_memory
+                );
+                return false;
             }
         }
-        if self.arena_push_offset + needed > self.max_memory && self.current_memory_used + needed <= self.max_memory {
-            self.compact(INVALID_NODE_HANDLE);
-        }
+        true
     }
 
     /// Read `len` bytes starting at `offset` from the cached file directly into `out`
@@ -243,7 +278,9 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             return Ok(0);
         }
 
-        self.ensure_space(file_size);
+        if !self.ensure_space(file_size, INVALID_NODE_HANDLE, true) {
+            return Err(FileSystemError::CacheFull);
+        }
 
         let arena_off = match self.arena_push_alloc(file_size) {
             Some(off) => off,
@@ -261,9 +298,14 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             }
         };
 
-        let read = self.driver.read_file_into(node_id, &mut self.arena[arena_off..arena_off + file_size])?;
+        let read = self
+            .driver
+            .read_file_into(node_id, &mut self.arena[arena_off..arena_off + file_size])?;
         let importance = self.get_effective_importance(node_id);
-        self.files.insert(node_id, CachedFile::new(arena_off, read, self.access_tick, importance));
+        self.files.insert(
+            node_id,
+            CachedFile::new(arena_off, read, self.access_tick, importance),
+        );
         self.current_memory_used += read;
 
         serial_println_core!(
@@ -278,7 +320,8 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             return Ok(0);
         }
         let copy_len = out.len().min(read - offset);
-        out[..copy_len].copy_from_slice(&self.arena[arena_off + offset..arena_off + offset + copy_len]);
+        out[..copy_len]
+            .copy_from_slice(&self.arena[arena_off + offset..arena_off + offset + copy_len]);
         Ok(copy_len)
     }
 
@@ -291,10 +334,13 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         self.access_tick = self.access_tick.wrapping_add(1);
 
         serial_println_core!(
-            "file_cache: write node={:#x} offset={} len={}",
+            "file_cache: write node={:#x} offset={} len={}; arena_push_offset={} current_memory_used={}/{}",
             node_id,
             offset,
-            data.len()
+            data.len(),
+            self.arena_push_offset,
+            self.current_memory_used,
+            self.max_memory
         );
 
         // ensure file is in cache before patching
@@ -302,47 +348,56 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             serial_println_core!("file_cache: write miss node={:#x}", node_id);
             let file_size = self.driver.file_size(node_id).unwrap_or(0);
             if file_size > 0 {
-                self.ensure_space(file_size);
+                if !self.ensure_space(file_size, INVALID_NODE_HANDLE, true) {
+                    return Err(FileSystemError::CacheFull);
+                }
                 if let Some(arena_off) = self.arena_push_alloc(file_size) {
-                    let read = self.driver.read_file_into(node_id, &mut self.arena[arena_off..arena_off + file_size])?;
+                    let read = self.driver.read_file_into(
+                        node_id,
+                        &mut self.arena[arena_off..arena_off + file_size],
+                    )?;
                     let importance = self.get_effective_importance(node_id);
-                    self.files.insert(node_id, CachedFile::new(arena_off, read, self.access_tick, importance));
+                    self.files.insert(
+                        node_id,
+                        CachedFile::new(arena_off, read, self.access_tick, importance),
+                    );
                     self.current_memory_used += read;
                 }
             } else {
-                serial_println_core!("file_cache: created new file after write miss");
+                serial_println_core!("file_cache: write miss, file_size == 0");
                 // new/empty file: allocate space for the incoming write
                 let needed = offset + data.len();
-                self.ensure_space(needed);
+                if !self.ensure_space(needed, INVALID_NODE_HANDLE, true) {
+                    return Err(FileSystemError::CacheFull);
+                }
                 if let Some(arena_off) = self.arena_push_alloc(needed) {
                     self.arena[arena_off..arena_off + needed].fill(0);
                     let importance = self.get_effective_importance(node_id);
-                    self.files.insert(node_id, CachedFile::new(arena_off, 0, self.access_tick, importance));
+                    self.files.insert(
+                        node_id,
+                        CachedFile::new(arena_off, 0, self.access_tick, importance),
+                    );
                     self.current_memory_used += 0;
                 }
             }
         }
 
-        let write_end = offset + data.len();
+        let in_file_write_end = offset + data.len();
 
         serial_println_core!(
-            "file_cache: write node={:#x} offset={} len={} write_end={}",
+            "file_cache: write node={:#x} offset={} len={} in_file_write_end={}",
             node_id,
             offset,
             data.len(),
-            write_end
+            in_file_write_end
         );
 
-        // if the write extends beyond current allocation evict this entry, compact, 
-        // reallocate with the new size, copy old data back, then apply the write
-        let needs_grow = {
-            if let Some(f) = self.files.get(node_id) {
-                write_end > f.arena_offset + (self.arena_push_offset - f.arena_offset).min(f.len + (self.max_memory - self.arena_push_offset))
-                    || write_end > f.len && f.arena_offset + f.len < self.arena_push_offset
-            } else {
-                false
-            }
+        let Some(file) = self.files.get_mut(node_id) else {
+            return Err(FileSystemError::FileNotFound);
         };
+        let file_old_len = file.len;
+        let file_old_arena_offset = file.arena_offset;
+        let needs_grow = file_old_len < in_file_write_end;
         serial_println_core!(
             "file_cache: write node={:#x} needs_grow={}",
             node_id,
@@ -350,14 +405,10 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         );
 
         if needs_grow {
-            let (old_off, old_len) = {
-                let f = self.files.get(node_id).unwrap();
-                (f.arena_offset, f.len)
-            };
-            let new_len = write_end.max(old_len);
-            let extra = new_len - old_len;
+            let new_len = in_file_write_end.max(file_old_len);
+            let extra = new_len - file_old_len;
 
-            let at_tail = old_off + old_len == self.arena_push_offset;
+            let at_tail = file_old_arena_offset + file_old_len == self.arena_push_offset;
 
             if at_tail && self.arena_push_offset + extra <= self.max_memory {
                 // file is at the top of the arena, just extend in-place
@@ -368,9 +419,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                 self.arena[self.arena_push_offset..self.arena_push_offset + extra].fill(0);
                 self.arena_push_offset += extra;
                 self.current_memory_used += extra;
-                if let Some(f) = self.files.get_mut(node_id) {
-                    f.len = new_len;
-                }
+                file.len = new_len;
             } else if self.max_memory - self.arena_push_offset >= new_len {
                 // arena tail has enough contiguous free space to hold the grown file:
                 // copy old data to the tail, zero-fill the extension, no compaction.
@@ -379,14 +428,15 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                     node_id
                 );
                 let new_off = self.arena_push_offset;
-                self.arena.copy_within(old_off..old_off + old_len, new_off);
-                self.arena[new_off + old_len..new_off + new_len].fill(0);
+                self.arena.copy_within(
+                    file_old_arena_offset..file_old_arena_offset + file_old_len,
+                    new_off,
+                );
+                self.arena[new_off + file_old_len..new_off + new_len].fill(0);
                 self.arena_push_offset += new_len;
                 self.current_memory_used += extra;
-                if let Some(f) = self.files.get_mut(node_id) {
-                    f.arena_offset = new_off;
-                    f.len = new_len;
-                }
+                file.arena_offset = new_off;
+                file.len = new_len;
             } else {
                 // no room at the tail; compact with sort_last so this file ends up
                 // at the arena tail with its data intact, then extend in-place.
@@ -394,48 +444,44 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                     "file_cache: write node={:#x} growing by compacting to tail",
                     node_id
                 );
-                self.compact(node_id);
-
-                // evict if the extra bytes still don't fit
-                while self.arena_push_offset + extra > self.max_memory {
-                    if !self.evict_one() {
-                        break;
-                    }
+                if !self.ensure_space(new_len - file_old_len, node_id, true) {
+                    return Err(FileSystemError::CacheFull);
                 }
 
                 if self.arena_push_offset + extra <= self.max_memory {
-                    debug_assert_eq!(
-                        self.files.get(node_id).map(|f| f.arena_offset + f.len),
-                        Some(self.arena_push_offset),
-                        "file must be at arena tail after sort_last compact"
-                    );
-                    self.arena[self.arena_push_offset..self.arena_push_offset + extra].fill(0);
-                    self.arena_push_offset += extra;
-                    self.current_memory_used += extra;
-                    if let Some(f) = self.files.get_mut(node_id) {
-                        f.len = new_len;
+                    // Refetch fresh values after ensure_space - arena_offset may have changed
+                    if let Some(file) = self.files.get_mut(node_id) {
+                        debug_assert_eq!(
+                            file.arena_offset + file.len,
+                            self.arena_push_offset,
+                            "file must be at arena tail after sort_last compact"
+                        );
+                        self.arena[self.arena_push_offset..self.arena_push_offset + extra].fill(0);
+                        self.arena_push_offset += extra;
+                        self.current_memory_used += extra;
+                        file.len = new_len;
                     }
                 }
             }
         }
 
-        if let Some(cached) = self.files.get_mut(node_id) {
-            let dst_off = cached.arena_offset + offset;
+        if let Some(file) = self.files.get_mut(node_id) {
+            let dst_off = file.arena_offset + offset;
             serial_println_core!(
-                "file_cache: write copy_from_slice data: node={:#x} offset={} len={} dst_off={} cached_len={}",
+                "file_cache: write copy_from_slice data: node={:#x} offset={} len={} dst_off={} file_len={}",
                 node_id,
                 offset,
                 data.len(),
                 dst_off,
-                cached.len
+                file.len
             );
             self.arena[dst_off..dst_off + data.len()].copy_from_slice(data);
-            if write_end > cached.len {
-                self.current_memory_used += write_end - cached.len;
-                cached.len = write_end;
+            if in_file_write_end > file.len {
+                self.current_memory_used += in_file_write_end - file.len;
+                file.len = in_file_write_end;
             }
-            cached.is_dirty = true;
-            cached.last_access = self.access_tick;
+            file.is_dirty = true;
+            file.last_access = self.access_tick;
             serial_println_core!(
                 "file_cache: write node={:#x} offset={} len={} dirty",
                 node_id,
@@ -453,7 +499,8 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             if cached.is_dirty {
                 let off = cached.arena_offset;
                 let len = cached.len;
-                self.driver.write_file(node_id, 0, &self.arena[off..off + len])?;
+                self.driver
+                    .write_file(node_id, 0, &self.arena[off..off + len])?;
                 cached.is_dirty = false;
                 serial_println_core!("file_cache: flushed node={:#x}", node_id);
             }
@@ -467,7 +514,8 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                 if cached.is_dirty {
                     let off = cached.arena_offset;
                     let len = cached.len;
-                    self.driver.write_file(node_id, 0, &self.arena[off..off + len])?;
+                    self.driver
+                        .write_file(node_id, 0, &self.arena[off..off + len])?;
                     cached.is_dirty = false;
                     serial_println_core!("file_cache: flush_nodes: flushed node={:#x}", node_id);
                 }
@@ -489,7 +537,8 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                 if cached.is_dirty {
                     let off = cached.arena_offset;
                     let len = cached.len;
-                    self.driver.write_file(node_id, 0, &self.arena[off..off + len])?;
+                    self.driver
+                        .write_file(node_id, 0, &self.arena[off..off + len])?;
                     cached.is_dirty = false;
                     serial_println_core!("file_cache: flush_all: flushed node={:#x}", node_id);
                 }
@@ -603,7 +652,8 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             .unwrap_or(CacheImportance::Normal)
     }
 
-    fn evict_one(&mut self) -> bool {
+    /// Returns the size of the evicted file
+    fn evict_one(&mut self) -> usize {
         let mut best_score: u64 = 0;
         let mut best_id: FileNodeHandle = INVALID_NODE_HANDLE;
 
@@ -624,7 +674,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         }
 
         if best_id == INVALID_NODE_HANDLE {
-            return false;
+            return 0;
         }
 
         // flush before eviction if dirty
@@ -632,12 +682,16 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             if cached.is_dirty {
                 let off = cached.arena_offset;
                 let len = cached.len;
-                if self.driver.write_file(best_id, 0, &self.arena[off..off + len]).is_err() {
+                if self
+                    .driver
+                    .write_file(best_id, 0, &self.arena[off..off + len])
+                    .is_err()
+                {
                     serial_println_core!(
                         "file_cache: evict flush failed for node={:#x}, skipping",
                         best_id
                     );
-                    return false;
+                    return 0;
                 }
             }
         }
@@ -645,9 +699,85 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         if let Some(cached) = self.files.remove(best_id) {
             self.current_memory_used -= cached.len;
             serial_println_core!("file_cache: evicted node={:#x} len={}", best_id, cached.len);
-            return true;
+            return cached.len;
         }
 
-        false
+        0
+    }
+
+    /// Returns the size of the evicted file
+    fn evict_one_keep_alive(
+        &mut self,
+        file_to_keep: FileNodeHandle,
+        force_eviction: bool,
+    ) -> usize {
+        serial_println_core!(
+            "file_cache: evict_one_keep_alive: file_to_keep={:#x} force_eviction={}",
+            file_to_keep,
+            force_eviction
+        );
+        let mut best_score: u64 = 0;
+        let mut best_id: FileNodeHandle = INVALID_NODE_HANDLE;
+
+        for (&node_id, cached) in self.files.iter() {
+            if (cached.pinned && !force_eviction) || node_id == file_to_keep {
+                continue;
+            }
+            let priority = cached.importance.eviction_priority();
+            if priority == u64::MAX && !force_eviction {
+                continue;
+            }
+            let age = self.access_tick.wrapping_sub(cached.last_access);
+            let score = priority.saturating_mul(age.max(1));
+            if score > best_score {
+                best_id = node_id;
+                best_score = score;
+            }
+        }
+
+        if best_id == INVALID_NODE_HANDLE {
+            serial_println_core!("file_cache: evict_one_keep_alive: no suitable file to evict");
+            return 0;
+        }
+
+        // flush before eviction if dirty
+        if let Some(cached) = self.files.get(best_id) {
+            serial_println_core!(
+                "file_cache: evict_one_keep_alive: best_id={:#x} is_dirty={} importance={}",
+                best_id,
+                cached.is_dirty,
+                cached.importance
+            );
+            if cached.is_dirty {
+                let off = cached.arena_offset;
+                let len = cached.len;
+                serial_println_core!(
+                    "file_cache: evict_one_keep_alive: flushing dirty file best_id={:#x} len={}",
+                    best_id,
+                    len
+                );
+                if self
+                    .driver
+                    .write_file(best_id, 0, &self.arena[off..off + len])
+                    .is_err()
+                {
+                    serial_println_core!(
+                        "file_cache: evict flush failed for node={:#x}, skipping",
+                        best_id
+                    );
+                    return 0;
+                }
+            }
+        }
+
+        if let Some(cached) = self.files.remove(best_id) {
+            self.current_memory_used -= cached.len;
+            serial_println_core!("file_cache: evicted node={:#x} len={}", best_id, cached.len);
+            return cached.len;
+        }
+
+        serial_println_core!("file_cache: evict_one_keep_alive: failed to evict file");
+
+        0
     }
 }

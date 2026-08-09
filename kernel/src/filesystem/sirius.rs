@@ -124,6 +124,8 @@ pub enum FileSystemError {
     NoSpace,
     DirectoryFull,
     IoError,
+    FileNotFound,
+    CacheFull,
     NotSupported,
 }
 

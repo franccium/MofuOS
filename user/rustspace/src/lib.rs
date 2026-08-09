@@ -429,6 +429,18 @@ impl Arena {
         }
     }
 
+    pub fn preallocate(&self, prealloc_size: usize) {
+        let base = unsafe { sys_allocate(prealloc_size) };
+        if base != INVALID_ALLOC {
+            self.cursor
+                .store(base as usize, core::sync::atomic::Ordering::Release);
+            self.end.store(
+                base as usize + prealloc_size,
+                core::sync::atomic::Ordering::Release,
+            );
+        }
+    }
+
     unsafe fn grow(&self) -> bool {
         let base = unsafe { sys_allocate(SLAB_SIZE) };
         if base != INVALID_ALLOC {

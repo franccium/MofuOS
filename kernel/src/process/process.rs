@@ -21,6 +21,10 @@ pub const MAX_PRIORITY: u8 = 8;
 pub const RFLAGS_DEFAULT: u64 = 0x202;
 pub const DEFAULT_NEW_PROCESS_STACK_SIZE: u64 = 1 * 1024 * 1024;
 
+pub const PROCESS_HEAP_SIZE_BYTES: u64 = 2 * 1024 * 1024;
+pub const PROCESS_HEAP_VIRT_START: u64 = 0x0000_0000_6000_0000;
+pub const PROCESS_HEAP_VIRT_END: u64 = PROCESS_HEAP_VIRT_START + PROCESS_HEAP_SIZE_BYTES;
+
 pub type PID = usize;
 
 //TODO: temporary until no scheduler
@@ -163,8 +167,8 @@ impl Process {
             top_page_table_phys: x86_64::PhysAddr::new(page_table_base_phys),
             stack_top: x86_64::VirtAddr::new(stack_top),
             stack_size: 0,
-            heap_start: x86_64::VirtAddr::new(0x0000_0000_6000_0000),
-            heap_end: x86_64::VirtAddr::new(0x0000_0000_6000_0000),
+            heap_start: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_START),
+            heap_end: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_END),
             mapped_regions: alloc::vec::Vec::new(),
         };
 
