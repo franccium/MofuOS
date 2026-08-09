@@ -55,6 +55,7 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-device ide-hd,drive=ata0,bus=ide.0,unit=0 \
 		-drive file=storage/$(ATA_DISK_IMG),format=raw,id=ata0,if=none \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		-device i8042 \
 		-serial unix:$(SOCKET1),server \
 		-serial unix:$(SOCKET2),server,nowait \
 		-no-reboot \

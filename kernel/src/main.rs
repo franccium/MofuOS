@@ -323,7 +323,7 @@ fn main() -> ! {
                 let dt: u64 = time_end - time_start;
                 time_elapsed += dt;
                 //serial_println_core!("Loop time: {} ns; {} ms", dt, dt as f32 / 1_000_000.0);
-                //hlt();
+                hlt();
             }
         }
     }
