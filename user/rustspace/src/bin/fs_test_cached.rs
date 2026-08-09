@@ -917,12 +917,14 @@ pub extern "C" fn main() -> ! {
 
         let (end_cycle, _) = rustspace::tsc_read();
         let total_cycles = end_cycle - start_cycle;
+        let total_us = cycles_to_us(total_cycles);
         println!("");
         println!("==========================================");
         println!(
-            "  Total: {} cycles ({}us)",
+            "  Total: {} cycles ({}us, {}ms)",
             total_cycles,
-            cycles_to_us(total_cycles)
+            total_us,
+            total_us / 1000
         );
         println!("==========================================");
 

@@ -16,6 +16,10 @@ REAL TODO:
 - hash algorithms
 
 - better perf testing
+    repetitions
+
+- file cache arena may have a compacting on all operations problem when it reaches the limit, try to do some smart eviction up to some threshold free space
+- file cache - maybe keep a list of files sorted by their importance or something better, so we dont have to iterate and choose importance for evict_one, especially for when multiple evictions have to happen
 
 - !!! MAX_CORES set to the actual count of the cores causes a page fault on the (MAX_CORES-1) core after entering scheduler loop now, it used to work fine
 

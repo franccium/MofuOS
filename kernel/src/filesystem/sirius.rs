@@ -23,11 +23,6 @@ macro_rules! serial_println_core {
     };
 }
 
-macro_rules! serial_println_core_err {
-    ($($arg:tt)*) => {
-        $crate::serial_println_core!($($arg)*);
-    };
-}
 
 #[cfg(feature = "use_cached_fs")]
 lazy_static! {
@@ -169,24 +164,8 @@ pub struct FsDriverAdapter<D: FilesystemDriver>(pub D);
 
 #[cfg(feature = "use_cached_fs")]
 impl<D: FilesystemDriver> CacheFilesystemDriver for FsDriverAdapter<D> {
-    fn read_file(&mut self, node_id: FileNodeHandle) -> FileSystemResult<Vec<u8>> {
-        let node = self.0.get_node(node_id).map_err(|_| FileSystemError::NotFound)?;
-        let mut buffer = vec![0u8; node.size];
-        self.0.read_file(node_id, 0, &mut buffer).map_err(|_| FileSystemError::IoError)?;
-        Ok(buffer)
-    }
-
-    fn read_file_range(
-        &mut self,
-        node_id: FileNodeHandle,
-        offset: usize,
-        len: usize,
-    ) -> FileSystemResult<Vec<u8>> {
-        let node = self.0.get_node(node_id).map_err(|_| FileSystemError::NotFound)?;
-        let read_len = len.min(node.size.saturating_sub(offset));
-        let mut buffer = vec![0u8; read_len];
-        self.0.read_file(node_id, offset, &mut buffer).map_err(|_| FileSystemError::IoError)?;
-        Ok(buffer)
+    fn read_file_into(&mut self, node_id: FileNodeHandle, out: &mut [u8]) -> FileSystemResult<usize> {
+        self.0.read_file(node_id, 0, out).map_err(|_| FileSystemError::IoError)
     }
 
     fn write_file(
@@ -266,30 +245,8 @@ impl<D: FilesystemDriver> FilesystemDriver for CachedDriver<D> {
         offset: usize,
         out_buffer: &mut [u8],
     ) -> FileSystemResult<usize> {
-        let _ = self.cache.driver.0.get_node(node_id)?;
-
-        match self.cache.read_file(node_id) {
-            Ok(cached_data) => {
-                if cached_data.is_empty() || offset >= cached_data.len() {
-                    return Ok(0);
-                }
-                let len = out_buffer.len().min(cached_data.len().saturating_sub(offset));
-                if len > 0 {
-                    out_buffer[..len].copy_from_slice(&cached_data[offset..offset + len]);
-                }
-                serial_println_core!(
-                    "CachedDriver: cache hit node={:#x} offset={} len={}",
-                    node_id,
-                    offset,
-                    len
-                );
-                Ok(len)
-            }
-            Err(e) => {
-                serial_println_core_err!("CachedDriver: read_file error: {:?}", e);
-                Err(e)
-            }
-        }
+        // read directly into caller's buffer — no intermediate Vec, no clone
+        self.cache.read_file_range(node_id, offset, out_buffer)
     }
 
     fn write_file(
