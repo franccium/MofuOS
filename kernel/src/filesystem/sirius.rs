@@ -1,5 +1,7 @@
+use crate::data_structures::hash_map_fx::FxHashMap;
 use crate::filesystem::fat32::Fat32Driver;
 use crate::filesystem::fat32::FileNodeHandle;
+use crate::filesystem::file_cache::FS_CACHE_MAP_FILE_COUNT;
 use crate::io::ata::AtaPioDriver;
 use crate::io::disk::{DiskOpError, MockDiskDevice, SECTOR_SIZE, get_disk_mgr, init_disk};
 use crate::serial_println_core;
@@ -152,8 +154,8 @@ pub trait FilesystemDriver: Send + Sync {
     ) -> FileSystemResult<usize>;
 
     fn find_node(&self, path: &str) -> FileSystemResult<FileNodeHandle>;
-    fn get_node(&self, node_id: FileNodeHandle) -> FileSystemResult<FileNode>;
-    fn list_directory(&self, node_id: FileNodeHandle) -> FileSystemResult<Vec<FileNode>>;
+    fn get_node(&mut self, node_id: FileNodeHandle) -> FileSystemResult<FileNode>;
+    fn list_directory(&mut self, node_id: FileNodeHandle) -> FileSystemResult<Vec<FileNode>>;
 
     fn create_file(
         &mut self,
@@ -196,7 +198,13 @@ impl<D: FilesystemDriver> CacheFilesystemDriver for FsDriverAdapter<D> {
             .map_err(|_| FileSystemError::IoError)
     }
 
-    fn file_size(&self, node_id: FileNodeHandle) -> FileSystemResult<usize> {
+    fn get_node(&mut self, node_id: FileNodeHandle) -> FileSystemResult<FileNode> {
+        self.0
+            .get_node(node_id)
+            .map_err(|_| FileSystemError::IoError)
+    }
+
+    fn file_size(&mut self, node_id: FileNodeHandle) -> FileSystemResult<usize> {
         self.0
             .get_node(node_id)
             .map(|n| n.size)
@@ -249,6 +257,10 @@ impl<D: FilesystemDriver> CachedDriver<D> {
         self.cache.evict_directory(node_id)
     }
 
+    fn get_node_cached(&mut self, node_id: FileNodeHandle) -> FileSystemResult<FileNode> {
+        self.cache.get_node_cached(node_id)
+    }
+
     pub fn flush_node(&mut self, node_id: FileNodeHandle) -> FileSystemResult<()> {
         self.cache.flush_file(node_id)
     }
@@ -290,11 +302,11 @@ impl<D: FilesystemDriver> FilesystemDriver for CachedDriver<D> {
         self.cache.driver.0.find_node(path)
     }
 
-    fn get_node(&self, node_id: FileNodeHandle) -> FileSystemResult<FileNode> {
-        self.cache.driver.0.get_node(node_id)
+    fn get_node(&mut self, node_id: FileNodeHandle) -> FileSystemResult<FileNode> {
+        self.cache.get_node_cached(node_id)
     }
 
-    fn list_directory(&self, node_id: FileNodeHandle) -> FileSystemResult<Vec<FileNode>> {
+    fn list_directory(&mut self, node_id: FileNodeHandle) -> FileSystemResult<Vec<FileNode>> {
         self.cache.driver.0.list_directory(node_id)
     }
 
@@ -333,12 +345,12 @@ impl<D: FilesystemDriver> Sirius<D> {
         Self { driver }
     }
 
-    pub fn resolve_path(&self, path: &str) -> FileSystemResult<FileNode> {
+    pub fn resolve_path(&mut self, path: &str) -> FileSystemResult<FileNode> {
         let node_id = self.driver.find_node(path)?;
         self.driver.get_node(node_id)
     }
 
-    pub fn open_file(&self, path: &str) -> FileSystemResult<FileNode> {
+    pub fn open_file(&mut self, path: &str) -> FileSystemResult<FileNode> {
         let node = self.resolve_path(path)?;
         if node.file_type == FileType::File {
             Ok(node)
@@ -347,7 +359,7 @@ impl<D: FilesystemDriver> Sirius<D> {
         }
     }
 
-    pub fn list_directory(&self, path: &str) -> FileSystemResult<Vec<FileNode>> {
+    pub fn list_directory(&mut self, path: &str) -> FileSystemResult<Vec<FileNode>> {
         let node = self.resolve_path(path)?;
         serial_println_core!(
             "Sirius: list_directory: '{}' node={:#x} type={:?}",

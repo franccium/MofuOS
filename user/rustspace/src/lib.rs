@@ -316,10 +316,10 @@ pub unsafe fn sys_read_file(fd: usize, buf: &mut [u8]) -> usize {
             buf.len() as u64,
         )
     };
-    if ret == u64::MAX {
-        usize::MAX
-    } else {
+    if ret != u64::MAX {
         ret as usize
+    } else {
+        usize::MAX
     }
 }
 
@@ -336,10 +336,10 @@ pub unsafe fn sys_read_file_at(fd: usize, offset: usize, buf: &mut [u8]) -> usiz
             buf.len() as u64,
         )
     };
-    if ret == u64::MAX {
-        usize::MAX
-    } else {
+    if ret != u64::MAX {
         ret as usize
+    } else {
+        usize::MAX
     }
 }
 

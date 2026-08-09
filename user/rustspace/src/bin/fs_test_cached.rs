@@ -1091,39 +1091,32 @@ unsafe fn suite_eviction_under_pressure() {
         let mut content_ok = true;
         //chunk_buf.clear();
         read_buf.clear();
+        read_buf.set_len(FILE_SIZE);
 
         let mut file_stat = StatFlat::zeroed();
         unsafe { sys_stat_file(path, &mut file_stat) };
         let file_size_stat = file_stat.size as usize;
         println!("  file size in stat: {}, {} bytes", path, file_size_stat);
 
-        loop {
-            let n = unsafe { sys_read_file(fd, &mut read_buf) };
-            println!("  read {} bytes from {}", n, path);
-            if n == 0 {
-                break;
-            }
-            if n == usize::MAX {
-                content_ok = false;
-                break;
-            }
-            if read_buf[..n].iter().any(|&b| b != FILL[i]) {
-                content_ok = false;
-                println!(
-                    "  ERROR: file {} content mismatch at offset {}",
-                    path, total_read
-                );
-                break;
-            }
-            total_read += n;
+        let n = unsafe { sys_read_file(fd, &mut read_buf) };
+        println!("  read {} bytes from {}", n, path);
+        if n == usize::MAX {
+            content_ok = false;
         }
+        if read_buf[..n].iter().any(|&b| b != FILL[i]) {
+            content_ok = false;
+            println!(
+                "  ERROR: file {} content mismatch at offset {}",
+                path, total_read
+            );
+        }
+        total_read += n;
         unsafe { sys_close_file(fd) };
         let (end, _) = unsafe { tsc_read() };
 
-        if content_ok {
-            expect_eq!("file size correct", total_read, FILE_SIZE);
-        }
         expect_true!("file content intact after eviction", content_ok);
+        expect_eq!("file size correct", total_read, FILE_SIZE);
+        expect_eq!("file size matches stat", total_read, file_size_stat);
         println!(
             "  verified {} MB from {} in {} cycles",
             FILE_SIZE / (1024 * 1024),
@@ -1135,6 +1128,7 @@ unsafe fn suite_eviction_under_pressure() {
     // Now read file B again when it was loaded cold above after eviction.
     // This second read should be a cache hit (recently loaded).
     read_buf.clear();
+    read_buf.set_len(FILE_SIZE);
     let (start_hot, _) = unsafe { tsc_read() };
     let fd_b = unsafe { sys_open_file(PATH_B, FD_FLAG_READ) };
     let mut hot_read = 0usize;
@@ -1390,33 +1384,33 @@ pub extern "C" fn main() -> ! {
         let (start_cycle, core) = rustspace::tsc_read();
         println!("Core: {}, Start Cycle: {}", core, start_cycle);
 
-        //suite_cache_basics();
-        //suite_repeated_reads();
-        //suite_directory_eviction();
-        //
-        //suite_stat_and_list();
-        //suite_create_write_read_delete();
-        //suite_sequential_reads();
-        //suite_directories();
-        //suite_error_cases();
-        //suite_overwrite();
-        //
-        //suite_write_throughput();
-        //suite_sequential_write_batching();
-        //suite_dirty_state();
-        //suite_multi_file_flush();
+        suite_cache_basics();
+        suite_repeated_reads();
+        suite_directory_eviction();
+
+        suite_stat_and_list();
+        suite_create_write_read_delete();
+        suite_sequential_reads();
+        suite_directories();
+        suite_error_cases();
+        suite_overwrite();
+
+        suite_write_throughput();
+        suite_sequential_write_batching();
+        suite_dirty_state();
+        suite_multi_file_flush();
 
         ALLOCATOR.preallocate(2 * 1024 * 1024);
 
-        //suite_arena_grow_at_tail();
-        //suite_arena_grow_in_middle();
-        //suite_partial_write_preserves_prefix();
+        suite_arena_grow_at_tail();
+        suite_arena_grow_in_middle();
+        suite_partial_write_preserves_prefix();
 
         #[cfg(feature = "test_big_files")]
         suite_eviction_under_pressure();
 
-        //suite_pin_survives_eviction();
-        //suite_write_after_close();
+        suite_pin_survives_eviction();
+        suite_write_after_close();
 
         let (end_cycle, _) = rustspace::tsc_read();
         let total_cycles = end_cycle - start_cycle;

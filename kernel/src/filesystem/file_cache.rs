@@ -3,9 +3,10 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::data_structures::hash_map_fx::FxHashMap;
+use crate::filesystem::FileNode;
 use crate::filesystem::fat32::{FileNodeHandle, INVALID_NODE_HANDLE};
 use crate::filesystem::sirius::FileSystemError;
-use crate::serial_println_core;
+use crate::{interrupts, serial_println_core};
 
 //pub const FS_CACHE_SIZE: usize = 16 * 1024 * 1024;
 pub const FS_CACHE_SIZE: usize = 32 * 1024;
@@ -44,9 +45,11 @@ pub trait CacheFilesystemDriver {
         data: &[u8],
     ) -> Result<usize, FileSystemError>;
 
-    fn file_size(&self, node_id: FileNodeHandle) -> Result<usize, FileSystemError>;
+    fn file_size(&mut self, node_id: FileNodeHandle) -> Result<usize, FileSystemError>;
 
     fn read_dir(&mut self, node_id: FileNodeHandle) -> Result<Vec<String>, FileSystemError>;
+
+    fn get_node(&mut self, node_id: FileNodeHandle) -> Result<FileNode, FileSystemError>;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -137,6 +140,10 @@ pub struct FileCache<D: CacheFilesystemDriver> {
     max_memory: usize,
     access_tick: u64,
     files: FxHashMap<FileNodeHandle, CachedFile>,
+
+     // TODO: need something better, this is now for correctness of file stats, so they dont get stale data if we dont flush
+    file_nodes: FxHashMap<FileNodeHandle, FileNode>,
+
     directory_children: FxHashMap<FileNodeHandle, Vec<FileNodeHandle>>,
     directory_hints: FxHashMap<FileNodeHandle, CacheImportance>,
 }
@@ -153,6 +160,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             max_memory,
             access_tick: 0,
             files: FxHashMap::with_capacity(FS_CACHE_MAP_FILE_COUNT),
+            file_nodes: FxHashMap::with_capacity(FS_CACHE_MAP_FILE_COUNT),
             directory_children: FxHashMap::default(),
             directory_hints: FxHashMap::default(),
         }
@@ -252,6 +260,16 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
     ) -> Result<usize, FileSystemError> {
         self.access_tick = self.access_tick.wrapping_add(1);
 
+        serial_println_core!(
+            "file_cache: read node={:#x} offset={} len={}; arena_push_offset={} current_memory_used={}/{}",
+            node_id,
+            offset,
+            out.len(),
+            self.arena_push_offset,
+            self.current_memory_used,
+            self.max_memory
+        );
+
         if let Some(cached) = self.files.get_mut(node_id) {
             cached.last_access = self.access_tick;
             let file_len = cached.len;
@@ -323,6 +341,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             node_id,
             CachedFile::new(arena_off, read_bytes, self.access_tick, importance),
         );
+        self.file_nodes.insert(node_id, self.driver.get_node(node_id)?);
         self.current_memory_used += read_bytes;
 
         serial_println_core!(
@@ -334,6 +353,12 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         );
 
         if offset >= read_bytes {
+            serial_println_core!(
+                "file_cache: read node={:#x} offset={} beyond file size {}",
+                node_id,
+                offset,
+                read_bytes
+            );
             return Ok(0);
         }
         let copy_len = out.len().min(read_bytes - offset);
@@ -378,6 +403,15 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                         node_id,
                         CachedFile::new(arena_off, read, self.access_tick, importance),
                     );
+
+                    let mut node = self.driver.get_node(node_id)?;
+                    if let Some(node) = self.file_nodes.get_mut(node_id) {
+                        *node = node.clone();
+                    }
+                    else {
+                        self.file_nodes.insert(node_id, node);
+                    }
+
                     self.current_memory_used += read;
                 }
             } else {
@@ -394,6 +428,15 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                         node_id,
                         CachedFile::new(arena_off, 0, self.access_tick, importance),
                     );
+
+                    let mut node = self.driver.get_node(node_id)?;
+                    if let Some(node) = self.file_nodes.get_mut(node_id) {
+                        *node = node.clone();
+                    }
+                    else {
+                        self.file_nodes.insert(node_id, node);
+                    }
+
                     self.current_memory_used += 0;
                 }
             }
@@ -499,6 +542,17 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             }
             file.is_dirty = true;
             file.last_access = self.access_tick;
+
+            let mut node = self.driver.get_node(node_id)?;
+            if let Some(node) = self.file_nodes.get_mut(node_id) {
+                *node = node.clone();
+                node.size = file.len;
+                node.modified_time = interrupts::tsc_timestamp_us() as u32; //TODO:
+            }
+            else {
+                self.file_nodes.insert(node_id, node);
+            }
+
             serial_println_core!(
                 "file_cache: write node={:#x} offset={} len={} dirty",
                 node_id,
@@ -508,6 +562,19 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             Ok(data.len())
         } else {
             Err(FileSystemError::IoError)
+        }
+    }
+
+    pub fn get_node_cached(&mut self, node_id: FileNodeHandle) -> Result<FileNode, FileSystemError> {
+        serial_println_core!("file_cache: get_node_cached node={:#x}", node_id);
+        if let Some(node) = self.file_nodes.get(node_id) {
+            serial_println_core!("file_cache: get_node_cached hit node={:#x}, size: {}", node_id, node.size);
+            Ok(node.clone())
+        } else {
+            let node = self.driver.get_node(node_id)?;
+            self.file_nodes.insert(node_id, node.clone());
+            serial_println_core!("file_cache: get_node_cached miss node={:#x}, inserting, size: {}", node_id, node.size);
+            Ok(node)
         }
     }
 

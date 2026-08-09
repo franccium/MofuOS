@@ -1,5 +1,6 @@
 use crate::filesystem::sirius::{DirEntryFlat, FS_NAME_LEN, FilesystemDriver, StatFlat};
 use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
+use crate::io::serial;
 use crate::memory::get_frame_allocator;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
 use crate::process::CORE_POOL;
@@ -475,7 +476,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let flags = frame.arg3 as u8;
 
             let node_id: usize = {
-                let sirius_guard = crate::filesystem::sirius::get_sirius();
+                let mut sirius_guard = crate::filesystem::sirius::get_sirius();
                 match sirius_guard.resolve_path(&path) {
                     Ok(node) => node.node_id,
                     Err(e) => {
@@ -493,10 +494,8 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 match pm.get_process_mut(pid) {
                     Ok(proc) => {
                         let idx = proc.file_descriptors.size;
-                        proc.file_descriptors.push(FileDescriptor {
-                            node_id,
-                            flags,
-                        });
+                        proc.file_descriptors
+                            .push(FileDescriptor { node_id, flags });
                         idx
                     }
                     Err(_) => return FileDescriptor::INVALID_FD,
@@ -536,6 +535,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let offset = frame.arg2 as usize;
             let buffer_ptr = frame.arg3 as usize;
             let count = frame.arg4 as usize;
+            serial_println_core!("sys_read_file: fd={} offset={} buffer_ptr={:p} count={}", fd, offset, buffer_ptr as *const u8, count);
 
             if !validate_user_ptr(buffer_ptr, count) {
                 return FileDescriptor::INVALID_FD;
@@ -661,7 +661,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             }
 
             let node = {
-                let sirius = crate::filesystem::sirius::get_sirius();
+                let mut sirius = crate::filesystem::sirius::get_sirius();
                 match sirius.resolve_path(&path) {
                     Ok(file_node) => file_node,
                     Err(e) => {
@@ -682,6 +682,8 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             out.created_time = node.created_time;
             out.modified_time = node.modified_time;
 
+            serial_println_core!("sys_stat: {}, size: {}", path, out.size);
+
             0
         }
 
@@ -698,7 +700,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             }
 
             let entries = {
-                let sirius = crate::filesystem::sirius::get_sirius();
+                let mut sirius = crate::filesystem::sirius::get_sirius();
                 match sirius.list_directory(&path) {
                     Ok(v) => v,
                     Err(e) => {

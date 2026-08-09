@@ -953,7 +953,7 @@ impl FilesystemDriver for Fat32Driver {
         Ok(data_written)
     }
 
-    fn get_node(&self, node_id: FileNodeHandle) -> FileSystemResult<FileNode> {
+    fn get_node(&mut self, node_id: FileNodeHandle) -> FileSystemResult<FileNode> {
         let (cluster, parent_cluster, _) = decode_node_id(node_id);
 
         if cluster != ROOT_CLUSTER {
@@ -974,7 +974,7 @@ impl FilesystemDriver for Fat32Driver {
         }
     }
 
-    fn list_directory(&self, node_id: FileNodeHandle) -> FileSystemResult<Vec<FileNode>> {
+    fn list_directory(&mut self, node_id: FileNodeHandle) -> FileSystemResult<Vec<FileNode>> {
         let (dir_cluster, _, attributes) = decode_node_id(node_id);
 
         if !is_directory(attributes) {
