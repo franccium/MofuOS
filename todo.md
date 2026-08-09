@@ -37,6 +37,8 @@ REAL TODO:
 - now that we can redirect logs, write automated tests for cretain parts of kernel and for userspace programs
 - create test suite userspace programs that will run and test stuff
 
+- deleting a file should invalidate cache and its file_nodes cache
+
 - make sure loaded program sections get page-aligned and have actual proper protection flags
 
 - a way to prealloc space for userspace process, let the process specify a requested preallocated size that sys_allocate and the user arena global allocator will know about

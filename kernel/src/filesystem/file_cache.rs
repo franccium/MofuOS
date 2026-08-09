@@ -719,6 +719,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             self.current_memory_used -= cached.len;
             serial_println_core!("file_cache: invalidated node={:#x}", node_id);
         }
+        self.file_nodes.remove(node_id);
     }
 
     pub fn clear(&mut self) {
