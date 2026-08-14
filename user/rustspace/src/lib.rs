@@ -546,6 +546,30 @@ pub enum KeyState {
 #[repr(u32)]
 pub enum Keys {
     ArrowUp = 0x110000,
+    ArrowDown = 0x110001,
+    ArrowLeft = 0x110002,
+    ArrowRight = 0x110003,
+    LeftAlt = 0x120000,
+    Backspace = 0x080000,
+    Tab = 0x090000,
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct MouseButtons: u16 {
+        const LEFT = 0b0000_0001;
+        const RIGHT = 0b0000_0010;
+        const MIDDLE = 0b0000_0100;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseEvent {
+    pub x_delta: i16,
+    pub y_delta: i16,
+    pub buttons: MouseButtons,
+    pub x_overflow: bool,
+    pub y_overflow: bool,
 }
 
 pub struct AsciiChar;
@@ -616,6 +640,24 @@ impl EventReader {
                 return event;
             }
             unsafe { sys_yield() }
+        }
+    }
+
+    pub fn decode_mouse(&self) -> MouseEvent {
+        let x_delta = self.value as i32 as i16;
+        let y_delta = (self.extra & 0xFFFF) as i16 as i16;
+        let buttons = MouseButtons::from_bits_truncate(((self.extra >> 16) as u16) & 0x07);
+
+        let overflow_bits = (self.extra >> 19) & 0x03;
+        let x_overflow = (overflow_bits & 0x01) != 0;
+        let y_overflow = (overflow_bits & 0x02) != 0;
+
+        MouseEvent {
+            x_delta,
+            y_delta,
+            buttons,
+            x_overflow,
+            y_overflow,
         }
     }
 }

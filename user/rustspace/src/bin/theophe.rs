@@ -332,24 +332,32 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
 
     pub fn handle_event(&mut self, event: InputEvent) {
         let v = event.value;
-        if v == Keys::ArrowUp as u32 {
-            self.recall_last_command();
-        } else if let Some(c) = char::from_u32(v) {
-            match c {
-                AsciiChar::BACKSPACE => self.backspace(),
-                AsciiChar::NEWLINE | AsciiChar::CARRIAGE_RETURN => {
-                    self.last_command = self.lines[self.curr_line_idx];
-                    let cmd = self.last_command;
-                    self.newline();
-                    self.execute_command(&cmd);
+        match event.event_type {
+            EventType::KeyEvent => {
+                if v == Keys::ArrowUp as u32 {
+                    self.recall_last_command();
+                } else if let Some(c) = char::from_u32(v) {
+                    match c {
+                        AsciiChar::BACKSPACE => self.backspace(),
+                        AsciiChar::NEWLINE | AsciiChar::CARRIAGE_RETURN => {
+                            self.last_command = self.lines[self.curr_line_idx];
+                            let cmd = self.last_command;
+                            self.newline();
+                            self.execute_command(&cmd);
+                        }
+                        c if !c.is_control() => {
+                            self.write_bytes(&[c as u8]);
+                        }
+                        _ => {}
+                    }
                 }
-                c if !c.is_control() => {
-                    self.write_bytes(&[c as u8]);
-                }
-                _ => {}
+                self.needs_redraw = true;
             }
+            EventType::MouseEvent => {
+                let mouse_event = event.decode_mouse();
+            }
+            EventType::None => {}
         }
-        self.needs_redraw = true;
     }
 }
 
@@ -424,7 +432,7 @@ pub extern "C" fn main() -> ! {
         // terminal.write_line(&msg);
         // }
 
-        rustspace::println!("theophe: loop - begin");
+        //rustspace::println!("theophe: loop - begin");
 
         let backbuffer_redraw_required = terminal.needs_redraw;
         if terminal.needs_redraw {
@@ -440,7 +448,7 @@ pub extern "C" fn main() -> ! {
         //unsafe { rustspace::sys_yield() };
 
         frame = frame.wrapping_add(1);
-        rustspace::println!("theophe: loop - end");
+        //rustspace::println!("theophe: loop - end");
     }
 
     unsafe { rustspace::sys_exit(0) };

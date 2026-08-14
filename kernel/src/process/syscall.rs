@@ -443,7 +443,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                     w.buffer.present();
                 }
             }
-            serial_println_core!("sys_present_window: window_id={} presented", window_id);
+            //serial_println_core!("sys_present_window: window_id={} presented", window_id);
             drop(windows);
             drop(compositor);
             0

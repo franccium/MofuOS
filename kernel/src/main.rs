@@ -261,8 +261,9 @@ fn main() -> ! {
         serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
         init_compositor(fb_width as u32, fb_height as u32);
+        compositor::init_input_event_buffer();
         {
-            let compositor = get_compositor();
+            let mut compositor = get_compositor();
             let (window_id, window_buffer) = compositor.create_window(20, 20, 30, 30);
             ///let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
             ///serial_println_core!("Created window with ID: {}", window_id);
@@ -310,7 +311,9 @@ fn main() -> ! {
                 // angle += 45f32;
 
                 window3_buffer.present();
-                get_compositor().compose(fb);
+                let mut compositor = get_compositor();
+                compositor.process_input_events();
+                compositor.compose(fb);
                 let time_end = interrupts::system_uptime_ns();
                 let dt: u64 = time_end - time_start;
                 time_elapsed += dt;
@@ -318,7 +321,9 @@ fn main() -> ! {
             } else {
                 //serial_println_core!("loop");
                 let time_start = interrupts::system_uptime_ns();
-                get_compositor().compose(fb);
+                let mut compositor = get_compositor();
+                compositor.process_input_events();
+                compositor.compose(fb);
                 let time_end = interrupts::system_uptime_ns();
                 let dt: u64 = time_end - time_start;
                 time_elapsed += dt;

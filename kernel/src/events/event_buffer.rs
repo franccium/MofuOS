@@ -13,6 +13,12 @@ pub enum KeyState {
 #[repr(u32)]
 pub enum Keys {
     ArrowUp = 0x110000,
+    ArrowDown = 0x110001,
+    ArrowLeft = 0x110002,
+    ArrowRight = 0x110003,
+    LeftAlt = 0x120000,
+    Backspace = 0x080000,
+    Tab = 0x090000,
 }
 
 bitflags::bitflags! {
@@ -95,11 +101,7 @@ impl InputEvent {
         Self::new(EventType::MouseEvent, value, extra)
     }
 
-    pub fn decode_mouse(&self) -> Option<MouseEvent> {
-        if self.event_type != EventType::MouseEvent {
-            return None;
-        }
-
+    pub fn decode_mouse(&self) -> MouseEvent {
         let x_delta = self.value as i32 as i16;
         let y_delta = (self.extra & 0xFFFF) as i16 as i16;
         let buttons = MouseButtons::from_bits_truncate(((self.extra >> 16) as u16) & 0x07);
@@ -108,13 +110,13 @@ impl InputEvent {
         let x_overflow = (overflow_bits & 0x01) != 0;
         let y_overflow = (overflow_bits & 0x02) != 0;
 
-        Some(MouseEvent {
+        MouseEvent {
             x_delta,
             y_delta,
             buttons,
             x_overflow,
             y_overflow,
-        })
+        }
     }
 }
 

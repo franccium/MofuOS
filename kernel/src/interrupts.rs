@@ -1,5 +1,6 @@
 #![allow(unused)]
 use crate::events::event_buffer::{InputEvent, KeyState, Keys};
+use crate::graphics::compositor;
 use crate::io::serial;
 use crate::process::execution::jump_to_userspace;
 use crate::process::process::DEFAULT_NEW_PROCESS_STACK_SIZE;
@@ -54,6 +55,7 @@ lazy_static! {
 
 const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
+const MOUSE_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
 const PREEMPTION_ENABLED: bool = false;
 
@@ -1160,13 +1162,21 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
         {
             let value = match decoded_key {
                 DecodedKey::Unicode(c) => Some(c as u32),
+                //TODO: this
                 DecodedKey::RawKey(KeyCode::ArrowUp) => Some(Keys::ArrowUp as u32),
+                DecodedKey::RawKey(KeyCode::ArrowDown) => Some(Keys::ArrowDown as u32),
+                DecodedKey::RawKey(KeyCode::ArrowLeft) => Some(Keys::ArrowLeft as u32),
+                DecodedKey::RawKey(KeyCode::ArrowRight) => Some(Keys::ArrowRight as u32),
+                DecodedKey::RawKey(KeyCode::Backspace) => Some(Keys::Backspace as u32),
+                DecodedKey::RawKey(KeyCode::LAlt) => Some(Keys::LeftAlt as u32),
+                DecodedKey::RawKey(KeyCode::Tab) => Some(Keys::Tab as u32),
                 _ => None,
             };
             if let Some(v) = value {
                 serial_println_core!("keyboard_handler: Pushed {:x}", v);
                 let _ = unsafe {
-                    get_shared_input_event_buffer().push(InputEvent::new_key(v, KeyState::Pressed))
+                    compositor::get_input_event_buffer()
+                        .push(InputEvent::new_key(v, KeyState::Pressed));
                 };
             }
 
@@ -1185,7 +1195,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 }
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    serial_println_core!("Mouse interrupt received");
+    if MOUSE_DEBUG_PRINT {
+        serial_println_core!("Mouse interrupt received");
+    }
 
     let mut mouse_port = Port::new(0x60);
     let packet: u8 = unsafe { mouse_port.read() };
@@ -1199,8 +1211,9 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
 
 fn mouse_on_packed_processed(mouse_state: MouseState) {
     use crate::events::event_buffer::{MouseButtons, MouseEvent};
-
-    serial_println_core!("Mouse state: {:?}", mouse_state);
+    if MOUSE_DEBUG_PRINT {
+        serial_println_core!("mouse_on_packed_processed: Mouse state: {:?}", mouse_state);
+    }
 
     let buttons = {
         let mut mouse_buttons = MouseButtons::empty();
@@ -1221,15 +1234,18 @@ fn mouse_on_packed_processed(mouse_state: MouseState) {
 
     let mouse_event = MouseEvent {
         x_delta: mouse_state.get_x(),
-        y_delta: mouse_state.get_y(),
+        y_delta: -mouse_state.get_y(),
         buttons,
         x_overflow,
         y_overflow,
     };
 
-    match unsafe { get_shared_input_event_buffer().push(InputEvent::new_mouse(mouse_event)) } {
+    let input_event = InputEvent::new_mouse(mouse_event);
+    match unsafe { compositor::get_input_event_buffer().push(input_event) } {
         Ok(()) => {
-            serial_println_core!("Mouse event pushed to buffer: {:?}", mouse_event);
+            if MOUSE_DEBUG_PRINT {
+                serial_println_core!("Mouse event pushed to buffer: {:?}", mouse_event);
+            }
         }
         Err(e) => {
             serial_println_core!("Failed to push mouse event to buffer: {:?}", e);
