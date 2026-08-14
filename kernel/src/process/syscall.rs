@@ -535,7 +535,13 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let offset = frame.arg2 as usize;
             let buffer_ptr = frame.arg3 as usize;
             let count = frame.arg4 as usize;
-            serial_println_core!("sys_read_file: fd={} offset={} buffer_ptr={:p} count={}", fd, offset, buffer_ptr as *const u8, count);
+            serial_println_core!(
+                "sys_read_file: fd={} offset={} buffer_ptr={:p} count={}",
+                fd,
+                offset,
+                buffer_ptr as *const u8,
+                count
+            );
 
             if !validate_user_ptr(buffer_ptr, count) {
                 return FileDescriptor::INVALID_FD;

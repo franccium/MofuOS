@@ -73,11 +73,13 @@ pub const TICK_DURATION_US: u64 = 1_000_000 / TIMER_TICK_FREQ_HZ;
 const LAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_0000_0000;
 const IOAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_FF00_0000;
 
-// PIT port constants (channel 2, used for calibration only — no IRQ involved)
 const PIT_CHANNEL2_DATA: u16 = 0x42;
 const PIT_CMD: u16 = 0x43;
 const PIT_PC_SPEAKER: u16 = 0x61;
-const PIT_BASE_HZ: u64 = 1_193_182; // fixed hardware frequency
+const PIT_BASE_HZ: u64 = 1_193_182;
+
+const KEYBOARD_IRQ: u32 = 1;
+const MOUSE_IRQ: u32 = 12;
 
 /// Measure the TSC frequency by counting cycles over a PIT-timed interval
 /// Must be called with interrupts disabled
@@ -290,103 +292,66 @@ unsafe fn init_io_apic(
     let io_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
     unsafe {
-        // The IO APIC has two registers: IOREGSEL (offset 0) and IOWIN (offset 0x10)
-        // But you're mapping it as u32 array, so IOWIN is at offset 4 (0x10 / 4)
-        
-        // First, let's verify we can read the IO APIC ID
-        io_apic_ptr.offset(0).write_volatile(0x00); // Select IOAPICID register
+        const IOAPIC_ID_REG: u32 = 0x00;
+        const IOAPIC_VER_REG: u32 = 0x01;
+        io_apic_ptr.offset(0).write_volatile(IOAPIC_ID_REG);
         let ioapic_id = io_apic_ptr.offset(4).read_volatile() >> 24;
         serial_println!("IO APIC ID: {}", ioapic_id);
-        
-        // Get the IO APIC version (number of redirection entries)
-        io_apic_ptr.offset(0).write_volatile(0x01); // Select IOAPICVER register
+
+        io_apic_ptr.offset(0).write_volatile(IOAPIC_VER_REG);
         let version = io_apic_ptr.offset(4).read_volatile() & 0xFF;
         let max_redir_entry = ((io_apic_ptr.offset(4).read_volatile() >> 16) & 0xFF) + 1;
-        serial_println!("IO APIC version: {}, max redirection entries: {}", version, max_redir_entry);
-        
-        // Configure Keyboard (IRQ 1) - redirection entry 1
-        set_ioapic_redirection(io_apic_ptr, 1, InterruptIndex::Keyboard as u8, false);
-        
-        // Configure Mouse (IRQ 12) - redirection entry 12
-        set_ioapic_redirection(io_apic_ptr, 12, InterruptIndex::Mouse as u8, false);
+        serial_println!(
+            "IO APIC version: {}, max redirection entries: {}",
+            version,
+            max_redir_entry
+        );
+
+        set_ioapic_redirection(
+            io_apic_ptr,
+            KEYBOARD_IRQ,
+            InterruptIndex::Keyboard as u8,
+            false,
+        );
+
+        set_ioapic_redirection(io_apic_ptr, MOUSE_IRQ, InterruptIndex::Mouse as u8, false);
     }
 }
 
-unsafe fn verify_lapic_address() {
-    let lapic_ptr = LAPIC_ADDRESS.lock().address;
-    
-    // Read LAPIC ID (offset 0x20)
-    let id_offset = APICOffset::IDr as isize / 4;
-    let lapic_id = lapic_ptr.offset(id_offset).read_volatile() >> 24;
-    serial_println!("LAPIC at {:p}, ID: {}", lapic_ptr, lapic_id);
-    
-    // Read Spurious Interrupt Vector Register (offset 0xF0)
-    let svr_offset = APICOffset::Svr as isize / 4;
-    let svr = lapic_ptr.offset(svr_offset).read_volatile();
-    serial_println!("LAPIC SVR: {:#x}", svr);
-    
-    // Check if APIC is enabled (bit 8 of SVR)
-    if svr & (1 << 8) == 0 {
-        serial_println!("WARNING: APIC is NOT enabled in SVR!");
-    } else {
-        serial_println!("APIC is enabled, spurious vector: {}", svr & 0xFF);
-    }
-}
-
-// Helper function to set IO APIC redirection entry
 unsafe fn set_ioapic_redirection(
     io_apic_ptr: *mut u32,
     irq: u32,
     vector: u8,
     level_triggered: bool,
 ) {
-    // Each redirection entry uses two consecutive IO APIC registers
-    let entry_low = 0x10 + (irq * 2);     // Lower 32 bits
-    let entry_high = 0x10 + (irq * 2 + 1); // Upper 32 bits
-    
-    // Build lower 32-bit value
+    let entry_low = 0x10 + (irq * 2);
+    let entry_high = 0x10 + (irq * 2 + 1);
+
     let mut low_value = vector as u32;
-    if level_triggered {
-        low_value |= 1 << 15; // Set trigger mode to level
-    }
-    // Bit 16 is mask (0 = enabled, 1 = masked)
-    // Bit 11 is destination mode (0 = physical, 1 = logical)
-    // Bits 8-10: delivery mode (000 = fixed)
-    
-    // Build upper 32-bit value
-    // Bits 24-27: destination field (APIC ID of target CPU, 0 for BSP)
+    if level_triggered { low_value |= 1 << 15; }
+    // Bit 16: 0 = enabled, 1 = masked
+    // Bit 11: destination mode: 0 = physical, 1 = logical
+    // Bits 8-10: delivery mode: 000 = fixed
+    // Bits 24-27: destination field: APIC ID of target CPU
     let high_value = 0u32; // Send to APIC ID 0 (BSP)
-    
-    // Write the redirection entry
+
     io_apic_ptr.offset(0).write_volatile(entry_low);
     io_apic_ptr.offset(4).write_volatile(low_value);
-    
+
     io_apic_ptr.offset(0).write_volatile(entry_high);
     io_apic_ptr.offset(4).write_volatile(high_value);
 
-
     io_apic_ptr.offset(0).write_volatile(entry_low);
     let readback_low = io_apic_ptr.offset(4).read_volatile();
-    
+
     serial_println!(
-        "IO APIC IRQ {}: wrote {:#x}, readback {:#x} (vector: {}, enabled: {}, trigger: {})",
+        "IO APIC IRQ {}: wrote {:#x}, readback {:#x} (vector: {}, enabled: {})",
         irq,
         low_value,
         readback_low,
         readback_low & 0xFF,
         (readback_low >> 16) & 1 == 0,
-        if (readback_low >> 15) & 1 == 1 { "level" } else { "edge" }
     );
-}
-
-// Helper to mask an IRQ
-unsafe fn mask_ioapic_irq(io_apic_ptr: *mut u32, irq: u32) {
-    let entry_low = 0x10 + (irq * 2);
-    
-    io_apic_ptr.offset(0).write_volatile(entry_low);
-    let mut value = io_apic_ptr.offset(4).read_volatile();
-    value |= 1 << 16; // Set mask bit
-    io_apic_ptr.offset(4).write_volatile(value);
 }
 
 pub unsafe fn init_lapic_for_current_core(core_id: u8) {
@@ -394,9 +359,9 @@ pub unsafe fn init_lapic_for_current_core(core_id: u8) {
 
     serial_println!("Core {}: Initializing Local APIC...", core_id);
 
-    // 1. Enable the APIC by setting the Spurious Interrupt Vector Register
+    // Enable the APIC by setting the Spurious Interrupt Vector Register
     // Bit 8 = APIC Software Enable/Disable
-    // Bits 0-7 = Spurious vector (typically 0xFF)
+    // Bits 0-7 = Spurious vector
     let svr = lapic_ptr.offset(APICOffset::Svr as isize / 4);
     let current_svr = svr.read_volatile();
     svr.write_volatile(current_svr | (1 << 8) | 0xFF);
@@ -406,52 +371,44 @@ pub unsafe fn init_lapic_for_current_core(core_id: u8) {
         current_svr | (1 << 8) | 0xFF
     );
 
-    // 2. Mask all LVT entries initially
-    // LVT Timer
+    // Mask all LVT entries initially
     lapic_ptr
         .offset(APICOffset::LvtT as isize / 4)
         .write_volatile(0x10000); // Masked
-    // LVT LINT0
     lapic_ptr
         .offset(APICOffset::LvtLint0 as isize / 4)
         .write_volatile(0x10000);
-    // LVT LINT1
     lapic_ptr
         .offset(APICOffset::LvtLint1 as isize / 4)
         .write_volatile(0x10000);
-    // LVT Error
     lapic_ptr
         .offset(APICOffset::LvtErr as isize / 4)
         .write_volatile(0x10000);
-    // LVT Performance Counter
     lapic_ptr
         .offset(APICOffset::LvtPmcr as isize / 4)
         .write_volatile(0x10000);
-    // LVT Thermal Sensor
     lapic_ptr
         .offset(APICOffset::LvtTsr as isize / 4)
         .write_volatile(0x10000);
     serial_println!("Core {}: LVT entries masked", core_id);
 
-    // 3. Clear any pending errors
     lapic_ptr
         .offset(APICOffset::Esr as isize / 4)
         .write_volatile(0);
     lapic_ptr
         .offset(APICOffset::Esr as isize / 4)
-        .write_volatile(0); // Write twice to clear
+        .write_volatile(0);
 
-    // 4. Send EOI to clear any pending interrupts
     lapic_ptr
         .offset(APICOffset::Eoi as isize / 4)
         .write_volatile(0);
 
-    // 5. Set Task Priority to 0 (accept all interrupts)
+    // Set Task Priority to 0
     lapic_ptr
         .offset(APICOffset::Tpr as isize / 4)
         .write_volatile(0);
 
-    // 6. Set Logical Destination Register
+    // Set Logical Destination Register
     lapic_ptr
         .offset(APICOffset::Ldr as isize / 4)
         .write_volatile(
@@ -462,7 +419,7 @@ pub unsafe fn init_lapic_for_current_core(core_id: u8) {
                 | 1,
         );
 
-    // 7. Set Destination Format Register for flat model
+    // Set Destination Format Register for flat model
     lapic_ptr
         .offset(APICOffset::Dfr as isize / 4)
         .write_volatile(0xFFFFFFFF);
@@ -487,45 +444,44 @@ unsafe fn init_local_apic(
     // let virt_
     // let local_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
-     unsafe {
-        // Set Task Priority Register to 0 (accept all interrupts)
-        local_apic_ptr.offset(APICOffset::Tpr as isize / 4).write_volatile(0);
-        
-        // Set Spurious Interrupt Vector Register - ENABLE APIC
-        // Bit 8 (APIC enable) must be set, spurious vector typically 0xFF
+    unsafe {
+        // Set Task Priority Register to 0
+        local_apic_ptr
+            .offset(APICOffset::Tpr as isize / 4)
+            .write_volatile(0);
+
+        // Set Spurious Interrupt Vector Register
         let svr_offset = APICOffset::Svr as isize / 4;
         local_apic_ptr.offset(svr_offset).write_volatile(0x1FF);
-        
-        // Set Logical Destination
-        local_apic_ptr.offset(APICOffset::Ldr as isize / 4).write_volatile(0x01000000);
-        local_apic_ptr.offset(APICOffset::Dfr as isize / 4).write_volatile(0xFFFFFFFF);
-        
-        // CRITICAL: Mask ALL LVT entries since we're using I/O APIC now
-        // Don't use LINT1 for keyboard anymore!
-        
-        // Mask LINT0 (bit 16 = 1 means masked)
-        let lvt_lint0 = local_apic_ptr.offset(APICOffset::LvtLint0 as isize / 4);
-        lvt_lint0.write_volatile(0x10000); // Masked, no interrupt
-        
-        // Mask LINT1 (REMOVE YOUR OLD KEYBOARD ROUTING)
-        let lvt_lint1 = local_apic_ptr.offset(APICOffset::LvtLint1 as isize / 4);
-        lvt_lint1.write_volatile(0x10000); // Masked, no interrupt
-        
-        // Mask other LVTs
-        local_apic_ptr.offset(APICOffset::LvtT as isize / 4).write_volatile(0x10000);
-        local_apic_ptr.offset(APICOffset::LvtPmcr as isize / 4).write_volatile(0x10000);
-        local_apic_ptr.offset(APICOffset::LvtTsr as isize / 4).write_volatile(0x10000);
-        local_apic_ptr.offset(APICOffset::LvtErr as isize / 4).write_volatile(0x10000);
-        
-        serial_println!("Local APIC initialized, all LVTs masked (using I/O APIC)");
-    }
 
-    unsafe {
-        //init_timer(local_apic_ptr);
-        // init_keyboard(local_apic_ptr);
-        // serial_println_core!("Core {}: Keyboard initialized", get_current_core_id());
-        // let mut mouse = ps2_mouse::Mouse::new();
-        // mouse.init();
+        // Set Logical Destination
+        local_apic_ptr
+            .offset(APICOffset::Ldr as isize / 4)
+            .write_volatile(0x01000000);
+        local_apic_ptr
+            .offset(APICOffset::Dfr as isize / 4)
+            .write_volatile(0xFFFFFFFF);
+
+        let lvt_lint0 = local_apic_ptr.offset(APICOffset::LvtLint0 as isize / 4);
+        lvt_lint0.write_volatile(0x10000);
+
+        let lvt_lint1 = local_apic_ptr.offset(APICOffset::LvtLint1 as isize / 4);
+        lvt_lint1.write_volatile(0x10000);
+
+        local_apic_ptr
+            .offset(APICOffset::LvtT as isize / 4)
+            .write_volatile(0x10000);
+        local_apic_ptr
+            .offset(APICOffset::LvtPmcr as isize / 4)
+            .write_volatile(0x10000);
+        local_apic_ptr
+            .offset(APICOffset::LvtTsr as isize / 4)
+            .write_volatile(0x10000);
+        local_apic_ptr
+            .offset(APICOffset::LvtErr as isize / 4)
+            .write_volatile(0x10000);
+
+        serial_println!("Local APIC initialized, all LVTs masked (using I/O APIC)");
     }
 }
 
@@ -803,12 +759,13 @@ pub unsafe fn init_acpi(
                 io_apic_addr,
                 gsi_base
             );
-            let ioapic_virt = unsafe { map_apic_mem_identity(io_apic_addr, mapper, frame_allocator) };
+            let ioapic_virt =
+                unsafe { map_apic_mem_identity(io_apic_addr, mapper, frame_allocator) };
             let ioapic_ptr = ioapic_virt.as_mut_ptr::<u32>();
 
             let mut keyboard_irq: u32 = 1; // Default IRQ 1 for keyboard
-            let mut mouse_irq: u32 = 12;   // Default IRQ 12 for mouse
-            
+            let mut mouse_irq: u32 = 12; // Default IRQ 12 for mouse
+
             for iso in apic.interrupt_source_overrides.iter() {
                 match iso.isa_source {
                     1 => keyboard_irq = iso.global_system_interrupt,
@@ -821,10 +778,15 @@ pub unsafe fn init_acpi(
                     iso.global_system_interrupt,
                 );
             }
-            
+
             // Later, use keyboard_irq and mouse_irq instead of hardcoded values
             unsafe {
-                set_ioapic_redirection(ioapic_ptr, keyboard_irq, InterruptIndex::Keyboard as u8, false);
+                set_ioapic_redirection(
+                    ioapic_ptr,
+                    keyboard_irq,
+                    InterruptIndex::Keyboard as u8,
+                    false,
+                );
                 set_ioapic_redirection(ioapic_ptr, mouse_irq, InterruptIndex::Mouse as u8, false);
             }
 
@@ -911,6 +873,10 @@ pub unsafe fn init_acpi(
     // }
 
     disable_pic();
+
+    let mut mouse = ps2_mouse::Mouse::new();
+    mouse.init();
+    serial_println_core!("Mouse initialized");
 }
 
 lazy_static! {
@@ -1173,7 +1139,6 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
             ));
     }
     serial_println_core!("Keyboard interrupt received");
-    unsafe { verify_lapic_address(); }
 
     let mut keyboard = KEYBOARD.lock();
     let mut keyboard_port = Port::new(0x60);
@@ -1255,17 +1220,16 @@ pub enum InterruptIndex {
     Mouse = 44,
 }
 
-// 3. Implement the mouse interrupt handler
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use ps2_mouse::Mouse;
     use spin::Mutex;
     use x86_64::instructions::port::Port;
-    
+
     lazy_static! {
         static ref MOUSE: Mutex<Mouse> = Mutex::new(Mouse::new());
     }
     serial_println_core!("Mouse interrupt received");
-    
+
     let mut mouse = MOUSE.lock();
     let mut mouse_port = Port::new(0x60);
     let byte: u8 = unsafe { mouse_port.read() };

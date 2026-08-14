@@ -141,7 +141,7 @@ pub struct FileCache<D: CacheFilesystemDriver> {
     access_tick: u64,
     files: FxHashMap<FileNodeHandle, CachedFile>,
 
-     // TODO: need something better, this is now for correctness of file stats, so they dont get stale data if we dont flush
+    // TODO: need something better, this is now for correctness of file stats, so they dont get stale data if we dont flush
     file_nodes: FxHashMap<FileNodeHandle, FileNode>,
 
     directory_children: FxHashMap<FileNodeHandle, Vec<FileNodeHandle>>,
@@ -341,7 +341,8 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
             node_id,
             CachedFile::new(arena_off, read_bytes, self.access_tick, importance),
         );
-        self.file_nodes.insert(node_id, self.driver.get_node(node_id)?);
+        self.file_nodes
+            .insert(node_id, self.driver.get_node(node_id)?);
         self.current_memory_used += read_bytes;
 
         serial_println_core!(
@@ -407,8 +408,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                     let mut node = self.driver.get_node(node_id)?;
                     if let Some(node) = self.file_nodes.get_mut(node_id) {
                         *node = node.clone();
-                    }
-                    else {
+                    } else {
                         self.file_nodes.insert(node_id, node);
                     }
 
@@ -432,8 +432,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                     let mut node = self.driver.get_node(node_id)?;
                     if let Some(node) = self.file_nodes.get_mut(node_id) {
                         *node = node.clone();
-                    }
-                    else {
+                    } else {
                         self.file_nodes.insert(node_id, node);
                     }
 
@@ -548,8 +547,7 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
                 *node = node.clone();
                 node.size = file.len;
                 node.modified_time = interrupts::tsc_timestamp_us() as u32; //TODO:
-            }
-            else {
+            } else {
                 self.file_nodes.insert(node_id, node);
             }
 
@@ -565,15 +563,26 @@ impl<D: CacheFilesystemDriver> FileCache<D> {
         }
     }
 
-    pub fn get_node_cached(&mut self, node_id: FileNodeHandle) -> Result<FileNode, FileSystemError> {
+    pub fn get_node_cached(
+        &mut self,
+        node_id: FileNodeHandle,
+    ) -> Result<FileNode, FileSystemError> {
         serial_println_core!("file_cache: get_node_cached node={:#x}", node_id);
         if let Some(node) = self.file_nodes.get(node_id) {
-            serial_println_core!("file_cache: get_node_cached hit node={:#x}, size: {}", node_id, node.size);
+            serial_println_core!(
+                "file_cache: get_node_cached hit node={:#x}, size: {}",
+                node_id,
+                node.size
+            );
             Ok(node.clone())
         } else {
             let node = self.driver.get_node(node_id)?;
             self.file_nodes.insert(node_id, node.clone());
-            serial_println_core!("file_cache: get_node_cached miss node={:#x}, inserting, size: {}", node_id, node.size);
+            serial_println_core!(
+                "file_cache: get_node_cached miss node={:#x}, inserting, size: {}",
+                node_id,
+                node.size
+            );
             Ok(node)
         }
     }
