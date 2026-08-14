@@ -20,6 +20,8 @@ REAL TODO:
 
 - per-cpu scratch buffer
 
+- get rid of that DecodedKey to Keys translation, and pack events more, the keys can be u8 and i forgot why they are not right now
+
 - file cache arena may have a compacting on all operations problem when it reaches the limit, try to do some smart eviction up to some threshold free space
 - file cache - maybe keep a list of files sorted by their importance or something better, so we dont have to iterate and choose importance for evict_one, especially for when multiple evictions have to happen
 

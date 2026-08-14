@@ -1147,7 +1147,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
                 HandleControl::Ignore
             ));
     }
-    serial_println_core!("Keyboard interrupt received");
+    if KEYBOARD_DEBUG_PRINT {
+        serial_println_core!("Keyboard interrupt received");
+    }
 
     let mut keyboard = KEYBOARD.lock();
     let mut keyboard_port = Port::new(0x60);
@@ -1173,7 +1175,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
                 _ => None,
             };
             if let Some(v) = value {
-                serial_println_core!("keyboard_handler: Pushed {:x}", v);
+                if KEYBOARD_DEBUG_PRINT {
+                    serial_println_core!("keyboard_handler: Pushed {:x}", v);
+                }
                 let _ = unsafe {
                     compositor::get_input_event_buffer()
                         .push(InputEvent::new_key(v, KeyState::Pressed));

@@ -527,6 +527,26 @@ pub struct InputEvent {
     pub reserved: u32,
 }
 
+impl InputEvent {
+    pub fn decode_mouse(&self) -> MouseEvent {
+        let x_delta = self.value as i32 as i16;
+        let y_delta = (self.extra & 0xFFFF) as i16 as i16;
+        let buttons = MouseButtons::from_bits_truncate(((self.extra >> 16) as u16) & 0x07);
+
+        let overflow_bits = (self.extra >> 19) & 0x03;
+        let x_overflow = (overflow_bits & 0x01) != 0;
+        let y_overflow = (overflow_bits & 0x02) != 0;
+
+        MouseEvent {
+            x_delta,
+            y_delta,
+            buttons,
+            x_overflow,
+            y_overflow,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EventType {
@@ -640,24 +660,6 @@ impl EventReader {
                 return event;
             }
             unsafe { sys_yield() }
-        }
-    }
-
-    pub fn decode_mouse(&self) -> MouseEvent {
-        let x_delta = self.value as i32 as i16;
-        let y_delta = (self.extra & 0xFFFF) as i16 as i16;
-        let buttons = MouseButtons::from_bits_truncate(((self.extra >> 16) as u16) & 0x07);
-
-        let overflow_bits = (self.extra >> 19) & 0x03;
-        let x_overflow = (overflow_bits & 0x01) != 0;
-        let y_overflow = (overflow_bits & 0x02) != 0;
-
-        MouseEvent {
-            x_delta,
-            y_delta,
-            buttons,
-            x_overflow,
-            y_overflow,
         }
     }
 }
