@@ -36,7 +36,9 @@ use core::arch::x86_64::__rdtscp;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use pc_keyboard::KeyCode;
-use spin::Mutex;
+use ps2_mouse::{Mouse, MouseState};
+use spin::{Mutex, Once, lazy};
+use x86_64::instructions::port::Port;
 use x86_64::structures::paging::frame;
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -46,6 +48,9 @@ use x86_64::{
         paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB},
     },
 };
+lazy_static! {
+    static ref MOUSE: Mutex<Mouse> = Mutex::new(Mouse::new());
+}
 
 const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
@@ -328,7 +333,9 @@ unsafe fn set_ioapic_redirection(
     let entry_high = 0x10 + (irq * 2 + 1);
 
     let mut low_value = vector as u32;
-    if level_triggered { low_value |= 1 << 15; }
+    if level_triggered {
+        low_value |= 1 << 15;
+    }
     // Bit 16: 0 = enabled, 1 = masked
     // Bit 11: destination mode: 0 = physical, 1 = logical
     // Bits 8-10: delivery mode: 000 = fixed
@@ -874,8 +881,8 @@ pub unsafe fn init_acpi(
 
     disable_pic();
 
-    let mut mouse = ps2_mouse::Mouse::new();
-    mouse.init();
+    MOUSE.lock().init().unwrap();
+    MOUSE.lock().set_on_complete(mouse_on_packed_processed);
     serial_println_core!("Mouse initialized");
 }
 
@@ -1177,6 +1184,23 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     }
 }
 
+extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    serial_println_core!("Mouse interrupt received");
+
+    let mut mouse_port = Port::new(0x60);
+    let packet: u8 = unsafe { mouse_port.read() };
+    let mut mouse = MOUSE.lock();
+    mouse.process_packet(packet);
+
+    unsafe {
+        interrupt_over();
+    }
+}
+
+fn mouse_on_packed_processed(mouse_state: MouseState) {
+    serial_println_core!("Mouse state: {:?}", mouse_state);
+}
+
 extern "x86-interrupt" fn pagefault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
@@ -1218,23 +1242,4 @@ pub enum InterruptIndex {
     Timer = 32,
     Keyboard,
     Mouse = 44,
-}
-
-extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use ps2_mouse::Mouse;
-    use spin::Mutex;
-    use x86_64::instructions::port::Port;
-
-    lazy_static! {
-        static ref MOUSE: Mutex<Mouse> = Mutex::new(Mouse::new());
-    }
-    serial_println_core!("Mouse interrupt received");
-
-    let mut mouse = MOUSE.lock();
-    let mut mouse_port = Port::new(0x60);
-    let byte: u8 = unsafe { mouse_port.read() };
-
-    unsafe {
-        interrupt_over();
-    }
 }

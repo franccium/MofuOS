@@ -26,6 +26,7 @@ REAL TODO:
 - multithreaded filesystem access
 
 - key cursor navigation in terminal
+- and mouse --> we know because of how we render how many pixels each letter has, its monospace, so we can do math based on mouse pos within the window and offset of first letter from the left border to determine the cursor position
 
 - mouse support
 
