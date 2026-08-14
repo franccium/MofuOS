@@ -10,6 +10,10 @@ pub const RUST_FIRST_ELF: &[u8] =
 pub const GAME_ELF: &[u8] = include_bytes!("../../../user/rustspace/target/x86_64-user/debug/game");
 pub const THEOPHE_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/theophe");
+pub const FS_TEST_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fs_test");
+pub const FS_CACHED_TEST_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fs_test_cached");
 
 #[derive(Debug)]
 pub struct ElfLoadInfo {

@@ -13,6 +13,7 @@ use embedded_graphics::primitives::{
     Circle, Primitive, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle,
 };
 use kernel::data_structures::vector::Vec;
+use kernel::filesystem::init_filesystem_ata;
 use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use kernel::graphics::compositor::{self, Compositor};
 use kernel::graphics::pipeline::{
@@ -25,6 +26,7 @@ use kernel::graphics::window::{self, Window, WindowBuffer};
 use kernel::interrupts;
 use kernel::process::CORE_POOL;
 use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, TEST_ELF};
+use kernel::process::shared_state::init_shared_state;
 use kernel::util::cpuinfo::{
     AP_CORE_APIC_ID_MESSAGE_OFFSET, AP_CORE_CR3_MESSAGE_OFFSET, SECRET_MESSAGE_OFFSET,
 };
@@ -67,6 +69,14 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 
 fn main() -> ! {
     serial_println_core!("Welcome to MofuOS!");
+
+    match init_filesystem_ata() {
+        Ok(()) => serial_println_core!("OK: filesystem initialized from ATA drive"),
+        Err(e) => {
+            serial_println_core!("FAIL: filesystem init failed: {}", e);
+        }
+    }
+    kernel::tests_exp::test_ata::test_ata_filesystem();
 
     //kernel::process_start::create_init_process();
     //kernel::process_start::create_and_run_init_process();
@@ -251,8 +261,9 @@ fn main() -> ! {
         serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
         init_compositor(fb_width as u32, fb_height as u32);
+        compositor::init_input_event_buffer();
         {
-            let compositor = get_compositor();
+            let mut compositor = get_compositor();
             let (window_id, window_buffer) = compositor.create_window(20, 20, 30, 30);
             ///let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
             ///serial_println_core!("Created window with ID: {}", window_id);
@@ -275,6 +286,7 @@ fn main() -> ! {
         {
             hlt();
         }
+        init_shared_state();
         kernel::process_start::create_userspace_processes();
 
         loop {
@@ -299,7 +311,9 @@ fn main() -> ! {
                 // angle += 45f32;
 
                 window3_buffer.present();
-                get_compositor().compose(fb);
+                let mut compositor = get_compositor();
+                compositor.process_input_events();
+                compositor.compose(fb);
                 let time_end = interrupts::system_uptime_ns();
                 let dt: u64 = time_end - time_start;
                 time_elapsed += dt;
@@ -307,12 +321,14 @@ fn main() -> ! {
             } else {
                 //serial_println_core!("loop");
                 let time_start = interrupts::system_uptime_ns();
-                get_compositor().compose(fb);
+                let mut compositor = get_compositor();
+                compositor.process_input_events();
+                compositor.compose(fb);
                 let time_end = interrupts::system_uptime_ns();
                 let dt: u64 = time_end - time_start;
                 time_elapsed += dt;
                 //serial_println_core!("Loop time: {} ns; {} ms", dt, dt as f32 / 1_000_000.0);
-                //hlt();
+                hlt();
             }
         }
     }

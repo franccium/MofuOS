@@ -9,6 +9,11 @@ cc = "1.0"
 [target.'cfg(target_arch = "x86_64")'.build-dependencies]
 cc = "1.0"
 
+[features]
+default = ["use_cached_fs"]
+use_cached_fs = []
+
+
 [dependencies]
 limine = "0.6.3"
 uart_16550 = "0.5.0"
@@ -23,6 +28,7 @@ elf = {version = "0.8.0", default-features = false }
 bytemuck = "1.25.0"
 micromath = "2.1.0"
 static_assertions = "1.1.0"
+ps2-mouse = "0.1.4"
 
 
 [dependencies.lazy_static]

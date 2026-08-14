@@ -27,10 +27,43 @@ run-hdd: run-hdd-$(KARCH)
 .PHONY: fat32-image
 fat32-image: test_disk_image.fat32.img
 
+ATA_DISK_IMG_TEMPLATE := disk_templates/fat32_os_disk_template_default
+ATA_DISK_IMG := ata_disk.img
+
+.PHONY: ata-disk
+ata-disk: $(ATA_DISK_IMG)
+
+$(ATA_DISK_IMG):
+	bash scripts/create_ata_disk.sh -i $(ATA_DISK_IMG_TEMPLATE) -o $(ATA_DISK_IMG) -s 64
+
 SOCKET1 := /tmp/mofuos_com1.sock
 SOCKET2 := /tmp/mofuos_com2.sock
 .PHONY: run-x86_64
-run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
+run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso $(ATA_DISK_IMG)
+	@mkdir -p logs
+	@rm -f $(SOCKET1) $(SOCKET2)
+	@python3 scripts/log_splitter.py $(SOCKET1) $(SOCKET2) & \
+	qemu-system-$(KARCH) \
+		-M q35 \
+		-accel kvm \
+		-smp cores=2,threads=1 \
+		-cpu host,+tsc-deadline,+apic \
+		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
+		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
+		-cdrom $(IMAGE_NAME).iso \
+		-device piix3-ide,id=ide \
+		-device ide-hd,drive=ata0,bus=ide.0,unit=0 \
+		-drive file=storage/$(ATA_DISK_IMG),format=raw,id=ata0,if=none \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		-serial unix:$(SOCKET1),server \
+		-serial unix:$(SOCKET2),server,nowait \
+		-no-reboot \
+		-monitor telnet:127.0.0.1:1234,server,nowait \
+		$(QEMUFLAGS)
+
+
+.PHONY: run-x86_64-ata
+run-x86_64-ata: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso $(ATA_DISK_IMG)
 	@mkdir -p logs
 	@rm -f $(SOCKET1) $(SOCKET2)
 	@python3 scripts/log_splitter.py $(SOCKET1) $(SOCKET2) & \
@@ -38,10 +71,13 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-M q35 \
 		-accel kvm \
 		-smp cores=3,threads=1 \
-		-cpu qemu64,+tsc-deadline,+apic \
+		-cpu host,+tsc-deadline,+apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \
+		-device piix3-ide,id=ide \
+		-device ide-hd,drive=ata0,bus=ide.0,unit=0 \
+		-drive file=$(ATA_DISK_IMG),format=raw,id=ata0,if=none \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial unix:$(SOCKET1),server \
 		-serial unix:$(SOCKET2),server,nowait \
@@ -55,7 +91,7 @@ run-nologs: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-M q35 \
 		-accel kvm \
 		-smp cores=2,threads=1 \
-		-cpu qemu64,+tsc-deadline,+apic \
+		-cpu host,+tsc-deadline,+apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \
@@ -70,7 +106,7 @@ run-fast-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_N
 	qemu-system-$(KARCH) \
 		-M q35 \
 		-accel kvm \
-		-cpu host \
+		-cpu host,+tsc-deadline,+apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \
@@ -233,4 +269,4 @@ test_disk_image.fat32.img:
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel clean
-	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd test_disk_image.fat32.img
+	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd test_disk_image.fat32.img $(ATA_DISK_IMG)

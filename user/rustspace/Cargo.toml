@@ -5,6 +5,10 @@ name = "rustspace"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["test_big_files"]
+test_big_files = []
+
 [lib]
 name = "rustspace"
 path = "src/lib.rs"
@@ -14,12 +18,16 @@ name = "rust_first"
 path = "src/bin/rust_first.rs"
 
 [[bin]]
-name = "game"
-path = "src/bin/game.rs"
+name = "window_app"
+path = "src/bin/window_app.rs"
 
 [[bin]]
 name = "theophe"
 path = "src/bin/theophe.rs"
+
+[[bin]]
+name = "fs_test"
+path = "src/bin/fs_test.rs"
 
 [dependencies]
 x86_64 = "0.15.2"

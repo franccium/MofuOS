@@ -1,7 +1,7 @@
 use crate::asm::ap_trampoline;
 use crate::interrupts::{
     self, get_lapic_base_addr, get_lapic_base_addr_phys, init_timer_for_core,
-    map_local_apic_for_current_core,
+    map_local_apic_for_current_core, tsc_read,
 };
 use crate::memory::{FRAME_ALLOCATOR, get_frame_allocator};
 use crate::process::process::INVALID_PID;
@@ -26,6 +26,8 @@ static mut CPU_INFO: CpuInfo = CpuInfo {
     family: 0,
     model: 0,
     stepping: 0,
+    display_family: 0,
+    display_model: 0,
     vendor: CpuVendor::Unknown,
 };
 
@@ -39,7 +41,27 @@ pub struct CpuInfo {
     pub family: u8,
     pub model: u8,
     pub stepping: u8,
+    pub display_family: u16,
+    pub display_model: u8,
     pub vendor: CpuVendor,
+}
+
+#[repr(C, align(16))]
+pub struct CpuInfoFlat {
+    pub vendor: u8,
+    pub family: u8,
+    pub model: u8,
+    pub stepping: u8,
+    pub display_family: u16,
+    pub display_model: u8,
+    pub cache_line_size: u8,
+    pub apic_id: u8,
+    pub features: u32,
+    pub tsc_frequency_hz: u64,
+    pub boot_tsc: u64,
+    pub max_cpuid_leaf: u32,
+    pub max_extended_cpuid_leaf: u32,
+    pub core_count: u8,
 }
 
 bitflags! {
@@ -62,17 +84,19 @@ bitflags! {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u8)]
 pub enum CpuVendor {
-    Intel,
-    Amd,
-    Unknown,
+    Unknown = 0,
+    Intel = 1,
+    AMD = 2,
 }
 
 impl core::fmt::Display for CpuVendor {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             CpuVendor::Intel => write!(f, "Intel"),
-            CpuVendor::Amd => write!(f, "AMD"),
+            CpuVendor::AMD => write!(f, "AMD"),
             CpuVendor::Unknown => write!(f, "Unknown"),
         }
     }
@@ -97,7 +121,7 @@ unsafe fn get_vendor(ebx: u32, ecx: u32, edx: u32) -> CpuVendor {
     if &vendor_bytes == b"GenuineIntel" {
         CpuVendor::Intel
     } else if &vendor_bytes == b"AuthenticAMD" {
-        CpuVendor::Amd
+        CpuVendor::AMD
     } else {
         CpuVendor::Unknown
     }
@@ -137,13 +161,28 @@ pub unsafe fn init_cpu_info() {
     );
 
     assert!(max_leaf >= 1);
-    let (_, feat_ebx, feat_ecx, feat_edx) = unsafe { cpuid(1) };
+    let (feat_eax, feat_ebx, feat_ecx, feat_edx) = unsafe { cpuid(1) };
     serial_println!(
-        "init_cpu_info: read leaf 1: ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
+        "init_cpu_info: read leaf 1: eax: {:#x} ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
+        feat_eax,
         feat_ebx,
         feat_ecx,
         feat_edx
     );
+
+    let base_family = ((feat_eax >> 8) & 0xF) as u8;
+    let base_model = ((feat_eax >> 4) & 0xF) as u8;
+    let stepping = (feat_eax & 0xF) as u8;
+    let display_family = if base_family == 0xF {
+        base_family as u16 + (((feat_eax >> 20) & 0xFF) as u16)
+    } else {
+        base_family as u16
+    };
+    let display_model = if base_family == 0x6 || base_family == 0xF {
+        (((feat_eax >> 16) & 0xF) << 4) | (base_model as u32)
+    } else {
+        base_model as u32
+    } as u8;
 
     let mut features = CpuFeatureFlags::empty();
 
@@ -200,7 +239,15 @@ pub unsafe fn init_cpu_info() {
     let cpu_stepping = (feat_edx & 0xF) as u8;
     let cpu_vendor = unsafe { get_vendor(vendor_ebx, vendor_ecx, vendor_edx) };
     serial_println!("CPU Info:");
-    serial_println!("  Vendor: {}", cpu_vendor);
+    serial_println!(
+        "  Vendor: {}, family={:#x}, (display={:#x}), model={:#x} (display={:#x}), stepping={}",
+        cpu_vendor,
+        base_family,
+        display_family,
+        base_model,
+        display_model,
+        stepping
+    );
     serial_println!("  Cache Line Size: {}", cache_line_size);
     serial_println!("  Features {:#b}", features);
 
@@ -212,6 +259,8 @@ pub unsafe fn init_cpu_info() {
             family: cpu_family,
             model: cpu_model,
             stepping: cpu_stepping,
+            display_family,
+            display_model,
             vendor: cpu_vendor,
         };
     }
@@ -230,6 +279,8 @@ pub fn init_cpu_infos(cpus: &[&MpInfo]) {
             family: 0,
             model: 0,
             stepping: 0,
+            display_family: 0,
+            display_model: 0,
             vendor: CpuVendor::Unknown,
         };
         vec.push(default);
@@ -275,9 +326,8 @@ pub unsafe fn enable_sse_for_current_core() {
 
 pub unsafe fn init_cpu_info_for_core(core_id: u8) {
     let (max_leaf, vendor_ebx, vendor_ecx, vendor_edx) = unsafe { cpuid(0) };
-    serial_println!(
-        "Core{}: init_cpu_info: read leaf 0: eax: {:#x}, ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
-        core_id,
+    serial_println_core!(
+        "init_cpu_info: read leaf 0: eax: {:#x}, ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
         max_leaf,
         vendor_ebx,
         vendor_ecx,
@@ -285,14 +335,28 @@ pub unsafe fn init_cpu_info_for_core(core_id: u8) {
     );
 
     assert!(max_leaf >= 1);
-    let (_, feat_ebx, feat_ecx, feat_edx) = unsafe { cpuid(1) };
-    serial_println!(
-        "Core{}: init_cpu_info: read leaf 1: ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
-        core_id,
+    let (feat_eax, feat_ebx, feat_ecx, feat_edx) = unsafe { cpuid(1) };
+    serial_println_core!(
+        "init_cpu_info: read leaf 1: eax: {:#x} ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
+        feat_eax,
         feat_ebx,
         feat_ecx,
         feat_edx
     );
+
+    let base_family = ((feat_eax >> 8) & 0xF) as u8;
+    let base_model = ((feat_eax >> 4) & 0xF) as u8;
+    let stepping = (feat_eax & 0xF) as u8;
+    let display_family = if base_family == 0xF {
+        base_family as u16 + (((feat_eax >> 20) & 0xFF) as u16)
+    } else {
+        base_family as u16
+    };
+    let display_model = if base_family == 0x6 || base_family == 0xF {
+        (((feat_eax >> 16) & 0xF) << 4) | (base_model as u32)
+    } else {
+        base_model as u32
+    } as u8;
 
     let mut features = CpuFeatureFlags::empty();
 
@@ -348,10 +412,18 @@ pub unsafe fn init_cpu_info_for_core(core_id: u8) {
     let cpu_model = ((feat_edx >> 4) & 0xF) as u8;
     let cpu_stepping = (feat_edx & 0xF) as u8;
     let cpu_vendor = unsafe { get_vendor(vendor_ebx, vendor_ecx, vendor_edx) };
-    serial_println!("Core{}: CPU Info:", core_id);
-    serial_println!("  Vendor: {}", cpu_vendor);
-    serial_println!("  Cache Line Size: {}", cache_line_size);
-    serial_println!("  Features {:#b}", features);
+    serial_println_core!("CPU Info:");
+    serial_println_core!(
+        "  Vendor: {}, family={:#x}, (display={:#x}), model={:#x} (display={:#x}), stepping={}",
+        cpu_vendor,
+        base_family,
+        display_family,
+        base_model,
+        display_model,
+        stepping
+    );
+    serial_println_core!("  Cache Line Size: {}", cache_line_size);
+    serial_println_core!("  Features {:#b}", features);
 
     unsafe {
         let mut cpu_infos = CPU_INFO_PER_CORE.get().unwrap();
@@ -363,6 +435,8 @@ pub unsafe fn init_cpu_info_for_core(core_id: u8) {
             family: cpu_family,
             model: cpu_model,
             stepping: cpu_stepping,
+            display_family,
+            display_model,
             vendor: cpu_vendor,
         });
     }
@@ -388,7 +462,7 @@ pub fn get_cpu_info_for_core(core_id: u8) -> &'static CpuInfo {
 //         let low: u32;
 //         let high: u32;
 //         asm!(
-//             "rdmsr",
+//             "msr_read",
 //             in("ecx") IA32_APIC_BASE_MSR,
 //             out("eax") low,
 //             out("edx") high,
@@ -663,4 +737,32 @@ pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
 
     //     core::arch::asm!("hlt");
     // }
+}
+
+impl CpuInfoFlat {
+    pub fn from_kernel_info(
+        cpu_info: &CpuInfo,
+        tsc_freq: u64,
+        boot_tsc: u64,
+        core_count: u8,
+    ) -> Self {
+        let mut flat = CpuInfoFlat {
+            vendor: cpu_info.vendor as u8,
+            family: cpu_info.family,
+            model: cpu_info.model,
+            stepping: cpu_info.stepping,
+            display_family: cpu_info.display_family,
+            display_model: cpu_info.display_model,
+            cache_line_size: cpu_info.cache_line_size,
+            apic_id: cpu_info.apic_id,
+            features: cpu_info.features.bits(),
+            tsc_frequency_hz: tsc_freq,
+            boot_tsc,
+            max_cpuid_leaf: 0,
+            max_extended_cpuid_leaf: 0,
+            core_count,
+        };
+
+        flat
+    }
 }

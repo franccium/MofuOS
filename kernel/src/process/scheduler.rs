@@ -309,16 +309,21 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
     loop {
         x86_64::instructions::interrupts::disable();
 
+        // serial_println_core!("Getting next on core");
+
         let (pid, priority) = {
             let mut scheduler = SCHEDULER.lock();
             scheduler.get_next_on_core(core_id)
         };
 
         if pid == INVALID_PID {
+            // serial_println_core!("No process on core");
             x86_64::instructions::interrupts::enable();
             x86_64::instructions::hlt();
             continue;
         }
+
+        // serial_println_core!("Setting current on core: PID={}", pid);
 
         {
             let mut scheduler = SCHEDULER.lock();

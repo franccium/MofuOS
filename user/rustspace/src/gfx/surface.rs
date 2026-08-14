@@ -1,4 +1,7 @@
 use crate::gfx::color::{Rgba8888UNORM, rgba_to_xrgb};
+use core::arch::x86_64::__m128i;
+use core::arch::x86_64::_mm_set1_epi32;
+use core::arch::x86_64::_mm_storeu_si128;
 use embedded_graphics::Pixel;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::{Dimensions, DrawTarget, OriginDimensions, Point, Size};
@@ -47,11 +50,32 @@ impl UserSurface {
         unsafe { *self.pixels.add(offset) = rgba_to_xrgb(color) };
     }
 
+    // pub fn clear(&mut self, color: Rgba8888UNORM) {
+    //     let xrgb = rgba_to_xrgb(color);
+    //     let count = (self.width * self.height) as usize;
+    //     for i in 0..count {
+    //         unsafe { *self.pixels.add(i) = xrgb };
+    //     }
+    // }
+
+    #[inline]
     pub fn clear(&mut self, color: Rgba8888UNORM) {
-        let xrgb = rgba_to_xrgb(color);
-        let count = (self.width * self.height) as usize;
-        for i in 0..count {
-            unsafe { *self.pixels.add(i) = xrgb };
+        unsafe {
+            let mut buffer = self.pixels;
+            let len = self.width * self.height;
+            let color_u32 = color.to_u32_xrgb();
+
+            let color_vec = _mm_set1_epi32(color_u32 as i32);
+
+            let mut i = 0;
+            while i + 4 <= len {
+                let ptr = buffer.add(i as usize) as *mut __m128i;
+                _mm_storeu_si128(ptr, color_vec);
+                i += 4;
+            }
+            for j in i..len {
+                *buffer.add(j as usize) = color_u32;
+            }
         }
     }
 

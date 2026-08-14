@@ -1,6 +1,10 @@
 #![allow(unused)]
+use crate::events::event_buffer::{InputEvent, KeyState, Keys};
+use crate::graphics::compositor;
 use crate::io::serial;
 use crate::process::execution::jump_to_userspace;
+use crate::process::process::DEFAULT_NEW_PROCESS_STACK_SIZE;
+use crate::process::shared_state::get_shared_input_event_buffer;
 use crate::process::{SCHEDULER, Scheduler};
 use crate::process::{
     process::INVALID_PID,
@@ -32,7 +36,10 @@ use core::arch::asm;
 use core::arch::x86_64::__rdtscp;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
-use spin::Mutex;
+use pc_keyboard::KeyCode;
+use ps2_mouse::{Mouse, MouseState};
+use spin::{Mutex, Once, lazy};
+use x86_64::instructions::port::Port;
 use x86_64::structures::paging::frame;
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -42,20 +49,24 @@ use x86_64::{
         paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB},
     },
 };
+lazy_static! {
+    static ref MOUSE: Mutex<Mouse> = Mutex::new(Mouse::new());
+}
 
 const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
+const MOUSE_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
 const PREEMPTION_ENABLED: bool = false;
 
 /// TSC frequency measured at boot via PIT calibration
 /// Written once by core 0 before any AP is started
 /// All cores read this after it is set
-static TSC_FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
+pub static TSC_FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
 
 /// TSC value at the moment core 0 finished basic init (just before APs start)
 /// Used as the zero-point for log timestamps
-static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
+pub static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
 
 pub const TIMER_TICK_INTERVAL_MS: u64 = 10;
 pub const TIMER_TICK_FREQ_HZ: u64 = 1000 / TIMER_TICK_INTERVAL_MS;
@@ -69,11 +80,13 @@ pub const TICK_DURATION_US: u64 = 1_000_000 / TIMER_TICK_FREQ_HZ;
 const LAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_0000_0000;
 const IOAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_FF00_0000;
 
-// PIT port constants (channel 2, used for calibration only — no IRQ involved)
 const PIT_CHANNEL2_DATA: u16 = 0x42;
 const PIT_CMD: u16 = 0x43;
 const PIT_PC_SPEAKER: u16 = 0x61;
-const PIT_BASE_HZ: u64 = 1_193_182; // fixed hardware frequency
+const PIT_BASE_HZ: u64 = 1_193_182;
+
+const KEYBOARD_IRQ: u32 = 1;
+const MOUSE_IRQ: u32 = 12;
 
 /// Measure the TSC frequency by counting cycles over a PIT-timed interval
 /// Must be called with interrupts disabled
@@ -207,6 +220,8 @@ pub fn load_idt() {
 fn disable_pic() {
     use x86_64::instructions::port::Port;
     unsafe {
+        // mask all IRQs on both master (0x21) and slave (0xA1) PICs
+        Port::<u8>::new(0x21).write(0xFF);
         Port::<u8>::new(0xA1).write(0xFF);
     }
 }
@@ -284,11 +299,68 @@ unsafe fn init_io_apic(
     let io_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
     unsafe {
-        io_apic_ptr.offset(0).write_volatile(0x12);
-        io_apic_ptr
-            .offset(4)
-            .write_volatile(InterruptIndex::Keyboard as u8 as u32);
+        const IOAPIC_ID_REG: u32 = 0x00;
+        const IOAPIC_VER_REG: u32 = 0x01;
+        io_apic_ptr.offset(0).write_volatile(IOAPIC_ID_REG);
+        let ioapic_id = io_apic_ptr.offset(4).read_volatile() >> 24;
+        serial_println!("IO APIC ID: {}", ioapic_id);
+
+        io_apic_ptr.offset(0).write_volatile(IOAPIC_VER_REG);
+        let version = io_apic_ptr.offset(4).read_volatile() & 0xFF;
+        let max_redir_entry = ((io_apic_ptr.offset(4).read_volatile() >> 16) & 0xFF) + 1;
+        serial_println!(
+            "IO APIC version: {}, max redirection entries: {}",
+            version,
+            max_redir_entry
+        );
+
+        set_ioapic_redirection(
+            io_apic_ptr,
+            KEYBOARD_IRQ,
+            InterruptIndex::Keyboard as u8,
+            false,
+        );
+
+        set_ioapic_redirection(io_apic_ptr, MOUSE_IRQ, InterruptIndex::Mouse as u8, false);
     }
+}
+
+unsafe fn set_ioapic_redirection(
+    io_apic_ptr: *mut u32,
+    irq: u32,
+    vector: u8,
+    level_triggered: bool,
+) {
+    let entry_low = 0x10 + (irq * 2);
+    let entry_high = 0x10 + (irq * 2 + 1);
+
+    let mut low_value = vector as u32;
+    if level_triggered {
+        low_value |= 1 << 15;
+    }
+    // Bit 16: 0 = enabled, 1 = masked
+    // Bit 11: destination mode: 0 = physical, 1 = logical
+    // Bits 8-10: delivery mode: 000 = fixed
+    // Bits 24-27: destination field: APIC ID of target CPU
+    let high_value = 0u32; // Send to APIC ID 0 (BSP)
+
+    io_apic_ptr.offset(0).write_volatile(entry_low);
+    io_apic_ptr.offset(4).write_volatile(low_value);
+
+    io_apic_ptr.offset(0).write_volatile(entry_high);
+    io_apic_ptr.offset(4).write_volatile(high_value);
+
+    io_apic_ptr.offset(0).write_volatile(entry_low);
+    let readback_low = io_apic_ptr.offset(4).read_volatile();
+
+    serial_println!(
+        "IO APIC IRQ {}: wrote {:#x}, readback {:#x} (vector: {}, enabled: {})",
+        irq,
+        low_value,
+        readback_low,
+        readback_low & 0xFF,
+        (readback_low >> 16) & 1 == 0,
+    );
 }
 
 pub unsafe fn init_lapic_for_current_core(core_id: u8) {
@@ -296,9 +368,9 @@ pub unsafe fn init_lapic_for_current_core(core_id: u8) {
 
     serial_println!("Core {}: Initializing Local APIC...", core_id);
 
-    // 1. Enable the APIC by setting the Spurious Interrupt Vector Register
+    // Enable the APIC by setting the Spurious Interrupt Vector Register
     // Bit 8 = APIC Software Enable/Disable
-    // Bits 0-7 = Spurious vector (typically 0xFF)
+    // Bits 0-7 = Spurious vector
     let svr = lapic_ptr.offset(APICOffset::Svr as isize / 4);
     let current_svr = svr.read_volatile();
     svr.write_volatile(current_svr | (1 << 8) | 0xFF);
@@ -308,52 +380,44 @@ pub unsafe fn init_lapic_for_current_core(core_id: u8) {
         current_svr | (1 << 8) | 0xFF
     );
 
-    // 2. Mask all LVT entries initially
-    // LVT Timer
+    // Mask all LVT entries initially
     lapic_ptr
         .offset(APICOffset::LvtT as isize / 4)
         .write_volatile(0x10000); // Masked
-    // LVT LINT0
     lapic_ptr
         .offset(APICOffset::LvtLint0 as isize / 4)
         .write_volatile(0x10000);
-    // LVT LINT1
     lapic_ptr
         .offset(APICOffset::LvtLint1 as isize / 4)
         .write_volatile(0x10000);
-    // LVT Error
     lapic_ptr
         .offset(APICOffset::LvtErr as isize / 4)
         .write_volatile(0x10000);
-    // LVT Performance Counter
     lapic_ptr
         .offset(APICOffset::LvtPmcr as isize / 4)
         .write_volatile(0x10000);
-    // LVT Thermal Sensor
     lapic_ptr
         .offset(APICOffset::LvtTsr as isize / 4)
         .write_volatile(0x10000);
     serial_println!("Core {}: LVT entries masked", core_id);
 
-    // 3. Clear any pending errors
     lapic_ptr
         .offset(APICOffset::Esr as isize / 4)
         .write_volatile(0);
     lapic_ptr
         .offset(APICOffset::Esr as isize / 4)
-        .write_volatile(0); // Write twice to clear
+        .write_volatile(0);
 
-    // 4. Send EOI to clear any pending interrupts
     lapic_ptr
         .offset(APICOffset::Eoi as isize / 4)
         .write_volatile(0);
 
-    // 5. Set Task Priority to 0 (accept all interrupts)
+    // Set Task Priority to 0
     lapic_ptr
         .offset(APICOffset::Tpr as isize / 4)
         .write_volatile(0);
 
-    // 6. Set Logical Destination Register
+    // Set Logical Destination Register
     lapic_ptr
         .offset(APICOffset::Ldr as isize / 4)
         .write_volatile(
@@ -364,7 +428,7 @@ pub unsafe fn init_lapic_for_current_core(core_id: u8) {
                 | 1,
         );
 
-    // 7. Set Destination Format Register for flat model
+    // Set Destination Format Register for flat model
     lapic_ptr
         .offset(APICOffset::Dfr as isize / 4)
         .write_volatile(0xFFFFFFFF);
@@ -390,18 +454,54 @@ unsafe fn init_local_apic(
     // let local_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
     unsafe {
-        //init_timer(local_apic_ptr);
-        init_keyboard(local_apic_ptr);
+        // Set Task Priority Register to 0
+        local_apic_ptr
+            .offset(APICOffset::Tpr as isize / 4)
+            .write_volatile(0);
+
+        // Set Spurious Interrupt Vector Register
+        let svr_offset = APICOffset::Svr as isize / 4;
+        local_apic_ptr.offset(svr_offset).write_volatile(0x1FF);
+
+        // Set Logical Destination
+        local_apic_ptr
+            .offset(APICOffset::Ldr as isize / 4)
+            .write_volatile(0x01000000);
+        local_apic_ptr
+            .offset(APICOffset::Dfr as isize / 4)
+            .write_volatile(0xFFFFFFFF);
+
+        let lvt_lint0 = local_apic_ptr.offset(APICOffset::LvtLint0 as isize / 4);
+        lvt_lint0.write_volatile(0x10000);
+
+        let lvt_lint1 = local_apic_ptr.offset(APICOffset::LvtLint1 as isize / 4);
+        lvt_lint1.write_volatile(0x10000);
+
+        local_apic_ptr
+            .offset(APICOffset::LvtT as isize / 4)
+            .write_volatile(0x10000);
+        local_apic_ptr
+            .offset(APICOffset::LvtPmcr as isize / 4)
+            .write_volatile(0x10000);
+        local_apic_ptr
+            .offset(APICOffset::LvtTsr as isize / 4)
+            .write_volatile(0x10000);
+        local_apic_ptr
+            .offset(APICOffset::LvtErr as isize / 4)
+            .write_volatile(0x10000);
+
+        serial_println!("Local APIC initialized, all LVTs masked (using I/O APIC)");
     }
 }
 
 /// Read the Time Stamp Counter (TSC) register
 /// Returns the current cycle count since processor reset
-unsafe fn tsc_read() -> u64 {
+pub unsafe fn tsc_read() -> u64 {
     let low: u32;
     let high: u32;
     unsafe {
         asm!(
+            "lfence",
             "rdtsc",
             out("eax") low,
             out("edx") high,
@@ -526,10 +626,10 @@ pub unsafe fn init_timer_tsc(local_apic_ptr: *mut u32, core_id: u8) {
 }
 
 unsafe fn init_keyboard(local_apic_ptr: *mut u32) {
-    unsafe {
-        let keyboard_register = local_apic_ptr.offset(APICOffset::LvtLint1 as isize / 4);
-        keyboard_register.write_volatile(InterruptIndex::Keyboard as u8 as u32);
-    }
+    // unsafe {
+    //     let keyboard_register = local_apic_ptr.offset(APICOffset::LvtLint1 as isize / 4);
+    //     keyboard_register.write_volatile(InterruptIndex::Keyboard as u8 as u32);
+    // }
 }
 
 pub fn enable_interrupts() {
@@ -668,6 +768,37 @@ pub unsafe fn init_acpi(
                 io_apic_addr,
                 gsi_base
             );
+            let ioapic_virt =
+                unsafe { map_apic_mem_identity(io_apic_addr, mapper, frame_allocator) };
+            let ioapic_ptr = ioapic_virt.as_mut_ptr::<u32>();
+
+            let mut keyboard_irq: u32 = 1; // Default IRQ 1 for keyboard
+            let mut mouse_irq: u32 = 12; // Default IRQ 12 for mouse
+
+            for iso in apic.interrupt_source_overrides.iter() {
+                match iso.isa_source {
+                    1 => keyboard_irq = iso.global_system_interrupt,
+                    12 => mouse_irq = iso.global_system_interrupt,
+                    _ => {}
+                }
+                serial_println!(
+                    "ISO: ISA IRQ {} -> GSI {}",
+                    iso.isa_source,
+                    iso.global_system_interrupt,
+                );
+            }
+
+            // Later, use keyboard_irq and mouse_irq instead of hardcoded values
+            unsafe {
+                set_ioapic_redirection(
+                    ioapic_ptr,
+                    keyboard_irq,
+                    InterruptIndex::Keyboard as u8,
+                    false,
+                );
+                set_ioapic_redirection(ioapic_ptr, mouse_irq, InterruptIndex::Mouse as u8, false);
+            }
+
             /*
                local_apic_nmi_lines: Vec<NmiLine, A>,
                pub interrupt_source_overrides: Vec<InterruptSourceOverride, A>,
@@ -742,15 +873,19 @@ pub unsafe fn init_acpi(
         init_local_apic(lapic_addr, mapper, frame_allocator);
     }
 
-    if got_apic_addr {
-        unsafe {
-            init_io_apic(io_apic_addr, mapper, frame_allocator);
-        }
-    } else {
-        serial_println!("ERROR: Cannot find IO apic");
-    }
+    // if got_apic_addr {
+    //     unsafe {
+    //         init_io_apic(io_apic_addr, mapper, frame_allocator);
+    //     }
+    // } else {
+    //     serial_println!("ERROR: Cannot find IO apic");
+    // }
 
     disable_pic();
+
+    MOUSE.lock().init().unwrap();
+    MOUSE.lock().set_on_complete(mouse_on_packed_processed);
+    serial_println_core!("Mouse initialized");
 }
 
 lazy_static! {
@@ -781,6 +916,7 @@ lazy_static! {
         // Hardware interrupts
         idt[InterruptIndex::Timer as u8].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard as u8].set_handler_fn(keyboard_interrupt_handler);
+        idt[InterruptIndex::Mouse as u8].set_handler_fn(mouse_interrupt_handler);
 
         //unsafe {idt[0x80].set_handler_fn(syscall_int80_handler).set_stack_index(1)};
 
@@ -997,39 +1133,127 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
+    use pc_keyboard::{
+        DecodedKey, HandleControl, KeyState as PcKeyState, Keyboard, ScancodeSet1, layouts,
+    };
     use spin::Mutex;
     use x86_64::instructions::port::Port;
 
     lazy_static! {
-        static ref KEYBOARD: Mutex<Keyboard<layouts::Uk105Key, ScancodeSet1>> =
+        static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> =
             Mutex::new(Keyboard::new(
                 ScancodeSet1::new(),
-                layouts::Uk105Key,
+                layouts::Us104Key,
                 HandleControl::Ignore
             ));
     }
+    if KEYBOARD_DEBUG_PRINT {
+        serial_println_core!("Keyboard interrupt received");
+    }
+
     let mut keyboard = KEYBOARD.lock();
     let mut keyboard_port = Port::new(0x60);
     // SAFETY: This port is only read from in this interrupt handler.
     let scancode: u8 = unsafe { keyboard_port.read() };
 
-    if let Ok(Some(event)) = keyboard.add_byte(scancode)
-        && let Some(decoded_key) = keyboard.process_keyevent(event)
-        && KEYBOARD_DEBUG_PRINT
-    {
-        match decoded_key {
-            DecodedKey::Unicode(character) => {
-                serial_print!("{}", character)
+    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+        let is_press =
+            key_event.state == PcKeyState::Down || key_event.state == PcKeyState::SingleShot;
+        if let Some(decoded_key) = keyboard.process_keyevent(key_event)
+            && is_press
+        {
+            let value = match decoded_key {
+                DecodedKey::Unicode(c) => Some(c as u32),
+                //TODO: this
+                DecodedKey::RawKey(KeyCode::ArrowUp) => Some(Keys::ArrowUp as u32),
+                DecodedKey::RawKey(KeyCode::ArrowDown) => Some(Keys::ArrowDown as u32),
+                DecodedKey::RawKey(KeyCode::ArrowLeft) => Some(Keys::ArrowLeft as u32),
+                DecodedKey::RawKey(KeyCode::ArrowRight) => Some(Keys::ArrowRight as u32),
+                DecodedKey::RawKey(KeyCode::Backspace) => Some(Keys::Backspace as u32),
+                DecodedKey::RawKey(KeyCode::LAlt) => Some(Keys::LeftAlt as u32),
+                DecodedKey::RawKey(KeyCode::Tab) => Some(Keys::Tab as u32),
+                _ => None,
+            };
+            if let Some(v) = value {
+                if KEYBOARD_DEBUG_PRINT {
+                    serial_println_core!("keyboard_handler: Pushed {:x}", v);
+                }
+                let _ = unsafe {
+                    compositor::get_input_event_buffer()
+                        .push(InputEvent::new_key(v, KeyState::Pressed));
+                };
             }
-            DecodedKey::RawKey(key) => {
-                serial_print!("{:?}", key)
+
+            if KEYBOARD_DEBUG_PRINT {
+                match decoded_key {
+                    DecodedKey::Unicode(c) => serial_print!("{}", c),
+                    DecodedKey::RawKey(k) => serial_print!("{:?}", k),
+                }
             }
         }
     }
 
     unsafe {
         interrupt_over();
+    }
+}
+
+extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    if MOUSE_DEBUG_PRINT {
+        serial_println_core!("Mouse interrupt received");
+    }
+
+    let mut mouse_port = Port::new(0x60);
+    let packet: u8 = unsafe { mouse_port.read() };
+    let mut mouse = MOUSE.lock();
+    mouse.process_packet(packet);
+
+    unsafe {
+        interrupt_over();
+    }
+}
+
+fn mouse_on_packed_processed(mouse_state: MouseState) {
+    use crate::events::event_buffer::{MouseButtons, MouseEvent};
+    if MOUSE_DEBUG_PRINT {
+        serial_println_core!("mouse_on_packed_processed: Mouse state: {:?}", mouse_state);
+    }
+
+    let buttons = {
+        let mut mouse_buttons = MouseButtons::empty();
+        if mouse_state.left_button_down() {
+            mouse_buttons |= MouseButtons::LEFT;
+        }
+        if mouse_state.right_button_down() {
+            mouse_buttons |= MouseButtons::RIGHT;
+        }
+        // Middle button not accessible via public API
+        //TODO: can try to read from mem layout
+        mouse_buttons
+    };
+
+    // Overflow flags not accessible via public API
+    let x_overflow = false;
+    let y_overflow = false;
+
+    let mouse_event = MouseEvent {
+        x_delta: mouse_state.get_x(),
+        y_delta: -mouse_state.get_y(),
+        buttons,
+        x_overflow,
+        y_overflow,
+    };
+
+    let input_event = InputEvent::new_mouse(mouse_event);
+    match unsafe { compositor::get_input_event_buffer().push(input_event) } {
+        Ok(()) => {
+            if MOUSE_DEBUG_PRINT {
+                serial_println_core!("Mouse event pushed to buffer: {:?}", mouse_event);
+            }
+        }
+        Err(e) => {
+            serial_println_core!("Failed to push mouse event to buffer: {:?}", e);
+        }
     }
 }
 
@@ -1043,6 +1267,28 @@ extern "x86-interrupt" fn pagefault_handler(
     serial_println_core!("Accessed Address: {:?}", Cr2::read());
     serial_println_core!("Error Code: {:?}", error_code);
     serial_println_core!("{:#?}", stack_frame);
+
+    if error_code.contains(PageFaultErrorCode::USER_MODE) {
+        serial_println_core!(
+            "REMINDER: User stack is {} bytes wide",
+            DEFAULT_NEW_PROCESS_STACK_SIZE
+        );
+
+        // Check if the faulting address is near the user stack limit
+        let accessed_addr = Cr2::read().unwrap_or(VirtAddr::zero());
+        let stack_pointer = stack_frame.stack_pointer;
+
+        if stack_pointer.as_u64() > accessed_addr.as_u64() {
+            let stack_usage = stack_pointer.as_u64() - accessed_addr.as_u64();
+            if stack_usage > DEFAULT_NEW_PROCESS_STACK_SIZE {
+                serial_println_core!(
+                    "WARNING: Stack pointer exceeds {} limit! Possible stack overflow.",
+                    DEFAULT_NEW_PROCESS_STACK_SIZE
+                );
+            }
+        }
+    }
+
     hlt_loop();
 }
 
@@ -1051,4 +1297,5 @@ extern "x86-interrupt" fn pagefault_handler(
 pub enum InterruptIndex {
     Timer = 32,
     Keyboard,
+    Mouse = 44,
 }

@@ -12,9 +12,11 @@ pub const USE_PING_PROGRAM: bool = false;
 pub const USE_TEST_PROGRAM: bool = false;
 pub const USE_RUST_USER_PROGRAMS: bool = false;
 pub const USE_GAME_PROGRAM: bool = false;
+pub const RUN_FS_TEST: bool = false;
+pub const RUN_FS_CACHED_TEST: bool = false;
 
 pub const HHDM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
-pub const MAX_CORES: u8 = 4;
+pub const MAX_CORES: u8 = 3;
 pub const AP_CORE_COUNT: u8 = MAX_CORES - 1;
 // NOTE: Hard limit to 64 cores for the core pool availability 64-bit long bitmap
 const_assert!(MAX_CORES <= 64);
@@ -28,6 +30,7 @@ extern crate alloc;
 pub mod asm;
 pub mod boot_info;
 pub mod data_structures;
+pub mod events;
 pub mod filesystem;
 pub mod gdt;
 pub mod graphics;

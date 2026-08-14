@@ -272,7 +272,12 @@ impl DirectoryEntry {
         self.name == fullname[0..8] && self.extension == fullname[8..11]
     }
 
-    pub fn set_filename(&mut self, filename: &str) {
+    pub fn set_filename(
+        &mut self,
+        filename: &str,
+    ) -> crate::filesystem::sirius::FileSystemResult<()> {
+        use crate::filesystem::sirius::FileSystemError;
+
         self.name.fill(b' ');
         self.extension.fill(b' ');
 
@@ -287,8 +292,17 @@ impl DirectoryEntry {
             None => (filename, None),
         };
 
+        if name_part.len() > MAX_NAME_LENGTH {
+            return Err(FileSystemError::InvalidFilename);
+        }
+        if let Some(ext) = ext_part {
+            if ext.len() > MAX_EXT_LENGTH {
+                return Err(FileSystemError::InvalidFilename);
+            }
+        }
+
         let name_bytes = name_part.as_bytes();
-        for i in 0..core::cmp::min(name_bytes.len(), 8) {
+        for i in 0..name_bytes.len() {
             let c = name_bytes[i];
             self.name[i] = match c {
                 b'a'..=b'z' => c - 32,
@@ -298,7 +312,7 @@ impl DirectoryEntry {
 
         if let Some(ext) = ext_part {
             let ext_bytes = ext.as_bytes();
-            for i in 0..core::cmp::min(ext_bytes.len(), 3) {
+            for i in 0..ext_bytes.len() {
                 let c = ext_bytes[i];
                 self.extension[i] = match c {
                     b'a'..=b'z' => c - 32,
@@ -306,6 +320,8 @@ impl DirectoryEntry {
                 };
             }
         }
+
+        Ok(())
     }
 
     pub fn mark_deleted(&mut self) {

@@ -1,8 +1,10 @@
 use crate::{
     data_structures::vector::Vec,
     process::{
-        ElfLoadInfo, KernelThread, ThreadState, elf_loader::ElfLoadFlags,
+        ElfLoadInfo, KernelThread, ThreadState,
+        elf_loader::ElfLoadFlags,
         process_mem::ProcessMemoryLayout,
+        shared_state::{SHARED_STATE, SharedState},
     },
     serial_println,
 };
@@ -18,6 +20,10 @@ pub const INVALID_PID: usize = usize::MAX;
 pub const MAX_PRIORITY: u8 = 8;
 pub const RFLAGS_DEFAULT: u64 = 0x202;
 pub const DEFAULT_NEW_PROCESS_STACK_SIZE: u64 = 1 * 1024 * 1024;
+
+pub const PROCESS_HEAP_SIZE_BYTES: u64 = 2 * 1024 * 1024;
+pub const PROCESS_HEAP_VIRT_START: u64 = 0x0000_0000_6000_0000;
+pub const PROCESS_HEAP_VIRT_END: u64 = PROCESS_HEAP_VIRT_START + PROCESS_HEAP_SIZE_BYTES;
 
 pub type PID = usize;
 
@@ -85,9 +91,18 @@ pub struct ExecutionContext {
     pub page_table_base_phys: u64,
 }
 
-//TODO: when we have a fs/vfs
+pub const FD_FLAG_READ: u8 = 0x01;
+pub const FD_FLAG_WRITE: u8 = 0x02;
+
+#[derive(Debug, Clone, Copy)]
 pub struct FileDescriptor {
-    pub handle: usize,
+    pub node_id: usize,
+    //pub offset: usize,
+    pub flags: u8,
+}
+
+impl FileDescriptor {
+    pub const INVALID_FD: u64 = u64::MAX;
 }
 
 pub struct Process {
@@ -152,8 +167,8 @@ impl Process {
             top_page_table_phys: x86_64::PhysAddr::new(page_table_base_phys),
             stack_top: x86_64::VirtAddr::new(stack_top),
             stack_size: 0,
-            heap_start: x86_64::VirtAddr::new(0x0000_0000_6000_0000),
-            heap_end: x86_64::VirtAddr::new(0x0000_0000_6000_0000),
+            heap_start: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_START),
+            heap_end: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_END),
             mapped_regions: alloc::vec::Vec::new(),
         };
 
@@ -278,6 +293,15 @@ impl Process {
                     page_flags: flags,
                 });
         }
+
+        let shared_state = SHARED_STATE.get().unwrap().lock();
+        shared_state
+            .map_into_process(
+                address_space_manager,
+                memory_layout.top_page_table_phys,
+                &mut frame_allocator,
+            )
+            .unwrap();
 
         let stack_size = DEFAULT_NEW_PROCESS_STACK_SIZE;
         let stack_top = address_space_manager.create_main_stack(

@@ -1,4 +1,9 @@
-use crate::{HHDM_OFFSET, memory::memory::MemoryMapFrameAllocator, serial_println};
+use crate::{
+    HHDM_OFFSET,
+    memory::memory::{MemoryMapFrameAllocator, PAGE_SIZE},
+    serial_println, serial_println_core,
+};
+use spin::MutexGuard;
 use x86_64::{
     PhysAddr, VirtAddr,
     structures::paging::{
@@ -10,6 +15,7 @@ use x86_64::{
 const LEVEL_4_KERNEL_ENTRIES_START: usize = 256;
 const LEVEL_4_KERNEL_ENTRIES_END: usize = 512;
 pub const USER_STACK_TOP: u64 = 0x7FFF_FFFF_F000;
+pub const USER_MEM_MAX_ADDRESS: usize = 0x0000_8000_0000_0000;
 
 pub struct UserMemoryManager {
     pub kernel_page_table_phys: PhysAddr,
@@ -199,13 +205,6 @@ impl UserMemoryManager {
                         //
                         // Capability flags (PRESENT, WRITABLE, USER_ACCESSIBLE) are
                         // unioned: grant the permission if either segment needs it.
-                        //
-                        // NO_EXECUTE is a restriction flag — it must only be set
-                        // when ALL segments that touch this page agree it is
-                        // non-executable.  So we AND it: if the existing mapping
-                        // does not have NO_EXECUTE (page is executable), the merged
-                        // result must also not have NO_EXECUTE, regardless of what
-                        // the new segment requests.
                         let existing_flags = self.get_page_flags(pml4_table_phys, page);
 
                         // OR all bits together first, then fix up NO_EXECUTE.
@@ -254,6 +253,7 @@ impl UserMemoryManager {
         virt_addr: VirtAddr,
         phys_addr: PhysAddr,
         flags: PageTableFlags,
+        frame_allocator: &mut MemoryMapFrameAllocator,
     ) -> Result<(), MapToError<Size4KiB>> {
         use x86_64::structures::paging::PhysFrame;
 
@@ -266,21 +266,26 @@ impl UserMemoryManager {
         let phys_frame = PhysFrame::containing_address(phys_addr);
         let user_flags = flags | PageTableFlags::USER_ACCESSIBLE;
 
-        let mut fa = crate::memory::get_frame_allocator();
         unsafe {
-            match user_page_mapper.map_to(page, phys_frame, user_flags, &mut *fa) {
+            //serial_println_core!("map_specific_frame: mapping phys_frame {:x}, page {:x}", phys_frame.start_address(), page.start_address());
+            match user_page_mapper.map_to(page, phys_frame, user_flags, frame_allocator) {
                 Ok(flush) => {
+                    //serial_println_core!("map_specific_frame: mapped successfully");
                     flush.flush();
                     Ok(())
                 }
                 Err(MapToError::PageAlreadyMapped(_existing)) => {
+                    //serial_println_core!("map_specific_frame: page already mapped");
                     match user_page_mapper.update_flags(page, user_flags) {
                         Ok(flush) => {
                             flush.flush();
                             Ok(())
                         }
                         Err(e) => {
-                            serial_println!("map_specific_frame: update_flags failed: {:?}", e);
+                            serial_println_core!(
+                                "map_specific_frame: update_flags failed: {:?}",
+                                e
+                            );
                             Ok(())
                         }
                     }
@@ -320,4 +325,21 @@ impl UserMemoryManager {
 
         Ok(stack_top)
     }
+}
+
+pub fn allocate_zeroed_page(
+    frame_allocator: &mut MemoryMapFrameAllocator,
+) -> Option<(PhysAddr, VirtAddr)> {
+    let frame: x86_64::structures::paging::PhysFrame = frame_allocator.allocate_frame()?;
+    let phys_addr = frame.start_address();
+    let virt_addr = VirtAddr::new(phys_addr.as_u64() + HHDM_OFFSET);
+    unsafe {
+        core::ptr::write_bytes(virt_addr.as_mut_ptr::<u8>(), 0, PAGE_SIZE);
+    }
+    serial_println!(
+        "allocate_zeroed_page: allocated and zeroed phys addr {:?}",
+        phys_addr
+    );
+
+    Some((phys_addr, virt_addr))
 }

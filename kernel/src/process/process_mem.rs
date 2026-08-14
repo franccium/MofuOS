@@ -1,5 +1,6 @@
 use crate::memory::memory::{MemoryMapFrameAllocator, PAGE_SIZE};
 use crate::memory::usermem::UserMemoryManager;
+use crate::process::process::{PROCESS_HEAP_VIRT_END, PROCESS_HEAP_VIRT_START};
 use crate::serial_println;
 use alloc::vec::Vec;
 use spin::MutexGuard;
@@ -41,8 +42,8 @@ impl ProcessMemoryLayout {
             mapped_regions: Vec::new(),
             stack_top: VirtAddr::new(0),
             stack_size: 0u64,
-            heap_start: VirtAddr::new(0x0000_0000_6000_0000),
-            heap_end: VirtAddr::new(0x0000_0000_6000_0000),
+            heap_start: VirtAddr::new(PROCESS_HEAP_VIRT_START),
+            heap_end: VirtAddr::new(PROCESS_HEAP_VIRT_END),
         })
     }
 

@@ -7,6 +7,7 @@ use spin::Mutex;
 lazy_static::lazy_static! {
     pub static ref CORE_POOL: Mutex<CorePool> = Mutex::new(CorePool::new());
 }
+pub static mut TOTAL_CORE_COUNT: u8 = 1;
 
 pub const CORE_IS_AVAILABLE: u64 = 1;
 pub const CORE_IS_USED: u64 = 0;
@@ -43,6 +44,10 @@ impl CorePool {
                 MAX_CORES
             );
             self.total_cores = MAX_CORES;
+        }
+
+        unsafe {
+            TOTAL_CORE_COUNT = core_count;
         }
 
         self.total_cores = core_count;

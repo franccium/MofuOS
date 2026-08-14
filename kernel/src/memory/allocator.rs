@@ -6,7 +6,7 @@ use core::{
     ptr::NonNull,
 };
 use x86_64::{
-    VirtAddr,
+    PhysAddr, VirtAddr,
     structures::paging::{
         FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB, mapper::MapToError,
     },
@@ -26,7 +26,7 @@ pub static ALLOCATOR: MutexWrapper<FixedSizeBlockAllocator> =
     MutexWrapper::new(FixedSizeBlockAllocator::new());
 
 pub const HEAP_POINTER: usize = 0xFFFF_8080_0000_0000;
-pub const HEAP_SIZE_BYTES: usize = 16 * 1024 * 1024; // 16 MB
+pub const HEAP_SIZE_BYTES: usize = 32 * 1024 * 1024; // 64 MB
 
 // Wrapper around spin::Mutex to implement GlobalAlloc on a foreign type
 pub struct MutexWrapper<T> {

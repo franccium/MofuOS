@@ -5,7 +5,6 @@ use kernel::{
     interrupts,
     memory::{self, allocator},
     serial_println, serial_println_core,
-    util::cpuinfo::init_cpu_info,
 };
 use kernel::{
     interrupts::map_local_apic_for_current_core,
@@ -182,7 +181,6 @@ unsafe extern "C" fn kmain() -> ! {
     serial_println!("  Total cores: {}", core_count);
     serial_println!("  BSP LAPIC ID: {}", bsp_lapic_id);
 
-    unsafe { init_cpu_info() };
     for (i, cpu) in cpus.iter().enumerate() {
         serial_println!(
             "  CPU {}: LAPIC ID={}, Processor ID={}",
@@ -191,8 +189,8 @@ unsafe extern "C" fn kmain() -> ! {
             cpu.processor_id
         );
     }
-
     unsafe { init_cpu_infos(&cpus) };
+
     serial_println!("Mapping lapic for core 0");
     unsafe { interrupts::init_lapic_for_current_core(0) };
     let mut core_pool = CORE_POOL.lock();
