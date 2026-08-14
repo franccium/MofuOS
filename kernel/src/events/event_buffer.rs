@@ -16,7 +16,7 @@ pub enum Keys {
 }
 
 bitflags::bitflags! {
-    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct MouseButtons: u16 {
         const LEFT = 0b0000_0001;
         const RIGHT = 0b0000_0010;
