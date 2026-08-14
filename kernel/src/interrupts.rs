@@ -1198,7 +1198,43 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
 }
 
 fn mouse_on_packed_processed(mouse_state: MouseState) {
+    use crate::events::event_buffer::{MouseButtons, MouseEvent};
+
     serial_println_core!("Mouse state: {:?}", mouse_state);
+
+    let buttons = {
+        let mut mouse_buttons = MouseButtons::empty();
+        if mouse_state.left_button_down() {
+            mouse_buttons |= MouseButtons::LEFT;
+        }
+        if mouse_state.right_button_down() {
+            mouse_buttons |= MouseButtons::RIGHT;
+        }
+        // Middle button not accessible via public API
+        //TODO: can try to read from mem layout
+        mouse_buttons
+    };
+
+    // Overflow flags not accessible via public API
+    let x_overflow = false;
+    let y_overflow = false;
+
+    let mouse_event = MouseEvent {
+        x_delta: mouse_state.get_x(),
+        y_delta: mouse_state.get_y(),
+        buttons,
+        x_overflow,
+        y_overflow,
+    };
+
+    match unsafe { get_shared_input_event_buffer().push(InputEvent::new_mouse(mouse_event)) } {
+        Ok(()) => {
+            serial_println_core!("Mouse event pushed to buffer: {:?}", mouse_event);
+        }
+        Err(e) => {
+            serial_println_core!("Failed to push mouse event to buffer: {:?}", e);
+        }
+    }
 }
 
 extern "x86-interrupt" fn pagefault_handler(

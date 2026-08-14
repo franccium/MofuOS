@@ -14,6 +14,24 @@ pub enum KeyState {
 pub enum Keys {
     ArrowUp = 0x110000,
 }
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub struct MouseButtons: u16 {
+        const LEFT = 0b0000_0001;
+        const RIGHT = 0b0000_0010;
+        const MIDDLE = 0b0000_0100;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseEvent {
+    pub x_delta: i16,
+    pub y_delta: i16,
+    pub buttons: MouseButtons,
+    pub x_overflow: bool,
+    pub y_overflow: bool,
+}
 pub struct AsciiChar;
 impl AsciiChar {
     pub const BACKSPACE: char = '\x08';
@@ -63,6 +81,40 @@ impl InputEvent {
 
     pub fn new_key(keycode: u32, state: KeyState) -> Self {
         Self::new(EventType::KeyEvent, keycode, state as u32)
+    }
+
+    pub fn new_mouse(mouse_event: MouseEvent) -> Self {
+        let value = mouse_event.x_delta as i32 as u32;
+        let mut extra = (mouse_event.y_delta as i16 as u32) & 0xFFFF;
+        extra |= ((mouse_event.buttons.bits() as u32) << 16) & 0x00070000;
+
+        let overflow_bits =
+            ((mouse_event.x_overflow as u32) << 0) | ((mouse_event.y_overflow as u32) << 1);
+        extra |= (overflow_bits << 19) & 0x00180000;
+
+        Self::new(EventType::MouseEvent, value, extra)
+    }
+
+    pub fn decode_mouse(&self) -> Option<MouseEvent> {
+        if self.event_type != EventType::MouseEvent {
+            return None;
+        }
+
+        let x_delta = self.value as i32 as i16;
+        let y_delta = (self.extra & 0xFFFF) as i16 as i16;
+        let buttons = MouseButtons::from_bits_truncate(((self.extra >> 16) as u16) & 0x07);
+
+        let overflow_bits = (self.extra >> 19) & 0x03;
+        let x_overflow = (overflow_bits & 0x01) != 0;
+        let y_overflow = (overflow_bits & 0x02) != 0;
+
+        Some(MouseEvent {
+            x_delta,
+            y_delta,
+            buttons,
+            x_overflow,
+            y_overflow,
+        })
     }
 }
 

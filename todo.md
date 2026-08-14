@@ -27,6 +27,9 @@ REAL TODO:
 
 - key cursor navigation in terminal
 - and mouse --> we know because of how we render how many pixels each letter has, its monospace, so we can do math based on mouse pos within the window and offset of first letter from the left border to determine the cursor position
+- the mouse events have to first go through compositor, as pressing outside of a window will unfocus it and bring the one in pressed area
+so maybe compositor detects mouse press --> checks rects for what is it within, first for focued window: if pressed within the focsed window, send a pressed within window event to the window process, else change focused window and consume the mouse press
+    easiest thing would be to have compositor consume events, and replicate them for processes, the focused process i suppose (otherwise we could have multiple processes racing for one event buffer), so the compoisitor is the primary consumer of events, and sends events further down the userspace where it thinks is appropriate 
 
 - mouse support
 
