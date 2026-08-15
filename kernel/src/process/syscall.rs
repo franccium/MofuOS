@@ -1,4 +1,6 @@
+use crate::events::event_buffer::EventBuffer;
 use crate::filesystem::sirius::{DirEntryFlat, FS_NAME_LEN, FilesystemDriver, StatFlat};
+use crate::graphics::window::WindowInfo;
 use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
 use crate::io::serial;
 use crate::memory::get_frame_allocator;
@@ -75,6 +77,7 @@ pub enum SyscallNumber {
     PresentWindow = 13,
     GetWindowSize = 14,
     FocusWindow = 15,
+    GetWindowInfo = 16,
     // Filesystem syscalls
     OpenFile = 20,
     CloseFile = 21,
@@ -267,8 +270,12 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let x = frame.arg3 as i32;
             let y = frame.arg4 as i32;
 
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+
             let mut compositor = crate::graphics::compositor::get_compositor();
-            let (window_id, _buffer) = compositor.create_window(width, height, x, y);
+            let (window_id, _buffer, _event_buffer) =
+                compositor.create_window(width, height, x, y, pid);
             serial_println_core!(
                 "sys_create_window: {}x{} at ({},{}) -> id={}",
                 width,
@@ -501,6 +508,35 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 }
                 _ => u64::MAX,
             }
+        }
+        SyscallNumber::GetWindowInfo => {
+            let window_id = frame.arg1 as u32;
+            let info_ptr = frame.arg2 as usize;
+
+            serial_println_core!("syscall: GetWindowInfo: window_id={}", window_id);
+
+            if !validate_user_ptr(info_ptr, core::mem::size_of::<WindowInfo>()) {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let compositor = crate::graphics::compositor::get_compositor();
+            let windows = compositor.windows.read();
+            match windows.get(window_id as usize) {
+                Some(w) => {
+                    let out = unsafe { &mut *(info_ptr as *mut WindowInfo) };
+                    out.width = w.buffer.width;
+                    out.height = w.buffer.height;
+                    out.event_buffer_vaddr = match w.event_buffer {
+                        Some(buffer) => buffer as *const EventBuffer as u64,
+                        None => 0,
+                    }
+                }
+                _ => {
+                    return u64::MAX;
+                }
+            }
+
+            0
         }
         SyscallNumber::FocusWindow => {
             let window_id = frame.arg1 as u32;

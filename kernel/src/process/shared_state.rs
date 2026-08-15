@@ -16,10 +16,10 @@ use x86_64::{
     structures::paging::{PageTableFlags, Size4KiB, mapper::MapToError},
 };
 
-const SHARED_REGION_COUNT: usize = 2;
+const SHARED_REGION_COUNT: usize = 1;
 
-const IO_EVENT_BUFFER_INDEX: usize = 0;
-const PROGRAM_SHARED_DATA_INDEX: usize = 1;
+//const IO_EVENT_BUFFER_INDEX: usize = 0;
+const PROGRAM_SHARED_DATA_INDEX: usize = 0;
 
 pub const EVENT_BUFFER_ADDR: usize = 0x0000_0007_0000_0000;
 pub const PROGRAM_SHARED_DATA_ADDR: usize = EVENT_BUFFER_ADDR + PAGE_SIZE;
@@ -113,25 +113,25 @@ pub fn init_shared_state() {
     let mut shared_state = SharedState::new();
 
     //TODO: readonly for user, writable for kernel
-    match init_event_buffer() {
-        Some((buffer_phys, buffer_virt)) => {
-            shared_state.register_region(
-                IO_EVENT_BUFFER_INDEX as u8,
-                SharedRegion {
-                    phys_addr: buffer_phys,
-                    kernel_vaddr: buffer_virt,
-                    default_user_vaddr: VirtAddr::new(EVENT_BUFFER_ADDR as u64),
-                    size_bytes: PAGE_SIZE as u32,
-                    region_type: SharedRegionType::EventBuffer,
-                    _reserved: 0,
-                    page_table_flags: PageTableFlags::PRESENT
-                        | PageTableFlags::WRITABLE
-                        | PageTableFlags::USER_ACCESSIBLE,
-                },
-            );
-        }
-        None => {}
-    }
+    // match init_event_buffer() {
+    //     Some((buffer_phys, buffer_virt)) => {
+    //         shared_state.register_region(
+    //             IO_EVENT_BUFFER_INDEX as u8,
+    //             SharedRegion {
+    //                 phys_addr: buffer_phys,
+    //                 kernel_vaddr: buffer_virt,
+    //                 default_user_vaddr: VirtAddr::new(EVENT_BUFFER_ADDR as u64),
+    //                 size_bytes: PAGE_SIZE as u32,
+    //                 region_type: SharedRegionType::EventBuffer,
+    //                 _reserved: 0,
+    //                 page_table_flags: PageTableFlags::PRESENT
+    //                     | PageTableFlags::WRITABLE
+    //                     | PageTableFlags::USER_ACCESSIBLE,
+    //             },
+    //         );
+    //     }
+    //     None => {}
+    // }
     match init_program_shared_data_buffer() {
         Some((buffer_phys, buffer_virt)) => {
             shared_state.register_region(
@@ -189,11 +189,11 @@ fn init_program_shared_data_buffer() -> Option<(PhysAddr, VirtAddr)> {
     Some((phys, kernel_vaddr))
 }
 
-pub unsafe fn get_shared_input_event_buffer() -> &'static EventBuffer {
-    let shared_state = SHARED_STATE.get().unwrap().lock();
-    let region = shared_state.regions[IO_EVENT_BUFFER_INDEX];
-    unsafe { &*(region.kernel_vaddr.as_u64() as *const EventBuffer) }
-}
+// pub unsafe fn get_shared_input_event_buffer() -> &'static EventBuffer {
+//     let shared_state = SHARED_STATE.get().unwrap().lock();
+//     let region = shared_state.regions[IO_EVENT_BUFFER_INDEX];
+//     unsafe { &*(region.kernel_vaddr.as_u64() as *const EventBuffer) }
+// }
 
 pub unsafe fn get_shared_program_data_buffer() -> &'static ProgramSharedDataBuffer {
     let shared_state = SHARED_STATE.get().unwrap().lock();

@@ -24,6 +24,7 @@ pub const SYS_MAP_WINDOW_BUFFER: u64 = 12;
 pub const SYS_PRESENT_WINDOW: u64 = 13;
 pub const SYS_GET_WINDOW_SIZE: u64 = 14;
 pub const SYS_FOCUS_WINDOW: u64 = 15;
+pub const SYS_GET_WINDOW_INFO: u64 = 16;
 
 // Filesystem syscalls
 pub const SYS_OPEN_FILE: u64 = 20;
@@ -433,6 +434,18 @@ pub unsafe fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
     ret != u64::MAX
 }
 
+#[inline(always)]
+pub unsafe fn sys_get_window_info(window_id: u32, out_info: &mut WindowInfo) -> bool {
+    let ret = unsafe {
+        syscall2(
+            SYS_GET_WINDOW_INFO,
+            window_id as u64,
+            out_info as *mut WindowInfo as u64,
+        )
+    };
+    ret != u64::MAX
+}
+
 /// List the contents of a directory into out_entries.
 /// Returns the number of entries written, or usize::MAX on failure.
 #[inline(always)]
@@ -691,12 +704,14 @@ impl EventReader {
         self.buffer.event_count.load(Ordering::Acquire) > 0
     }
 
-    pub fn try_read(&mut self) -> Option<InputEvent> {
+    pub fn try_read(&mut self, window_id: u32) -> Option<InputEvent> {
         if self.buffer.event_count.load(Ordering::Acquire) == 0 {
             return None;
         }
 
         let idx = self.buffer.read_idx.load(Ordering::Acquire) as usize;
+
+        println!("read_idx: {}, window_id: {}", idx, window_id);
 
         let event =
             unsafe { core::ptr::read_volatile(&self.buffer.events[idx] as *const InputEvent) };
@@ -713,7 +728,7 @@ impl EventReader {
 
     pub fn read_blocking(&mut self) -> InputEvent {
         loop {
-            if let Some(event) = self.try_read() {
+            if let Some(event) = self.try_read(0) {
                 return event;
             }
             unsafe { sys_yield() }
@@ -771,6 +786,24 @@ macro_rules! println {
         let _ = core::fmt::write(&mut $crate::Serial, core::format_args!($($arg)*));
         unsafe { $crate::sys_write(1, b"\n".as_ptr(), 1) };
     }};
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct WindowInfo {
+    pub width: u32,
+    pub height: u32,
+    pub event_buffer_vaddr: u64,
+}
+
+impl WindowInfo {
+    pub const fn zeroed() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            event_buffer_vaddr: 0,
+        }
+    }
 }
 
 #[repr(C)]

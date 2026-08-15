@@ -4,7 +4,6 @@ use crate::graphics::compositor;
 use crate::io::serial;
 use crate::process::execution::jump_to_userspace;
 use crate::process::process::DEFAULT_NEW_PROCESS_STACK_SIZE;
-use crate::process::shared_state::get_shared_input_event_buffer;
 use crate::process::{SCHEDULER, Scheduler};
 use crate::process::{
     process::INVALID_PID,

@@ -113,9 +113,9 @@ fn main() -> ! {
         //     shared_program_data.focused_window_id.store(window_id, Ordering::Release);
         // }
 
-        // let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
+        // let (window_id, window_buffer, _event_buffer) = compositor.create_window(600, 400, 50, 50);
         // serial_println_core!("Created window with ID: {}", window_id);
-        // let (window3_id, window3_buffer) = compositor.create_window(400, 300, 700, 200);
+        // let (window3_id, window3_buffer, _event_buffer) = compositor.create_window(400, 300, 700, 200);
         // compositor.set_z_index(window3_id, 5);
         // serial_println_core!("Created window with ID: {}", window3_id);
 
@@ -274,13 +274,13 @@ fn main() -> ! {
 
         init_compositor(fb_width as u32, fb_height as u32);
         serial_println_core!("Compositor initialized");
-        {
-            let mut compositor = get_compositor();
-            let (window_id, window_buffer) = compositor.create_window(20, 20, 30, 30);
-            serial_println_core!("Created window with ID: {}", window_id);
-            compositor.focus_window(0);
-            compositor.compose(fb);
-        }
+        // {
+        //     let mut compositor = get_compositor();
+        //     let (window_id, window_buffer, _event_buffer) = compositor.create_window(20, 20, 30, 30, 0);
+        //     serial_println_core!("Created window with ID: {}", window_id);
+        //     compositor.focus_window(0);
+        //     compositor.compose(fb);
+        // }
 
         let core_count = CORE_POOL.lock().total_cores();
         serial_println_core!("Waiting for {} AP cores to be ready...", core_count - 1);

@@ -20,6 +20,7 @@ use rustspace::{
     AsciiChar, EVENT_BUFFER_ADDR, EventReader, EventType, InputEvent, KeyState, Keys,
     gfx::{color::Rgba8888UNORM, surface::UserSurface},
 };
+use rustspace::{WindowInfo, sys_get_window_info};
 
 const DEBUG_LOGS: bool = false;
 macro_rules! serial_println {
@@ -434,6 +435,16 @@ pub extern "C" fn main() -> ! {
 
     rustspace::init_programs();
 
+    let mut window_info = WindowInfo::zeroed();
+    let ok = unsafe { sys_get_window_info(window_id, &mut window_info) };
+    rustspace::println!(
+        "theophe: window info: {}x{} event_buffer_vaddr: {}",
+        window_info.width,
+        window_info.height,
+        window_info.event_buffer_vaddr,
+    );
+
+    //let mut event_reader = unsafe { EventReader::new(window_info.event_buffer_vaddr as usize) };
     let mut event_reader = unsafe { EventReader::new(EVENT_BUFFER_ADDR) };
 
     unsafe { rustspace::sys_yield() };
@@ -441,20 +452,20 @@ pub extern "C" fn main() -> ! {
     let mut frame: u32 = 0;
     loop {
         loop {
-            let buffer = unsafe {
-                &*(rustspace::PROGRAM_SHARED_DATA_ADDR as *const rustspace::ProgramSharedDataBuffer)
-            };
-            let focused_window_id = buffer.focused_window_id.load(Ordering::Acquire);
-            if theophe.window_id != focused_window_id {
-                rustspace::println!(
-                    "theophe: focused_window_id: {}, this id: {}",
-                    focused_window_id,
-                    theophe.window_id
-                );
-                break;
-            }
+            // let buffer = unsafe {
+            //     &*(rustspace::PROGRAM_SHARED_DATA_ADDR as *const rustspace::ProgramSharedDataBuffer)
+            // };
+            // let focused_window_id = buffer.focused_window_id.load(Ordering::Acquire);
+            // if theophe.window_id != focused_window_id {
+            //     rustspace::println!(
+            //         "theophe: focused_window_id: {}, this id: {}",
+            //         focused_window_id,
+            //         theophe.window_id
+            //     );
+            //     break;
+            // }
 
-            let event = event_reader.try_read();
+            let event = event_reader.try_read(window_id);
             match event {
                 Some(event) => {
                     theophe.handle_event(event);

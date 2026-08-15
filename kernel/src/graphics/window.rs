@@ -1,9 +1,11 @@
+use crate::events::event_buffer::EventBuffer;
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb, xrgb_to_rgba};
 use crate::memory::memory::{PAGE_SIZE, align_down, align_up};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use x86_64::PhysAddr;
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -23,6 +25,16 @@ pub struct Window {
     pub is_visible: bool,
 
     pub buffer: Arc<WindowBuffer>,
+    pub event_buffer: Option<&'static EventBuffer>,
+    pub event_buffer_phys: PhysAddr,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct WindowInfo {
+    pub width: u32,
+    pub height: u32,
+    pub event_buffer_vaddr: u64,
 }
 
 #[repr(C)]

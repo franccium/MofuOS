@@ -5,9 +5,10 @@ use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use crate::graphics::framebuffer::FrameBufferTarget;
 use crate::graphics::window::{INVALID_WINDOW_ID, Window, WindowBuffer, WindowID};
+use crate::memory::{get_frame_allocator, usermem};
+use crate::process::PID;
 use crate::process::shared_state::{
-    get_shared_input_event_buffer, get_shared_program_data_buffer,
-    get_shared_program_data_buffer_mut,
+    EVENT_BUFFER_ADDR, get_shared_program_data_buffer, get_shared_program_data_buffer_mut,
 };
 use crate::{serial_println, serial_println_core};
 use alloc::collections::BTreeMap;
@@ -16,6 +17,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use embedded_graphics::pixelcolor::Rgb888;
 use spin::{Mutex, MutexGuard, Once, RwLock};
+use x86_64::structures::paging::PageTableFlags;
+use x86_64::{PhysAddr, VirtAddr};
 
 static COMPOSITOR: Once<Mutex<Compositor>> = Once::new();
 
@@ -88,7 +91,8 @@ impl Compositor {
         height: u32,
         x: i32,
         y: i32,
-    ) -> (WindowID, Arc<WindowBuffer>) {
+        pid: PID,
+    ) -> (WindowID, Arc<WindowBuffer>, Option<&'static EventBuffer>) {
         let buffer = Arc::new(WindowBuffer::new(width, height, x, y));
         let id = if let Some(free_id) = self.free_window_ids.lock().pop() {
             free_id
@@ -96,6 +100,11 @@ impl Compositor {
             self.next_window_id.fetch_add(1, Ordering::Relaxed)
         };
 
+        let (event_buffer, event_buffer_phys) = match self.allocate_event_buffer_for_window(id, pid)
+        {
+            Some((eb, eb_phys)) => (Some(eb), eb_phys),
+            None => (None, PhysAddr::zero()),
+        };
         let window = Window {
             id,
             x,
@@ -103,6 +112,8 @@ impl Compositor {
             z_index: 0,
             is_visible: true,
             buffer: buffer.clone(),
+            event_buffer,
+            event_buffer_phys,
         };
 
         {
@@ -116,7 +127,86 @@ impl Compositor {
 
         self.focus_window(id);
 
-        (id, buffer)
+        (id, buffer, event_buffer)
+    }
+
+    fn allocate_event_buffer_for_window(
+        &self,
+        window_id: WindowID,
+        pid: PID,
+    ) -> Option<(&'static EventBuffer, PhysAddr)> {
+        serial_println_core!("allocate_event_buffer_for_window: window_id={}", window_id);
+
+        let mut frame_allocator = get_frame_allocator();
+        let (phys, kernel_vaddr) = match usermem::allocate_zeroed_page(&mut frame_allocator) {
+            Some((phys, virt)) => (phys, virt),
+            None => {
+                serial_println_core!(
+                    "allocate_event_buffer_for_window: Failed to allocate page for EventBuffer"
+                );
+                return None;
+            }
+        };
+
+        unsafe {
+            let buffer = &*(kernel_vaddr.as_u64() as *const EventBuffer);
+            debug_assert_eq!(buffer.write_idx.load(Ordering::Relaxed), 0);
+            debug_assert_eq!(buffer.read_idx.load(Ordering::Relaxed), 0);
+            debug_assert_eq!(buffer.event_count.load(Ordering::Relaxed), 0);
+        }
+
+        serial_println_core!(
+            "allocate_event_buffer_for_window: Allocated EventBuffer for window {}: phys={:?}, kernel_vaddr={:?}",
+            window_id,
+            phys,
+            kernel_vaddr
+        );
+
+        {
+            let user_memory_manager = &crate::memory::get_user_mem_mgr();
+            serial_println_core!("allocate_event_buffer_for_window: locked get_user_mem_mgr");
+            let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
+            serial_println_core!("allocate_event_buffer_for_window: locked PROCESS_MANAGER");
+
+            serial_println_core!(
+                "allocate_event_buffer_for_window: mapping EventBuffer for pid: {}",
+                pid
+            );
+            if let Ok(proc) = pm.get_process_mut(pid) {
+                serial_println_core!(
+                    "allocate_event_buffer_for_window: found process for pid: {}",
+                    pid
+                );
+                match user_memory_manager.map_specific_frame(
+                    proc.memory_layout.top_page_table_phys,
+                    //kernel_vaddr,
+                    VirtAddr::new(EVENT_BUFFER_ADDR as u64),
+                    phys,
+                    PageTableFlags::PRESENT
+                        | PageTableFlags::WRITABLE
+                        | PageTableFlags::USER_ACCESSIBLE,
+                    &mut frame_allocator,
+                ) {
+                    Ok(()) => {
+                        serial_println_core!(
+                            "allocate_event_buffer_for_window: EventBuffer mapped"
+                        );
+                    }
+                    Err(e) => {
+                        serial_println_core!(
+                            "allocate_event_buffer_for_window: EventBuffer mapping error: {:?}",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+        serial_println_core!("allocate_event_buffer_for_window: end");
+
+        Some((
+            unsafe { &*(kernel_vaddr.as_u64() as *const EventBuffer) },
+            phys,
+        ))
     }
 
     pub fn set_z_index(&self, window_id: WindowID, z_index: u8) {
@@ -154,7 +244,9 @@ impl Compositor {
                 unsafe {
                     serial_println_core!("Compositor: setting focused_window_id to {}", window_id);
                     let mut shared_program_data = get_shared_program_data_buffer_mut();
-                    shared_program_data.focused_window_id.store(window_id, Ordering::Release);
+                    shared_program_data
+                        .focused_window_id
+                        .store(window_id, Ordering::Release);
                 }
             }
         }
@@ -188,15 +280,29 @@ impl Compositor {
         }
     }
 
+    fn get_focused_window_event_buffer(&self) -> Option<&'static EventBuffer> {
+        let focused_window_id = *self.currently_focused_window.lock();
+        if focused_window_id == INVALID_WINDOW_ID {
+            return None;
+        }
+
+        let windows = self.windows.read();
+        windows
+            .get(focused_window_id as usize)
+            .and_then(|window| window.event_buffer)
+    }
+
     pub fn handle_keyboard_event(&mut self, event: InputEvent) {
         let v = event.value;
         if v == Keys::LeftAlt as u32 {
             serial_println_core!("Compositor intercepted Left Alt")
         }
 
-        let _ = unsafe {
-            get_shared_input_event_buffer().push(event);
-        };
+        if let Some(event_buffer) = self.get_focused_window_event_buffer() {
+            let _ = event_buffer.push(event);
+        } else {
+            serial_println_core!("No focused window event buffer to forward keyboard event");
+        }
     }
 
     fn handle_mouse_event(&mut self, event: InputEvent) {
@@ -225,11 +331,11 @@ impl Compositor {
             self.handle_mouse_click(mouse_x, mouse_y, mouse_event.buttons);
         }
 
-        // TODO: Forward mouse events to the focused window process buffer
-
-        let _ = unsafe {
-            get_shared_input_event_buffer().push(event);
-        };
+        if let Some(event_buffer) = self.get_focused_window_event_buffer() {
+            let _ = event_buffer.push(event);
+        } else {
+            serial_println_core!("No focused window event buffer to forward mouse event");
+        }
     }
 
     fn handle_mouse_click(&mut self, mouse_x: i32, mouse_y: i32, buttons: MouseButtons) {
