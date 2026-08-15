@@ -18,6 +18,48 @@ REAL TODO:
 - better perf testing
     repetitions
 
+- make a rect-based rendering pipeline
+    or research some real software rendering solutions
+
+- move windows
+
+- launch other processes from a userspace process
+    then shell integration
+
+    this is either:
+        a seperate terminal application, where id also need to decouple shell from the terminal
+        or a part of theophe
+        i suppose its better to decouple shell from terminal now, allows for multiple terminal windows later and stuff
+        actually as of now we dont even have a shell, theophe can be what it is, so a window that takes keyboard input, it will just need to send that input to be handled differently by different things
+        so shell and interpreter would take lines entered and interpret them and its the default
+        any keyboard input it would need can also be translated into commands on the terminal side, eg. ctl+c into kill -c --> kill current
+        processes work within shell, shell forwards their stdout into terminal's stdin
+            that falls into being another linux, but it just makes sense
+        maybe its not the terminal that reads IO input, but just the apps - gets rid of one indirection - then the terminal just has a text buffer to display
+        that means we will have a terminal renderer now
+        and a graphics renderer, both available to apps
+        and then the app is the core and i dont even think in terms of terminal
+        this means apps will have to implement more themselves but thats perfectly fine
+
+        the terminal cant be the owner of the whole backing buffer, since not all terminal apps would have a buffer thats mostly appending, and not all would have a scrollback buffer
+        so i cant do a big circular scrollback for all, since e.g. file explorer and text editor would always have to display just one terminal frame, and any line can change completely at any time, while a more classic console-like terminal app would want a big scrollback and only append new lines
+
+        however, with the approach that apps themselves need to handle stuff and terminal is just some rendering api that just happens to be for rendering text, that would be a perfect generalization, since all apps can have a buffer that fits them, and dont need to think about how to publish data for terminal to render/synchronize with it, they just have the data, format it, and render / not render, since that will also let them handle when redraw needs to happen, and a redraw has to happen very rarely, compared to regular update, in a terminal app
+
+        and since i use embedded_graphics i dont even need to write anything now:
+        just like theophe, each app will have a window it can draw to anyways, so all it needs to do is call draw(line) for each line it wants to redraw, so theophe is now a perfect reference example for apps, which can now implement their own "renderers"
+
+        tldr: what i have now is fine, each app can be monolythic like that, what happens in the app or its child process stays in the app or its child process, and if the app want to render that something (call it stdout or w/e) it can render text calling draw(line), no terminal and terminal renderer nonsense, each app is a window app with text, or gfx, rendering capabilities
+
+- file explorer in theophe
+    like terminal file explorers
+
+- text editor in theophe
+    like terminal text editors
+    integrated with the file explorer
+    i suppose text editor would be a part of that, like a module used by the file explorer
+    or better to think of it as an IDE
+
 - per-cpu scratch buffer
 
 - get rid of that DecodedKey to Keys translation, and pack events more, the keys can be u8 and i forgot why they are not right now
