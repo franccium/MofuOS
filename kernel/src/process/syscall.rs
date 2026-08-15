@@ -3,9 +3,10 @@ use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
 use crate::io::serial;
 use crate::memory::get_frame_allocator;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
-use crate::process::CORE_POOL;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
+use crate::process::elf_loader::ODYS_ELF;
 use crate::process::process::FileDescriptor;
+use crate::process::{CORE_POOL, ElfLoadInfo};
 use crate::serial_println;
 use crate::util::cpuinfo::{CpuInfoFlat, get_cpu_info_for_core};
 use crate::util::msr::msr_write;
@@ -204,6 +205,46 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
     let syscall = unsafe { core::mem::transmute::<u64, SyscallNumber>(frame.syscall_num) };
 
     match syscall {
+        SyscallNumber::CreateProcess => {
+            let elf_path_ptr = frame.arg1 as u64;
+            let elf_path_len = frame.arg2 as u64;
+            let name_ptr = frame.arg3 as u64;
+            let name_len = frame.arg4 as u64;
+
+            let elf_path =
+                core::str::from_raw_parts(elf_path_ptr as *const u8, elf_path_len as usize);
+            let name = core::str::from_raw_parts(name_ptr as *const u8, name_len as usize);
+
+            serial_println_core!("CreateProcess called");
+            serial_println_core!("CreateProcess creating process {} from: {}", name, elf_path);
+
+            match ElfLoadInfo::from_elf_data(&ODYS_ELF) {
+                Ok(info) => {
+                    serial_println!("  Parsed ELF: entry_point={:#x}", info.entry_point);
+                    let mut pm = PROCESS_MANAGER.lock();
+                    match pm.create_process_from_elf(0, &info, "proc1", 5) {
+                        Ok(init_pid) => {
+                            serial_println!(
+                                "Init process created (PID {}), added to scheduler",
+                                init_pid
+                            );
+                        }
+                        Err(e) => {
+                            serial_println!("ERROR: Failed to create init process: {:?}", e);
+                            drop(pm);
+                            return u64::MAX;
+                        }
+                    }
+                    drop(pm);
+                }
+                Err(e) => {
+                    serial_println!("  ERROR: Failed to parse ELF: {:?}", e);
+                    return u64::MAX;
+                }
+            };
+
+            0u64
+        }
         SyscallNumber::Write => {
             let fd = frame.arg1;
             let buf = frame.arg2 as *const u8;

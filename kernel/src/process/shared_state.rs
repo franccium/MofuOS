@@ -6,7 +6,7 @@ use crate::{
         memory::{MemoryMapFrameAllocator, PAGE_SIZE},
         usermem::{self, UserMemoryManager},
     },
-    process::shared_state,
+    process::{PID, process::INVALID_PID, shared_state},
     serial_println, serial_println_core,
 };
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -16,9 +16,18 @@ use x86_64::{
     structures::paging::{PageTableFlags, Size4KiB, mapper::MapToError},
 };
 
-const SHARED_REGION_COUNT: usize = 1;
+const SHARED_REGION_COUNT: usize = 2;
 
 const IO_EVENT_BUFFER_INDEX: usize = 0;
+const PROGRAM_SHARED_DATA_INDEX: usize = 1;
+
+pub const EVENT_BUFFER_ADDR: usize = 0x0000_0007_0000_0000;
+pub const PROGRAM_SHARED_DATA_ADDR: usize = EVENT_BUFFER_ADDR + PAGE_SIZE;
+
+#[repr(C, align(4096))]
+pub struct ProgramSharedDataBuffer {
+    pub focused_window_id: AtomicU32,
+}
 
 pub static SHARED_STATE: spin::Once<Mutex<SharedState>> = spin::Once::new();
 
@@ -27,6 +36,7 @@ pub static SHARED_STATE: spin::Once<Mutex<SharedState>> = spin::Once::new();
 pub enum SharedRegionType {
     Default = 0,
     EventBuffer = 1,
+    ProgramSharedDataBuffer = 2,
 }
 
 #[derive(Clone, Copy)]
@@ -102,14 +112,15 @@ pub fn init_shared_state() {
     serial_println_core!("init_shared_state - begin");
     let mut shared_state = SharedState::new();
 
+    //TODO: readonly for user, writable for kernel
     match init_event_buffer() {
-        Some((event_buffer_phys, event_buffer_virt)) => {
+        Some((buffer_phys, buffer_virt)) => {
             shared_state.register_region(
                 IO_EVENT_BUFFER_INDEX as u8,
                 SharedRegion {
-                    phys_addr: event_buffer_phys,
-                    kernel_vaddr: event_buffer_virt,
-                    default_user_vaddr: VirtAddr::new(0x0000_0007_0000_0000),
+                    phys_addr: buffer_phys,
+                    kernel_vaddr: buffer_virt,
+                    default_user_vaddr: VirtAddr::new(EVENT_BUFFER_ADDR as u64),
                     size_bytes: PAGE_SIZE as u32,
                     region_type: SharedRegionType::EventBuffer,
                     _reserved: 0,
@@ -121,8 +132,29 @@ pub fn init_shared_state() {
         }
         None => {}
     }
+    match init_program_shared_data_buffer() {
+        Some((buffer_phys, buffer_virt)) => {
+            shared_state.register_region(
+                PROGRAM_SHARED_DATA_INDEX as u8,
+                SharedRegion {
+                    phys_addr: buffer_phys,
+                    kernel_vaddr: buffer_virt,
+                    default_user_vaddr: VirtAddr::new(PROGRAM_SHARED_DATA_ADDR as u64),
+                    size_bytes: PAGE_SIZE as u32,
+                    region_type: SharedRegionType::ProgramSharedDataBuffer,
+                    _reserved: 0,
+                    page_table_flags: PageTableFlags::PRESENT
+                        | PageTableFlags::WRITABLE
+                        | PageTableFlags::USER_ACCESSIBLE,
+                },
+            );
+        }
+        None => {}
+    }
 
     SHARED_STATE.call_once(|| Mutex::new(shared_state));
+
+    serial_println_core!("init_shared_state: shared state initialized");
 }
 
 fn init_event_buffer() -> Option<(PhysAddr, VirtAddr)> {
@@ -140,7 +172,19 @@ fn init_event_buffer() -> Option<(PhysAddr, VirtAddr)> {
         assert_eq!(buffer.event_count.load(Ordering::Relaxed), 0);
     }
 
-    serial_println!("Event buffer initialized at phys {:?}", phys);
+    serial_println!("EventBuffer initialized at phys {:?}", phys);
+
+    Some((phys, kernel_vaddr))
+}
+
+fn init_program_shared_data_buffer() -> Option<(PhysAddr, VirtAddr)> {
+    serial_println_core!("init_shared_state: init_program_shared_data_buffer");
+    let mut frame_allocator = get_frame_allocator();
+    let (phys, kernel_vaddr) = match usermem::allocate_zeroed_page(&mut frame_allocator) {
+        Some((phys, virt)) => (phys, virt),
+        None => return None,
+    };
+    serial_println!("ProgramSharedDataBuffer initialized at phys {:?}", phys);
 
     Some((phys, kernel_vaddr))
 }
@@ -149,4 +193,16 @@ pub unsafe fn get_shared_input_event_buffer() -> &'static EventBuffer {
     let shared_state = SHARED_STATE.get().unwrap().lock();
     let region = shared_state.regions[IO_EVENT_BUFFER_INDEX];
     unsafe { &*(region.kernel_vaddr.as_u64() as *const EventBuffer) }
+}
+
+pub unsafe fn get_shared_program_data_buffer() -> &'static ProgramSharedDataBuffer {
+    let shared_state = SHARED_STATE.get().unwrap().lock();
+    let region = shared_state.regions[PROGRAM_SHARED_DATA_INDEX];
+    unsafe { &*(region.kernel_vaddr.as_u64() as *const ProgramSharedDataBuffer) }
+}
+
+pub unsafe fn get_shared_program_data_buffer_mut() -> &'static mut ProgramSharedDataBuffer {
+    let shared_state = SHARED_STATE.get().unwrap().lock();
+    let region = shared_state.regions[PROGRAM_SHARED_DATA_INDEX];
+    unsafe { &mut *(region.kernel_vaddr.as_u64() as *mut ProgramSharedDataBuffer) }
 }

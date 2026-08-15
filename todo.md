@@ -23,8 +23,21 @@ REAL TODO:
 
 - move windows
 
+- create and map an event buffer for each new process, in some global map of phys_addr, virt_addr for the event buffer for the given PID (outside of process manager so compositor doesnt have to lock the process manager to forward input), and read within each process from that
+
 - launch other processes from a userspace process
     then shell integration
+
+    to create a process i need to pass the elf
+    so thats what the syscall gets, and some arguments for the process / process creation (pass: elf, name, ptr to a buffer with process start args that match what the process wants and the process can interpret itself after start)
+    from shell - we would lookup the command if its a know mapped binary
+    ideally, id need the process binary to live entirely on the OS-loaded disk image and pass that path
+        thats ideal if i wanted to map the paths like linux, readable as files, cause it makes no sense to map a path outside of that disk image that would be too meta
+        and required to load elf data for programs - for now wa is to always load the elf data for all userspace programs cause i cant dynamically load it from outside the in-OS-storage
+    for now ill just start simple and map the path like i did for launching test processes
+        lets do a per-process static data, that will also include a path repository for utils and programs
+        which has issues with visibility of potential modifications, e.g. changing the path but which is for now fine
+        right now, using a vec for path translation to be at least somewhat dynamic with the paths
 
     this is either:
         a seperate terminal application, where id also need to decouple shell from the terminal
@@ -136,3 +149,9 @@ graphics:
 - at this point tough to optimize anything, should do multithreaded rendering
 - might also eg shade 4 pixels at once the same way, and interpolate 16
 - would tiling be beneficial?
+
+
+
+name vault:
+- Argo
+- Arkad / Arcad

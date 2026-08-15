@@ -4,7 +4,9 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
+use spin::Mutex;
 
 pub mod gfx;
 
@@ -44,6 +46,45 @@ pub const FD_FLAG_READ: u8 = 0x01;
 pub const FD_FLAG_WRITE: u8 = 0x02;
 
 pub const FS_NAME_LEN: usize = 16;
+
+//NOTE: using a vec to be at least somewhat dynamic with the paths
+pub struct ProgramEntry {
+    pub name: &'static str,
+    pub elf_path: &'static str,
+}
+pub static KNOWN_PROGRAMS: Mutex<Vec<ProgramEntry>> = Mutex::new(Vec::new());
+pub fn init_programs() {
+    let mut programs = KNOWN_PROGRAMS.lock();
+
+    if programs.is_empty() {
+        programs.push(ProgramEntry {
+            name: "odys",
+            elf_path: "/bin/odys",
+        });
+    }
+}
+
+pub fn lookup_program(name: &str) -> Option<&'static str> {
+    let programs = KNOWN_PROGRAMS.lock();
+    programs.iter().find(|p| p.name == name).map(|p| p.elf_path)
+}
+
+pub fn is_known_program(name: &str) -> bool {
+    lookup_program(name).is_some()
+}
+
+pub fn register_program(name: &'static str, path: &'static str) {
+    let mut programs = KNOWN_PROGRAMS.lock();
+
+    if let Some(entry) = programs.iter_mut().find(|p| p.name == name) {
+        entry.elf_path = path;
+    } else {
+        programs.push(ProgramEntry {
+            name,
+            elf_path: path,
+        });
+    }
+}
 
 /// Flat directory entry returned by sys_list_dir.
 /// Must match the kernel-side DirEntryFlat layout exactly.
@@ -223,6 +264,21 @@ pub unsafe fn sys_echo(val: u64) -> u64 {
 #[inline(always)]
 pub unsafe fn sys_allocate(size: usize) -> u64 {
     unsafe { syscall1(SYS_ALLOCATE, size as u64) }
+}
+
+#[inline(always)]
+pub unsafe fn sys_create_process(elf_path: &[char], name: &[char], args_buffer: &[u8]) -> u32 {
+    unsafe {
+        syscall6(
+            SYS_CREATE_PROCESS,
+            elf_path.as_ptr() as u64,
+            elf_path.len() as u64,
+            name.as_ptr() as u64,
+            name.len() as u64,
+            args_buffer.as_ptr() as u64,
+            args_buffer.len() as u64,
+        ) as u32
+    }
 }
 
 #[inline(always)]
@@ -621,6 +677,7 @@ pub struct EventReader {
 }
 
 pub const EVENT_BUFFER_ADDR: usize = 0x0000_0007_0000_0000;
+pub const PROGRAM_SHARED_DATA_ADDR: usize = EVENT_BUFFER_ADDR + PAGE_SIZE;
 
 impl EventReader {
     /// Create a new event reader for the buffer at the given address
@@ -662,6 +719,11 @@ impl EventReader {
             unsafe { sys_yield() }
         }
     }
+}
+
+#[repr(C, align(4096))]
+pub struct ProgramSharedDataBuffer {
+    pub focused_window_id: AtomicU32,
 }
 
 pub unsafe fn tsc_read() -> (u64, u32) {

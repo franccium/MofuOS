@@ -2,6 +2,7 @@ use crate::main;
 use kernel::{
     boot_info::{BOOT_INFO, BootInfo},
     gdt::init_core_gdt,
+    graphics::compositor::init_input_event_buffer,
     interrupts,
     memory::{self, allocator},
     serial_println, serial_println_core,
@@ -153,6 +154,8 @@ unsafe extern "C" fn kmain() -> ! {
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
     serial_println!("Heap initialized");
+
+    init_input_event_buffer();
 
     // NOTE: has to be called after heap is initialized, AcpiPlatform uses heap
     unsafe {

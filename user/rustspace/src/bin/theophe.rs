@@ -5,10 +5,10 @@
 extern crate alloc;
 extern crate rustspace;
 
-use alloc::format;
-use core::arch::global_asm;
+use alloc::{format, vec::Vec};
 use core::cmp::min;
 use core::fmt::Write;
+use core::{arch::global_asm, sync::atomic::Ordering};
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb888,
@@ -37,8 +37,6 @@ global_asm!(
     "    call main",
     "    ud2",
 );
-
-// --- Theophe terminal renderer ---
 
 const CHARACTER_WIDTH: usize = 8;
 const CHARACTER_HEIGHT: usize = 13;
@@ -91,6 +89,7 @@ impl Line {
 
 pub struct Theophe<D: DrawTarget<Color = Rgb888>> {
     needs_redraw: bool,
+    window_id: u32,
     curr_line_idx: usize,
     max_chars_per_line: usize,
     last_command: Line,
@@ -99,11 +98,12 @@ pub struct Theophe<D: DrawTarget<Color = Rgb888>> {
 }
 
 impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
-    pub fn new(draw_target: D) -> Self {
+    pub fn new(draw_target: D, window_id: u32) -> Self {
         let bounding_box = draw_target.bounding_box();
         let max_chars_per_line = (bounding_box.size.width / CHARACTER_WIDTH as u32) as usize;
         Self {
             needs_redraw: true,
+            window_id,
             draw_target,
             curr_line_idx: 0,
             max_chars_per_line,
@@ -326,6 +326,27 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
             "deb" => {
                 self.write_line("deb!");
             }
+            "odys" => {
+                // TODO: parse starting directory and pass to odys
+                unsafe {
+                    match rustspace::lookup_program(cmd) {
+                        Some(elf_path) => {
+                            let chars: Vec<char> = elf_path.chars().collect();
+                            let name = "odys";
+                            let name_chars = name.chars().collect::<Vec<char>>();
+                            let args = [0u8; 0];
+                            rustspace::sys_create_process(
+                                chars.as_slice(),
+                                name_chars.as_slice(),
+                                &args,
+                            );
+                        }
+                        None => {
+                            self.write_line("Command not found");
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -402,14 +423,16 @@ pub extern "C" fn main() -> ! {
     unsafe { rustspace::syscall1(rustspace::SYS_FOCUS_WINDOW, window_id as u64) };
 
     let surface = unsafe { UserSurface::new(pixels, pixels_second, width, height) };
-    let mut terminal = Theophe::new(surface);
+    let mut theophe = Theophe::new(surface, window_id);
 
     rustspace::println!("theophe: writing");
 
-    terminal.write_line("Theophe");
-    terminal.write_line("=======================");
+    theophe.write_line("Theophe");
+    theophe.write_line("=======================");
 
     rustspace::println!("theophe: starting loop");
+
+    rustspace::init_programs();
 
     let mut event_reader = unsafe { EventReader::new(EVENT_BUFFER_ADDR) };
 
@@ -418,10 +441,23 @@ pub extern "C" fn main() -> ! {
     let mut frame: u32 = 0;
     loop {
         loop {
+            let buffer = unsafe {
+                &*(rustspace::PROGRAM_SHARED_DATA_ADDR as *const rustspace::ProgramSharedDataBuffer)
+            };
+            let focused_window_id = buffer.focused_window_id.load(Ordering::Acquire);
+            if theophe.window_id != focused_window_id {
+                rustspace::println!(
+                    "theophe: focused_window_id: {}, this id: {}",
+                    focused_window_id,
+                    theophe.window_id
+                );
+                break;
+            }
+
             let event = event_reader.try_read();
             match event {
                 Some(event) => {
-                    terminal.handle_event(event);
+                    theophe.handle_event(event);
                 }
                 None => break,
             }
@@ -429,26 +465,29 @@ pub extern "C" fn main() -> ! {
 
         // if frame & 0xF == 0 {
         // let msg = format!("frame {}", frame);
-        // terminal.write_line(&msg);
+        // theophe.write_line(&msg);
         // }
 
         //rustspace::println!("theophe: loop - begin");
 
-        let backbuffer_redraw_required = terminal.needs_redraw;
-        if terminal.needs_redraw {
-            terminal.render();
-            terminal.needs_redraw = false;
+        let backbuffer_redraw_required = theophe.needs_redraw;
+        if theophe.needs_redraw {
+            theophe.render();
+            theophe.needs_redraw = false;
         }
         unsafe { rustspace::sys_present_window(window_id) };
         unsafe {
-            terminal.draw_target.swap();
+            theophe.draw_target.swap();
             //NOTE: we also need to redraw the second buffer, so one more redrawing frame is required
-            terminal.needs_redraw = backbuffer_redraw_required;
+            theophe.needs_redraw = backbuffer_redraw_required;
         }
         //unsafe { rustspace::sys_yield() };
 
         frame = frame.wrapping_add(1);
-        //rustspace::println!("theophe: loop - end");
+        // unsafe {
+        //     rustspace::sys_yield();
+        // }
+        rustspace::println!("theophe: loop - end");
     }
 
     unsafe { rustspace::sys_exit(0) };

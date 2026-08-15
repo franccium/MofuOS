@@ -5,7 +5,10 @@ use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use crate::graphics::framebuffer::FrameBufferTarget;
 use crate::graphics::window::{INVALID_WINDOW_ID, Window, WindowBuffer, WindowID};
-use crate::process::shared_state::get_shared_input_event_buffer;
+use crate::process::shared_state::{
+    get_shared_input_event_buffer, get_shared_program_data_buffer,
+    get_shared_program_data_buffer_mut,
+};
 use crate::{serial_println, serial_println_core};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -31,7 +34,9 @@ pub fn init_input_event_buffer() {
 }
 
 pub fn get_input_event_buffer() -> &'static EventBuffer {
-    INPUT_EVENT_BUFFER.get().expect("input event buffer not initialized")
+    INPUT_EVENT_BUFFER
+        .get()
+        .expect("input event buffer not initialized")
 }
 
 const NORMALIZE_Z_INDEX_THRESHOLD: u8 = 250;
@@ -49,6 +54,7 @@ pub struct Compositor {
     next_window_id: AtomicU32,
     currently_focused_window: Mutex<WindowID>,
     free_window_ids: Mutex<Vec<WindowID>>,
+    // NOTE: cant sort directly by z_index cause the windows are keyed by their id == index
     pub windows: RwLock<Vec<Window>>,
 
     mouse_x: AtomicI32,
@@ -65,7 +71,7 @@ impl Compositor {
             framebuffer_width,
             framebuffer_height,
             next_window_id: AtomicU32::new(0),
-            currently_focused_window: Mutex::new(0),
+            currently_focused_window: Mutex::new(INVALID_WINDOW_ID),
             windows: RwLock::new(Vec::new()),
             free_window_ids: Mutex::new(Vec::new()),
             mouse_x: AtomicI32::new(0),
@@ -99,15 +105,16 @@ impl Compositor {
             buffer: buffer.clone(),
         };
 
-        let mut windows = self.windows.write();
-        if id as usize >= windows.len() {
-            windows.push(window);
-        } else {
-            windows[id as usize] = window;
+        {
+            let mut windows = self.windows.write();
+            if id as usize >= windows.len() {
+                windows.push(window);
+            } else {
+                windows[id as usize] = window;
+            }
         }
-        windows.sort_by_key(|w| w.z_index);
 
-        *self.currently_focused_window.lock() = id;
+        self.focus_window(id);
 
         (id, buffer)
     }
@@ -118,7 +125,6 @@ impl Compositor {
             let window = windows.get_mut(window_id as usize).unwrap();
             if window.z_index != z_index {
                 window.z_index = z_index;
-                windows.sort_by_key(|w| w.z_index);
             }
         }
     }
@@ -128,7 +134,7 @@ impl Compositor {
             let mut focused_window = self.currently_focused_window.lock();
             if window_id != *focused_window {
                 let mut windows = self.windows.write();
-                let max_z_index = windows.first().map(|w| w.z_index).unwrap_or(0);
+                let max_z_index = windows.iter().max_by_key(|w| w.z_index).unwrap().z_index;
 
                 let window = windows.get_mut(window_id as usize).unwrap();
                 window.z_index = max_z_index + 1;
@@ -144,6 +150,12 @@ impl Compositor {
                     }
                 }
                 windows.sort_by_key(|w| w.z_index);
+
+                unsafe {
+                    serial_println_core!("Compositor: setting focused_window_id to {}", window_id);
+                    let mut shared_program_data = get_shared_program_data_buffer_mut();
+                    shared_program_data.focused_window_id.store(window_id, Ordering::Release);
+                }
             }
         }
     }
@@ -270,7 +282,7 @@ impl Compositor {
             return;
         }
 
-        let top_window = candidate_windows.first().unwrap();
+        let max_z_index = windows.iter().max_by_key(|w| w.z_index).unwrap();
 
         if let Some(top_window) = candidate_windows.first() {
             if top_window.id != *self.currently_focused_window.lock() {
