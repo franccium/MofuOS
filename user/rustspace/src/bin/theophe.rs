@@ -498,7 +498,7 @@ pub extern "C" fn main() -> ! {
         // unsafe {
         //     rustspace::sys_yield();
         // }
-        rustspace::println!("theophe: loop - end");
+        //rustspace::println!("theophe: loop - end");
     }
 
     unsafe { rustspace::sys_exit(0) };

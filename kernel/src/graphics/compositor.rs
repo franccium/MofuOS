@@ -55,7 +55,7 @@ pub struct Compositor {
     framebuffer_height: u32,
 
     next_window_id: AtomicU32,
-    currently_focused_window: Mutex<WindowID>,
+    currently_focused_window: AtomicU32,
     free_window_ids: Mutex<Vec<WindowID>>,
     // NOTE: cant sort directly by z_index cause the windows are keyed by their id == index
     pub windows: RwLock<Vec<Window>>,
@@ -74,7 +74,7 @@ impl Compositor {
             framebuffer_width,
             framebuffer_height,
             next_window_id: AtomicU32::new(0),
-            currently_focused_window: Mutex::new(INVALID_WINDOW_ID),
+            currently_focused_window: AtomicU32::new(INVALID_WINDOW_ID),
             windows: RwLock::new(Vec::new()),
             free_window_ids: Mutex::new(Vec::new()),
             mouse_x: AtomicI32::new(0),
@@ -221,32 +221,44 @@ impl Compositor {
 
     pub fn focus_window(&self, window_id: WindowID) {
         if window_id != INVALID_WINDOW_ID {
-            let mut focused_window = self.currently_focused_window.lock();
-            if window_id != *focused_window {
+            let mut focused_window = self.currently_focused_window.load(Ordering::Acquire);
+            if window_id != focused_window {
                 let mut windows = self.windows.write();
                 let max_z_index = windows.iter().max_by_key(|w| w.z_index).unwrap().z_index;
 
-                let window = windows.get_mut(window_id as usize).unwrap();
-                window.z_index = max_z_index + 1;
-                *focused_window = window_id;
+                match windows.get_mut(window_id as usize) {
+                    Some(window) => {
+                        window.z_index = max_z_index + 1;
+                        self.currently_focused_window
+                            .store(window_id, Ordering::Release);
 
-                if max_z_index > NORMALIZE_Z_INDEX_THRESHOLD {
-                    let mut visible: Vec<&mut Window> =
-                        windows.iter_mut().filter(|w| w.is_visible).collect();
-                    visible.sort_by_key(|w| w.z_index);
+                        if max_z_index > NORMALIZE_Z_INDEX_THRESHOLD {
+                            let mut visible: Vec<&mut Window> =
+                                windows.iter_mut().filter(|w| w.is_visible).collect();
+                            visible.sort_by_key(|w| w.z_index);
 
-                    for (i, window) in visible.iter_mut().enumerate() {
-                        window.z_index = i as u8;
+                            for (i, window) in visible.iter_mut().enumerate() {
+                                window.z_index = i as u8;
+                            }
+                        }
+
+                        unsafe {
+                            serial_println_core!(
+                                "Compositor: setting focused_window_id to {}",
+                                window_id
+                            );
+                            let mut shared_program_data = get_shared_program_data_buffer_mut();
+                            shared_program_data
+                                .focused_window_id
+                                .store(window_id, Ordering::Release);
+                        }
                     }
-                }
-                windows.sort_by_key(|w| w.z_index);
-
-                unsafe {
-                    serial_println_core!("Compositor: setting focused_window_id to {}", window_id);
-                    let mut shared_program_data = get_shared_program_data_buffer_mut();
-                    shared_program_data
-                        .focused_window_id
-                        .store(window_id, Ordering::Release);
+                    None => {
+                        serial_println_core!(
+                            "Compositor: focus_window - window does not exist: {}",
+                            window_id
+                        );
+                    }
                 }
             }
         }
@@ -281,7 +293,7 @@ impl Compositor {
     }
 
     fn get_focused_window_event_buffer(&self) -> Option<&'static EventBuffer> {
-        let focused_window_id = *self.currently_focused_window.lock();
+        let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
         if focused_window_id == INVALID_WINDOW_ID {
             return None;
         }
@@ -296,6 +308,28 @@ impl Compositor {
         let v = event.value;
         if v == Keys::LeftAlt as u32 {
             serial_println_core!("Compositor intercepted Left Alt")
+        }
+        if v == Keys::ArrowLeft as u32 {
+            let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
+            let new_focused_window_id = focused_window_id.saturating_sub(1);
+            //TODO: focused_window_id.clamp(0, self.windows.len());
+            serial_println_core!(
+                "Switch focus from {} to {}",
+                focused_window_id,
+                new_focused_window_id
+            );
+            self.focus_window(new_focused_window_id);
+        }
+        if v == Keys::ArrowRight as u32 {
+            let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
+            let (new_focused_window_id, _) = focused_window_id.overflowing_add(1);
+            //TODO: focused_window_id.clamp(0, self.windows.len());
+            serial_println_core!(
+                "Switch focus from {} to {}",
+                focused_window_id,
+                new_focused_window_id
+            );
+            self.focus_window(new_focused_window_id);
         }
 
         if let Some(event_buffer) = self.get_focused_window_event_buffer() {
@@ -339,7 +373,7 @@ impl Compositor {
     }
 
     fn handle_mouse_click(&mut self, mouse_x: i32, mouse_y: i32, buttons: MouseButtons) {
-        let focused_window_id = *self.currently_focused_window.lock();
+        let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
 
         if focused_window_id != INVALID_WINDOW_ID {
             let windows = self.windows.read();
@@ -371,31 +405,34 @@ impl Compositor {
     }
 
     fn find_and_focus_window_at(&self, mouse_x: i32, mouse_y: i32) {
-        let windows = self.windows.read();
-        let mut candidate_windows: Vec<&Window> = windows
-            .iter()
-            .filter(|w| w.is_visible)
-            .filter(|w| {
-                let x = w.x;
-                let y = w.y;
-                let width = w.buffer.width as i32;
-                let height = w.buffer.height as i32;
-                mouse_x >= x && mouse_x < x + width && mouse_y >= y && mouse_y < y + height
-            })
-            .collect();
+        let target_window_id = {
+            let windows = self.windows.read();
 
-        if candidate_windows.is_empty() {
-            return;
-        }
+            windows
+                .iter()
+                .filter(|w| w.is_visible)
+                .filter(|w| {
+                    let x = w.x;
+                    let y = w.y;
+                    let width = w.buffer.width as i32;
+                    let height = w.buffer.height as i32;
 
-        let max_z_index = windows.iter().max_by_key(|w| w.z_index).unwrap();
+                    mouse_x >= x
+                        && mouse_x < x + width
+                        && mouse_y >= y
+                        && mouse_y < y + height
+                })
+                .max_by_key(|w| w.z_index)
+                .map(|w| w.id)
+        };
 
-        if let Some(top_window) = candidate_windows.first() {
-            if top_window.id != *self.currently_focused_window.lock() {
-                self.focus_window(top_window.id);
+        if let Some(window_id) = target_window_id {
+            if window_id != self.currently_focused_window.load(Ordering::Acquire) {
+                self.focus_window(window_id);
+
                 serial_println!(
                     "Focused window {} at ({}, {})",
-                    top_window.id,
+                    window_id,
                     mouse_x,
                     mouse_y
                 );

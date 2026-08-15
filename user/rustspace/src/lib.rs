@@ -704,14 +704,14 @@ impl EventReader {
         self.buffer.event_count.load(Ordering::Acquire) > 0
     }
 
-    pub fn try_read(&mut self, window_id: u32) -> Option<InputEvent> {
+    pub fn try_read(&mut self, _window_id: u32) -> Option<InputEvent> {
         if self.buffer.event_count.load(Ordering::Acquire) == 0 {
             return None;
         }
 
         let idx = self.buffer.read_idx.load(Ordering::Acquire) as usize;
 
-        println!("read_idx: {}, window_id: {}", idx, window_id);
+        //println!("read_idx: {}, window_id: {}", idx, _window_id);
 
         let event =
             unsafe { core::ptr::read_volatile(&self.buffer.events[idx] as *const InputEvent) };
