@@ -1,5 +1,5 @@
 use crate::data_structures::vector::Vec;
-use crate::process::process::ProcessResources;
+use crate::process::process::{PROCESS_USER_VADDR_ALLOC_START, ProcessResources};
 //use alloc::vec::Vec;
 use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
@@ -10,6 +10,7 @@ use crate::process::scheduler::SCHEDULER;
 use crate::{serial_println, serial_println_core};
 use alloc::string::String;
 use spin::Mutex;
+use x86_64::{PhysAddr, VirtAddr};
 use x86_64::instructions::interrupts;
 
 pub const ARCHE_PID: usize = 0;
@@ -140,12 +141,14 @@ impl ProcessManager {
                 page_table_base,
             ),
             memory_layout: crate::process::process_mem::ProcessMemoryLayout {
-                top_page_table_phys: x86_64::PhysAddr::new(page_table_base),
-                stack_top: x86_64::VirtAddr::new(stack_top),
+                top_page_table_phys: PhysAddr::new(page_table_base),
+                stack_top: VirtAddr::new(stack_top),
                 stack_size: 0,
-                heap_start: x86_64::VirtAddr::new(0),
-                heap_end: x86_64::VirtAddr::new(0),
+                heap_start: VirtAddr::new(0),
+                heap_end: VirtAddr::new(0),
                 mapped_regions: alloc::vec::Vec::<MappedMemoryRegion>::new(),
+                next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
+                allocated_ranges: alloc::vec::Vec::new()
             },
         };
 

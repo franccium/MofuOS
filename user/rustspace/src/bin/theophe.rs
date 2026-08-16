@@ -22,6 +22,7 @@ use rustspace::{
     gfx::{color::Rgba8888UNORM, surface::UserSurface},
 };
 use rustspace::{KeyCode, WindowInfo, sys_get_window_info};
+use x86_64::structures::paging::PageTableFlags;
 
 const DEBUG_LOGS: bool = false;
 macro_rules! serial_println {
@@ -438,6 +439,15 @@ pub extern "C" fn main() -> ! {
     );
 
     unsafe { rustspace::syscall1(rustspace::SYS_FOCUS_WINDOW, window_id as u64) };
+
+    let page_flags =
+        PageTableFlags::WRITABLE | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    let mut buffer_info = rustspace::CircularBufferInfo::zeroed();
+    unsafe {
+        if !rustspace::sys_create_circular_buffer(15000, page_flags, &mut buffer_info) {
+            rustspace::println!("theophe: cant create circular buffer");
+        }
+    }
 
     let surface = unsafe { UserSurface::new(pixels, pixels_second, width, height) };
     let mut theophe = Theophe::new(surface, window_id);

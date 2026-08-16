@@ -1,7 +1,9 @@
 use crate::memory::memory::{MemoryMapFrameAllocator, PAGE_SIZE};
 use crate::memory::usermem::UserMemoryManager;
-use crate::process::process::{PROCESS_HEAP_VIRT_END, PROCESS_HEAP_VIRT_START};
-use crate::serial_println;
+use crate::process::process::{
+    PROCESS_HEAP_VIRT_END, PROCESS_HEAP_VIRT_START, PROCESS_USER_VADDR_ALLOC_END, PROCESS_USER_VADDR_ALLOC_START,
+};
+use crate::{serial_println, serial_println_core};
 use alloc::vec::Vec;
 use spin::MutexGuard;
 use x86_64::structures::paging::Size4KiB;
@@ -16,6 +18,8 @@ pub struct ProcessMemoryLayout {
     pub heap_start: VirtAddr,
     pub heap_end: VirtAddr,
     pub mapped_regions: Vec<MappedMemoryRegion>,
+    pub next_alloc_vaddr: VirtAddr,
+    pub allocated_ranges: Vec<(u64, u64)>, // (start, size)
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +48,8 @@ impl ProcessMemoryLayout {
             stack_size: 0u64,
             heap_start: VirtAddr::new(PROCESS_HEAP_VIRT_START),
             heap_end: VirtAddr::new(PROCESS_HEAP_VIRT_END),
+            next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
+            allocated_ranges: Vec::new(),
         })
     }
 
@@ -99,5 +105,30 @@ impl ProcessMemoryLayout {
         }
 
         Ok(self.heap_end)
+    }
+
+    pub fn allocate_virtual_range(&mut self, size_bytes: usize) -> Option<VirtAddr> {
+        let aligned_size = align_to_page_size(size_bytes as u64);
+
+        let alloc_vaddr = self.next_alloc_vaddr.as_u64();
+        let range_end = alloc_vaddr + aligned_size;
+
+        if range_end > PROCESS_USER_VADDR_ALLOC_END {
+            serial_println_core!(
+                "allocate_virtual_range: range_end is over the user vaddr alloc end: {}, trying to find a free gap",
+                range_end
+            );
+            return self.find_free_gap(aligned_size as usize);
+        }
+
+        self.next_alloc_vaddr = VirtAddr::new(range_end);
+        self.allocated_ranges.push((alloc_vaddr, aligned_size));
+
+        Some(VirtAddr::new(alloc_vaddr))
+    }
+
+    fn find_free_gap(&self, size_bytes: usize) -> Option<VirtAddr> {
+        //TODO:
+        None
     }
 }

@@ -21,24 +21,15 @@ pub const MAX_PRIORITY: u8 = 8;
 pub const RFLAGS_DEFAULT: u64 = 0x202;
 pub const DEFAULT_NEW_PROCESS_STACK_SIZE: u64 = 1 * 1024 * 1024;
 
+pub const PROCESS_USER_VADDR_ALLOC_MAX_SIZE: u64 = 0x0000_0000_5000_0000;
+pub const PROCESS_USER_VADDR_ALLOC_START: u64 = 0x0000_0000_1000_0000;
+pub const PROCESS_USER_VADDR_ALLOC_END: u64 = PROCESS_USER_VADDR_ALLOC_START + PROCESS_USER_VADDR_ALLOC_MAX_SIZE;
+
 pub const PROCESS_HEAP_SIZE_BYTES: u64 = 2 * 1024 * 1024;
 pub const PROCESS_HEAP_VIRT_START: u64 = 0x0000_0000_6000_0000;
 pub const PROCESS_HEAP_VIRT_END: u64 = PROCESS_HEAP_VIRT_START + PROCESS_HEAP_SIZE_BYTES;
 
 pub type PID = usize;
-
-//TODO: temporary until no scheduler
-static CURRENT_PROCESS: spin::Once<spin::Mutex<Option<Process>>> = spin::Once::new();
-
-pub fn set_current_process(process: Process) {
-    CURRENT_PROCESS.call_once(|| spin::Mutex::new(Some(process)));
-}
-
-pub fn get_current_process() -> &'static spin::Mutex<Option<Process>> {
-    CURRENT_PROCESS
-        .get()
-        .expect("Current process not initialized")
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
@@ -170,6 +161,8 @@ impl Process {
             heap_start: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_START),
             heap_end: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_END),
             mapped_regions: alloc::vec::Vec::new(),
+            next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
+            allocated_ranges: alloc::vec::Vec::new()
         };
 
         Ok(Self {

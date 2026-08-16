@@ -20,6 +20,12 @@ REAL TODO:
 
 - easier way to get file size, and sys_stat_file(fd) instead of (path)
 
+- less allocations in odys, scratch buffer arena
+    figure out how to put a file editor in it
+        read file into a buffer, edit that buffer in-odys
+        when save file - flush to fs (fs cache but that only kernel knows)
+        
+
 - make a rect-based rendering pipeline
     or research some real software rendering solutions
 

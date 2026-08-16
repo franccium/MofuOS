@@ -7,6 +7,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
 use spin::Mutex;
+use x86_64::structures::paging::PageTableFlags;
 
 pub mod gfx;
 
@@ -36,6 +37,8 @@ pub const SYS_LIST_DIR: u64 = 25;
 pub const SYS_CREATE_FILE: u64 = 26;
 pub const SYS_CREATE_DIR: u64 = 27;
 pub const SYS_DELETE: u64 = 28;
+
+pub const SYS_CREATE_CIRCULAR_BUFFER: u64 = 600;
 
 pub const SYS_GET_CPU_INFO: u64 = 970;
 
@@ -120,6 +123,21 @@ impl DirEntryFlat {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CircularBufferCreateRequest {
+    pub size_bytes: usize,
+    pub page_flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CircularBufferInfo {
+    pub virtual_base: u64,
+    pub view_size: u64,
+    pub total_virtual_size: u64,
+}
+
 /// Flat stat result returned by sys_stat.
 /// Must match the kernel-side StatFlat layout exactly.
 #[repr(C)]
@@ -131,6 +149,16 @@ pub struct StatFlat {
     pub size: u64,
     pub created_time: u32,
     pub modified_time: u32,
+}
+
+impl CircularBufferInfo {
+    pub const fn zeroed() -> Self {
+        Self {
+            virtual_base: 0,
+            view_size: 0,
+            total_virtual_size: 0,
+        }
+    }
 }
 
 impl StatFlat {
@@ -429,6 +457,23 @@ pub unsafe fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
             path.as_ptr() as u64,
             path.len() as u64,
             out_stat as *mut StatFlat as u64,
+        )
+    };
+    ret != u64::MAX
+}
+
+#[inline(always)]
+pub unsafe fn sys_create_circular_buffer(
+    size: usize,
+    page_flags: PageTableFlags,
+    out_buffer_info: &mut CircularBufferInfo,
+) -> bool {
+    let ret = unsafe {
+        syscall3(
+            SYS_CREATE_CIRCULAR_BUFFER,
+            size as u64,
+            page_flags.bits(),
+            out_buffer_info as *mut CircularBufferInfo as u64,
         )
     };
     ret != u64::MAX

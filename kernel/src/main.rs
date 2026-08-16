@@ -80,16 +80,11 @@ fn main() -> ! {
     }
     kernel::tests_exp::test_ata::test_ata_filesystem();
 
-    //kernel::process_start::create_init_process();
-    //kernel::process_start::create_and_run_init_process();
-
     //test_process_system();
 
     //test_filesystem_system();
 
     //test_process::test_process_system();
-    //test_process::create_init_process();
-    //test_process::create_and_run_init_process();
 
     {
         let mut framebuffer_target = kernel::graphics::framebuffer::get_framebuffer();

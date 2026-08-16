@@ -1,3 +1,4 @@
+use crate::data_structures::circular_buffer::{CircularBuffer, CircularBufferInfo};
 use crate::events::event_buffer::EventBuffer;
 use crate::filesystem::sirius::{DirEntryFlat, FS_NAME_LEN, FilesystemDriver, StatFlat};
 use crate::graphics::window::WindowInfo;
@@ -23,6 +24,7 @@ use crate::{
 };
 use alloc::string::String;
 use alloc::vec::Vec;
+use x86_64::structures::paging::PageTableFlags;
 use core::arch::naked_asm;
 use core::sync::atomic::Ordering;
 use x86_64::registers::model_specific::{Efer, EferFlags};
@@ -95,6 +97,9 @@ pub enum SyscallNumber {
     EvictDirectory = 33,
     GetCacheStats = 34,
     FlushFileCache = 35,
+
+    CreateCircularBuffer = 600,
+
     GetCpuInfo = 970,
     GetProcessInfo = 996,
     GetPID = 997,
@@ -1085,6 +1090,41 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 }
             }
         }
+
+        SyscallNumber::CreateCircularBuffer => {
+            let size_bytes = frame.arg1 as usize;
+            let page_flags = PageTableFlags::from_bits_truncate(frame.arg2);
+            let buffer_info_out = frame.arg3 as *mut CircularBufferInfo;
+            
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+            
+            let mut frame_allocator = get_frame_allocator();
+            let user_memory_manager = &crate::memory::get_user_mem_mgr();
+            let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
+            
+            if let Ok(proc) = pm.get_process_mut(pid) {
+                serial_println_core!(
+                    "CreateCircularBuffer: found process for pid: {}",
+                    pid
+                );
+
+                match CircularBuffer::map_for_user(size_bytes, page_flags as PageTableFlags, user_memory_manager, &mut proc.memory_layout, &mut frame_allocator)
+                {
+                    Some(buffer_info) => {
+                        serial_println_core!("CreateCircularBuffer: buffer created, virt_base: {}, view_size: {}", buffer_info.virtual_base, buffer_info.view_size);
+                        *buffer_info_out = buffer_info;
+                        return 0;
+                    }
+                    None => {
+                        serial_println_core!("CreateCircularBuffer: cant create the buffer");
+                        return u64::MAX;
+                    }
+                }
+            }
+
+            u64::MAX
+        },
 
         SyscallNumber::GetCpuInfo => {
             let buffer_ptr = frame.arg1 as usize;
