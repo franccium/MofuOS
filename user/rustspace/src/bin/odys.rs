@@ -46,7 +46,7 @@ global_asm!(
 const CHARACTER_WIDTH: usize = 8;
 const CHARACTER_HEIGHT: usize = 13;
 const MARGIN_LEFT: i32 = 4;
-const MARGIN_TOP: i32 = 4;
+const MARGIN_TOP: i32 = 16;
 const MAX_LINES: usize = 40;
 const LINE_SPACING: i32 = 15;
 const MAX_CHARS_PER_LINE: usize = 100;
@@ -77,7 +77,7 @@ struct FileEntry {
     size: u64,
 }
 
-pub struct FileExplorer<D: DrawTarget<Color = Rgb888>> {
+pub struct Odys<D: DrawTarget<Color = Rgb888>> {
     needs_redraw: bool,
     window_id: u32,
     draw_target: D,
@@ -90,12 +90,12 @@ pub struct FileExplorer<D: DrawTarget<Color = Rgb888>> {
     max_visible_entries: usize,
 }
 
-impl<D: DrawTarget<Color = Rgb888>> FileExplorer<D> {
+impl<D: DrawTarget<Color = Rgb888>> Odys<D> {
     pub fn new(draw_target: D, window_id: u32) -> Self {
         let bounding_box = draw_target.bounding_box();
         let max_visible_entries = (bounding_box.size.height as usize - 40) / LINE_SPACING as usize;
 
-        let mut explorer = Self {
+        let mut odys = Self {
             needs_redraw: true,
             window_id,
             draw_target,
@@ -108,8 +108,8 @@ impl<D: DrawTarget<Color = Rgb888>> FileExplorer<D> {
             max_visible_entries,
         };
 
-        explorer.load_directory("/");
-        explorer
+        odys.load_directory("/");
+        odys
     }
 
     fn load_directory(&mut self, path: &str) {
@@ -161,15 +161,15 @@ impl<D: DrawTarget<Color = Rgb888>> FileExplorer<D> {
     fn display_help(&mut self) {
         let mut text = String::from(
             "Odys - help:\nKeybinds:\n
-        arrows - cursor navigation\n
-        in file selection:\n
-        right arrow - enter directory/open file\n
-            if opened file:\n
-                contents display on the screen\n
-        left arrow - exit current directory/current file\n
-        \n
-        \n
-        (left arrow to exit)",
+arrows - cursor navigation\n
+in file selection:\n
+right arrow - enter directory/open file\n
+    if opened file:\n
+        contents display on the screen\n
+left arrow - exit current directory/current file\n
+\n
+\n
+(left arrow to exit)",
         );
 
         self.file_content = text;
@@ -465,34 +465,34 @@ impl<D: DrawTarget<Color = Rgb888>> FileExplorer<D> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
-    let window_id = unsafe { rustspace::sys_create_window(800, 600, 100, 50) };
+    let window_id = unsafe { rustspace::sys_create_window(800, 600, 650, 50) };
     if window_id == u32::MAX {
-        rustspace::println!("FileExplorer: create_window failed");
+        rustspace::println!("Odys: create_window failed");
         unsafe { rustspace::sys_exit(1) }
     }
-    rustspace::println!("FileExplorer: window id={}", window_id);
+    rustspace::println!("Odys: window id={}", window_id);
 
     let pixels = unsafe { rustspace::sys_map_window_buffer(window_id) };
     if pixels.is_null() {
-        rustspace::println!("FileExplorer: map_window_buffer failed");
+        rustspace::println!("Odys: map_window_buffer failed");
         unsafe { rustspace::sys_exit(1) }
     }
     let pixels_second = ((pixels as u64) + 8 * 1024 * 1024) as *mut u32;
 
     let (width, height) = unsafe { rustspace::sys_get_window_size(window_id) };
     if width == 0 || height == 0 {
-        rustspace::println!("FileExplorer: get_window_size failed");
+        rustspace::println!("Odys: get_window_size failed");
         unsafe { rustspace::sys_exit(1) }
     }
 
-    rustspace::println!("FileExplorer: window {}x{} id={}", width, height, window_id);
+    rustspace::println!("Odys: window {}x{} id={}", width, height, window_id);
 
     unsafe { rustspace::syscall1(rustspace::SYS_FOCUS_WINDOW, window_id as u64) };
 
     let surface = unsafe { UserSurface::new(pixels, pixels_second, width, height) };
-    let mut explorer = FileExplorer::new(surface, window_id);
+    let mut odys = Odys::new(surface, window_id);
 
-    rustspace::println!("FileExplorer: starting");
+    rustspace::println!("Odys: starting");
 
     let mut event_reader = unsafe { EventReader::new(EVENT_BUFFER_ADDR) };
 
@@ -504,21 +504,21 @@ pub extern "C" fn main() -> ! {
             let event = event_reader.try_read(window_id);
             match event {
                 Some(event) => {
-                    explorer.handle_event(event);
+                    odys.handle_event(event);
                 }
                 None => break,
             }
         }
 
-        let backbuffer_redraw_required = explorer.needs_redraw;
-        if explorer.needs_redraw {
-            explorer.render();
-            explorer.needs_redraw = false;
+        let backbuffer_redraw_required = odys.needs_redraw;
+        if odys.needs_redraw {
+            odys.render();
+            odys.needs_redraw = false;
         }
         unsafe { rustspace::sys_present_window(window_id) };
         unsafe {
-            explorer.draw_target.swap();
-            explorer.needs_redraw = backbuffer_redraw_required;
+            odys.draw_target.swap();
+            odys.needs_redraw = backbuffer_redraw_required;
         }
 
         frame = frame.wrapping_add(1);
@@ -529,6 +529,6 @@ pub extern "C" fn main() -> ! {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    rustspace::println!("FileExplorer: panic");
+    rustspace::println!("Odys: panic");
     unsafe { rustspace::sys_exit(1) }
 }
