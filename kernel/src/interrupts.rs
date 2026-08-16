@@ -1156,39 +1156,32 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     let scancode: u8 = unsafe { keyboard_port.read() };
 
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-        let is_press =
-            key_event.state == PcKeyState::Down || key_event.state == PcKeyState::SingleShot;
+        let key_state = match key_event.state {
+            PcKeyState::Down | PcKeyState::SingleShot => KeyState::Pressed,
+            PcKeyState::Up=> KeyState::Released,
+        };
         if let Some(decoded_key) = keyboard.process_keyevent(key_event)
-            && is_press
         {
-            let value = match decoded_key {
-                DecodedKey::Unicode(c) => Some(c as u32),
-                //TODO: this
-                DecodedKey::RawKey(KeyCode::ArrowUp) => Some(Keys::ArrowUp as u32),
-                DecodedKey::RawKey(KeyCode::ArrowDown) => Some(Keys::ArrowDown as u32),
-                DecodedKey::RawKey(KeyCode::ArrowLeft) => Some(Keys::ArrowLeft as u32),
-                DecodedKey::RawKey(KeyCode::ArrowRight) => Some(Keys::ArrowRight as u32),
-                DecodedKey::RawKey(KeyCode::Backspace) => Some(Keys::Backspace as u32),
-                DecodedKey::RawKey(KeyCode::LAlt) => Some(Keys::LeftAlt as u32),
-                DecodedKey::RawKey(KeyCode::Tab) => Some(Keys::Tab as u32),
-                _ => None,
+            match decoded_key {
+                DecodedKey::Unicode(c) => {
+                    unsafe {
+                        compositor::get_input_event_buffer()
+                            .push(InputEvent::new_char(c as u32, key_state));
+                    };
+                    if KEYBOARD_DEBUG_PRINT {
+                        serial_println_core!("keyboard_handler: Pushed char: {}", c);
+                    }
+                }
+                DecodedKey::RawKey(k) => {
+                    unsafe {
+                        compositor::get_input_event_buffer()
+                            .push(InputEvent::new_key(k as u32, key_state));
+                    };
+                    if KEYBOARD_DEBUG_PRINT {
+                        serial_println_core!("keyboard_handler: Pushed key: {:?}", k);
+                    }
+                }
             };
-            if let Some(v) = value {
-                if KEYBOARD_DEBUG_PRINT {
-                    serial_println_core!("keyboard_handler: Pushed {:x}", v);
-                }
-                let _ = unsafe {
-                    compositor::get_input_event_buffer()
-                        .push(InputEvent::new_key(v, KeyState::Pressed));
-                };
-            }
-
-            if KEYBOARD_DEBUG_PRINT {
-                match decoded_key {
-                    DecodedKey::Unicode(c) => serial_print!("{}", c),
-                    DecodedKey::RawKey(k) => serial_print!("{:?}", k),
-                }
-            }
         }
     }
 

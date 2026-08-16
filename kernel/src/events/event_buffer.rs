@@ -53,8 +53,9 @@ impl AsciiChar {
 #[repr(u8)]
 pub enum EventType {
     None = 0,
-    KeyEvent = 1,
-    MouseEvent = 2,
+    CharEvent= 1,
+    KeyEvent = 2,
+    MouseEvent = 3,
 }
 
 pub type EventBufferResult<T> = Result<T, EventBufferError>;
@@ -87,6 +88,10 @@ impl InputEvent {
 
     pub fn new_key(keycode: u32, state: KeyState) -> Self {
         Self::new(EventType::KeyEvent, keycode, state as u32)
+    }
+
+    pub fn new_char(keycode: u32, state: KeyState) -> Self {
+        Self::new(EventType::CharEvent, keycode, state as u32)
     }
 
     pub fn new_mouse(mouse_event: MouseEvent) -> Self {

@@ -2,8 +2,7 @@ use alloc::format;
 use alloc::string::String;
 
 use crate::process::elf_loader::{
-    FS_CACHED_TEST_ELF, FS_TEST_ELF, GAME_ELF, PING_ELF, RUST_FIRST_ELF, SMALL_ELF, TEST_ELF,
-    THEOPHE_ELF,
+    FS_CACHED_TEST_ELF, FS_TEST_ELF, GAME_ELF, ODYS_ELF, PING_ELF, RUST_FIRST_ELF, SMALL_ELF, TEST_ELF, THEOPHE_ELF,
 };
 use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
 use crate::{
@@ -80,6 +79,12 @@ pub fn create_userspace_processes() {
     if RUN_THEOPHE {
         if let Ok(pid) = create_userspace_process(&THEOPHE_ELF, "theophe", 0, 7) {
             serial_println!("Created theophe (PID {})", pid);
+        }
+    }
+
+    if RUN_ODYS {
+        if let Ok(pid) = create_userspace_process(&ODYS_ELF, "odys", 0, 7) {
+            serial_println!("Created odys (PID {})", pid);
         }
     }
 

@@ -21,6 +21,7 @@ const SHARED_REGION_COUNT: usize = 1;
 //const IO_EVENT_BUFFER_INDEX: usize = 0;
 const PROGRAM_SHARED_DATA_INDEX: usize = 0;
 
+//TODO: now, due to changes in event buffer being now per-process, this is just the virtual adress at which the userspace processes expect the event buffer to be, and in their page tables the buffer is mapped at that address
 pub const EVENT_BUFFER_ADDR: usize = 0x0000_0007_0000_0000;
 pub const PROGRAM_SHARED_DATA_ADDR: usize = EVENT_BUFFER_ADDR + PAGE_SIZE;
 

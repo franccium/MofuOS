@@ -20,7 +20,7 @@ use rustspace::{
     AsciiChar, EVENT_BUFFER_ADDR, EventReader, EventType, InputEvent, KeyState, Keys,
     gfx::{color::Rgba8888UNORM, surface::UserSurface},
 };
-use rustspace::{WindowInfo, sys_get_window_info};
+use rustspace::{KeyCode, WindowInfo, sys_get_window_info};
 
 const DEBUG_LOGS: bool = false;
 macro_rules! serial_println {
@@ -294,12 +294,6 @@ impl<D: DrawTarget<Color = Rgb888>> Odys<D> {
         }
     }
 
-    fn recall_last_command(&mut self) {
-        if !self.last_command.is_empty() {
-            self.lines[self.curr_line_idx] = self.last_command;
-        }
-    }
-
     fn backspace(&mut self) {
         let line = &mut self.lines[self.curr_line_idx];
         if line.length > 0 {
@@ -327,13 +321,23 @@ impl<D: DrawTarget<Color = Rgb888>> Odys<D> {
         }
     }
 
+    fn handle_special_key(&mut self, key: KeyCode, key_state: KeyState) {
+        match key {
+            KeyCode::ArrowUp => {
+                self.recall_last_command();
+                self.needs_redraw = true;
+            }
+            KeyCode::ArrowLeft => {}
+            KeyCode::ArrowDown => {}
+            _ => {}
+        }
+    }
+
     pub fn handle_event(&mut self, event: InputEvent) {
         let v = event.value;
         match event.event_type {
-            EventType::KeyEvent => {
-                if v == Keys::ArrowUp as u32 {
-                    self.recall_last_command();
-                } else if let Some(c) = char::from_u32(v) {
+            EventType::CharEvent => {
+                if let Some(c) = char::from_u32(v) {
                     match c {
                         AsciiChar::BACKSPACE => self.backspace(),
                         AsciiChar::NEWLINE | AsciiChar::CARRIAGE_RETURN => {
@@ -347,13 +351,18 @@ impl<D: DrawTarget<Color = Rgb888>> Odys<D> {
                         }
                         _ => {}
                     }
+                    self.needs_redraw = true;
                 }
-                self.needs_redraw = true;
+            }
+            EventType::KeyEvent => {
+                let keycode = unsafe { core::mem::transmute::<u8, KeyCode>(event.value as u8) };
+                let key_state = unsafe { core::mem::transmute::<u8, KeyState>(event.extra as u8) };
+                self.handle_special_key(keycode, key_state);
             }
             EventType::MouseEvent => {
                 let mouse_event = event.decode_mouse();
             }
-            EventType::None => {}
+            _ => {}
         }
     }
 }

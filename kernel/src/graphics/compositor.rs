@@ -287,7 +287,11 @@ impl Compositor {
                 EventType::KeyEvent => {
                     self.handle_keyboard_event(event);
                 }
-                EventType::None => {}
+                _ => {
+                    if let Some(event_buffer) = self.get_focused_window_event_buffer() {
+                        let _ = event_buffer.push(event);
+                    }
+                }
             }
         }
     }
@@ -417,10 +421,7 @@ impl Compositor {
                     let width = w.buffer.width as i32;
                     let height = w.buffer.height as i32;
 
-                    mouse_x >= x
-                        && mouse_x < x + width
-                        && mouse_y >= y
-                        && mouse_y < y + height
+                    mouse_x >= x && mouse_x < x + width && mouse_y >= y && mouse_y < y + height
                 })
                 .max_by_key(|w| w.z_index)
                 .map(|w| w.id)
@@ -430,12 +431,7 @@ impl Compositor {
             if window_id != self.currently_focused_window.load(Ordering::Acquire) {
                 self.focus_window(window_id);
 
-                serial_println!(
-                    "Focused window {} at ({}, {})",
-                    window_id,
-                    mouse_x,
-                    mouse_y
-                );
+                serial_println!("Focused window {} at ({}, {})", window_id, mouse_x, mouse_y);
             }
         }
     }
