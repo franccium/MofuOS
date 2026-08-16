@@ -18,6 +18,8 @@ REAL TODO:
 - better perf testing
     repetitions
 
+- easier way to get file size, and sys_stat_file(fd) instead of (path)
+
 - make a rect-based rendering pipeline
     or research some real software rendering solutions
 

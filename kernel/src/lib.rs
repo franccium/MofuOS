@@ -9,7 +9,7 @@
 use static_assertions::const_assert;
 
 pub const RUN_THEOPHE: bool = false;
-pub const RUN_ODYS: bool = false;
+pub const RUN_ODYS: bool = true;
 pub const USE_PING_PROGRAM: bool = false;
 pub const USE_TEST_PROGRAM: bool = false;
 pub const USE_RUST_USER_PROGRAMS: bool = false;

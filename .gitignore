@@ -11,6 +11,7 @@ notes/
 kernel/kernel
 logs
 scripts/__pycache__
+ata_disk.img
 
 
 temp/

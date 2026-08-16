@@ -6,8 +6,7 @@ use crate::process::elf_loader::{
 };
 use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
 use crate::{
-    RUN_FS_CACHED_TEST, RUN_FS_TEST, RUN_THEOPHE, USE_GAME_PROGRAM, USE_PING_PROGRAM,
-    USE_RUST_USER_PROGRAMS, USE_TEST_PROGRAM, serial_println,
+    RUN_FS_CACHED_TEST, RUN_FS_TEST, RUN_ODYS, RUN_THEOPHE, USE_GAME_PROGRAM, USE_PING_PROGRAM, USE_RUST_USER_PROGRAMS, USE_TEST_PROGRAM, serial_println,
 };
 
 pub fn create_init_process() {

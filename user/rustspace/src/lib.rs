@@ -671,6 +671,7 @@ impl AsciiChar {
     pub const ESCAPE: char = '\x1B';
     pub const DELETE: char = '\x7F';
     pub const SPACE: char = ' ';
+    pub const QUESTION_MARK: char = '?';
 }
 
 const PAGE_SIZE: usize = 4096;

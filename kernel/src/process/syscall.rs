@@ -647,7 +647,6 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
 
             let buffer = unsafe { core::slice::from_raw_parts_mut(buffer_ptr as *mut u8, count) };
 
-            // Use cached read path when available
             let bytes_read = {
                 let mut sirius = crate::filesystem::sirius::get_sirius();
 
