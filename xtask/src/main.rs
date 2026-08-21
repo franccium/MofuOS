@@ -238,7 +238,7 @@ fn run_tests(root: &Path, filters: &[String]) {
     let all_bins = discover_test_bins(root);
     if all_bins.is_empty() {
         eprintln!("No test binaries found in kernel/src/bin/test_*.rs");
-        eprintln!("MofuOS in-kernel tests live in kernel/src/tests_exp/ — run via normal boot.");
+        eprintln!("MofuOS in-kernel tests live in kernel/src/tests_exp/ - run via normal boot.");
         std::process::exit(1);
     }
     let bins: Vec<String> = if filters.is_empty() {
@@ -370,7 +370,7 @@ fn build_user(root: &Path) {
             .arg(&libc_a)
             .current_dir(&user_dir));
     }
-    // Rust userspace (user/rustspace) — optional, skip if no toolchain
+    // Rust userspace (user/rustspace) - optional, skip if no toolchain
     let rustspace_dir = user_dir.join("rustspace");
     if rustspace_dir.join("Cargo.toml").exists() {
         println!("Building Rust userspace…");
@@ -402,7 +402,7 @@ fn build_iso(root: &Path) {
     let limine = root.join("target/limine");
     let kernel_bin = kernel_bin(root, false);
     if !kernel_bin.exists() {
-        panic!("kernel binary not found at {} — build failed?", kernel_bin.display());
+        panic!("kernel binary not found at {} - build failed?", kernel_bin.display());
     }
     fs::copy(&kernel_bin, iso_root.join("boot/kernel")).unwrap();
     fs::copy(limine_conf_path(root), iso_root.join("boot/limine/limine.conf")).unwrap();
@@ -482,7 +482,7 @@ fn fat32_image(root: &Path) {
     if script.exists() {
         run(Command::new(script).arg(&img).arg("16").current_dir(root));
     } else {
-        eprintln!("scripts/create_fat32_image.sh not found — skipping");
+        eprintln!("scripts/create_fat32_image.sh not found - skipping");
     }
     let _ = fs::copy(&img, root.join("test_disk_image.fat32.img"));
 }
@@ -503,6 +503,7 @@ fn ensure_ovmf(root: &Path) {
         return;
     }
     fs::create_dir_all(&ovmf_dir).unwrap();
+    // stupid btw
     let candidates: &[(&str, &str, &str)] = &[
         ("/usr/share/OVMF", "OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd"),
         ("/usr/share/OVMF", "OVMF_CODE.fd", "OVMF_VARS.fd"),
@@ -533,7 +534,7 @@ fn ensure_ovmf(root: &Path) {
         return;
     }
     panic!(
-        "OVMF firmware not found. Install it:\n  Debian/Ubuntu:  sudo apt install ovmf\n  Arch: sudo pacman -S edk2-ovmf\n  Fedora: sudo dnf install edk2-ovmf"
+        "OVMF firmware not found"
     );
 }
 

@@ -110,13 +110,13 @@ are exclusive.
 
 ## Build Constraints
 
-- `cargo build` must be run from the `kernel/` directory (via `kernel/GNUmakefile`)
-  or from the root via `make kernel`.
-- The `build.rs` uses `cc`, `ld`, `objcopy` — these must be available in PATH.
+- All builds via `cargo xtask` (`cargo x`): `cargo xtask build` builds kernel + user, `cargo xtask iso` builds ISO. Legacy `make` and `kernel/GNUmakefile` are deprecated shims.
+- Direct kernel build without xtask: `cargo build -p kernel --target x86_64-unknown-none -Z build-std=core,alloc` (from workspace root).
+- The `kernel/build.rs` uses `cc`, `ld`, `objcopy` — these must be available in PATH.
   On Debian: `sudo apt install -y build-essential binutils`.
 - `llvm-tools-preview` component is required for `llvm-objcopy` (toolchain installs it).
-- No `std` in kernel; `build-std = ["core", "alloc"]` in `.cargo/config.toml`.
-- Target: `x86_64-unknown-none` (or `x86_64-kernel.json` for the custom target spec).
+- No `std` in kernel; `build-std` is passed explicitly by xtask (`-Z build-std=core,alloc`), not via global `.cargo/config.toml`.
+- Target: `x86_64-unknown-none` (or `x86_64-kernel.json` for the custom target spec). `xtask` builds user programs via `clang`/`ld.lld` + `user/rustspace` cargo.
 
 ## File Layout Rules
 

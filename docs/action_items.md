@@ -100,7 +100,7 @@ Fix `get_effective_importance` to lookup `parent_id`, not `file_id`. Add `debug_
 
 **Fix:** After `new_entry = (existing & 0xF000_0000) | (value & 0x0FFF_FFFF)`, write to both `fat_start + entry_offset` and `fat_start + fat_size_32*bytes_per_sector + entry_offset` if `num_fats >=2`. Batch if multiple entries in same sector.
 
-**Verification:** `make run` → inside `fs_test` write file, `qemu-img` dump, `fsck.fat -n ata_disk.img` zero errors; hex-compare FAT1/FAT2 sectors.
+**Verification:** `cargo xtask run` → inside `fs_test` write file, `qemu-img` dump, `fsck.fat -n ata_disk.img` zero errors; hex-compare FAT1/FAT2 sectors.
 
 ---
 
@@ -165,12 +165,12 @@ Handle `_mask_size !=8` by scaling (e.g., 5/6-bit). Add `debug_assert!(red_size=
 
 ### A1-6: Single-core userspace bottleneck (ISSUE-P5 + ISSUE-H3)
 
-**Files:** `kernel/src/process/core_pool.rs: available_cores &= !1`, `GNUmakefile: QEMUFLAGS -smp cores=2`, `kernel/src/lib.rs: MAX_CORES=16`
+**Files:** `kernel/src/process/core_pool.rs: available_cores &= !1`, `xtask/src/main.rs: run_iso QEMUFLAGS -smp cores=3`, `kernel/src/lib.rs: MAX_CORES=16`
 
 **Root cause:** Core 0 (BSP) runs `main()` compositor loop + `hlt`; all userspace pinned to core 1. With `cores=2`, only one runnable process at a time → scheduler's 8-level priority + `Dequeue` is untested for concurrency. `MAX_CORES=16` bitmap (`u64`) supports it, but `init_cpu_infos`, `PER_CORE_*` arrays, `log_splitter.py: MAX_CORES=4` vs `lib.rs:16` mismatch (AGENTS.md warns keep in sync).
 
 **Fix:**
-- Test matrix: `make run QEMUFLAGS="-smp 4"` (requires `log_splitter.py:22 MAX_CORES=16`). Verify `CORE_POOL` assigns least-loaded across 3 APs, `SCHEDULER.per_core.len()==core_count`.
+- Test matrix: `QEMUFLAGS="-smp 4" cargo xtask run` (requires `log_splitter.py:22 MAX_CORES=16`). Verify `CORE_POOL` assigns least-loaded across 3 APs, `SCHEDULER.per_core.len()==core_count`.
 - Long term: allow BSP to also run userspace when compositor idle, or dedicate core 0 to `SCHEDULER` + `Sirius` lock holder to avoid `SCHEDULER` contention on all cores.
 
 ---
@@ -237,7 +237,7 @@ Handle `_mask_size !=8` by scaling (e.g., 5/6-bit). Add `debug_assert!(red_size=
 ### A3-1: Code quality and CI
 
 - **Remove `#![allow(warnings,unused)]` `ISSUE-C1`**: Replace with crate-level `#[allow(dead_code)]` per module + `#[deny(unused_must_use)]` for `Result`. Run `cargo +nightly clippy --target x86_64-unknown-none -Z build-std` in CI.
-- **No `no_std` test harness `ISSUE-C3`**: Promote `kernel/src/tests_exp/` to `#[cfg(test)]` harness that runs under `qemu -serial stdio -device isa-debug-exit` and asserts `QemuExitCode::Success 0x10`. Add `make check` target.
+- **No `no_std` test harness `ISSUE-C3`**: Promote `kernel/src/tests_exp/` to `#[cfg(test)]` harness that runs under `qemu -serial stdio -device isa-debug-exit` and asserts `QemuExitCode::Success 0x10`. Add `cargo xtask clippy` target.
 - **Formatting:** `user/rustspace` already `cargo fmt` in Makefile; add `kernel` fmt check.
 - **Build deps:** `build.rs` `cc/ld/objcopy` — pin `llvm-tools-preview` via `rust-toolchain.toml` already, but check `llvm-ar/ld.lld` host version drift.
 
@@ -272,14 +272,14 @@ Handle `_mask_size !=8` by scaling (e.g., 5/6-bit). Add `debug_assert!(red_size=
 8. A2-5 trampoline removal or X2APIC evaluation, A2-6 `sys_create_process(path)` from Sirius
 
 **Ongoing:**
-9. A3-1 drop `allow(warnings)`, add `make check` CI, consolidate `docs/` vs `notes/`
+9. A3-1 drop `allow(warnings)`, add `cargo xtask clippy` / `cargo xtask test` CI, consolidate `docs/` vs `notes/`
 
 ---
 
 ## Verification Checklist (per item)
 
-- [ ] QEMU `make run` boots, `logs/core_*.txt` shows `[Core N | Xus]` prefixes, no `#PF`/`#GP`
-- [ ] `make run QEMUFLAGS="-smp 4"` with 4 `ping` processes interleaves
+- [ ] QEMU `cargo xtask run` boots, `logs/core_*.txt` shows `[Core N | Xus]` prefixes, no `#PF`/`#GP`
+- [ ] `QEMUFLAGS="-smp 4" cargo xtask run` with 4 `ping` processes interleaves
 - [ ] `fs_test` 6 suites pass on `ata_disk.img`; `fsck.fat -n` clean
 - [ ] `cargo +nightly clippy` zero warnings (after A3-1)
 - [ ] `objdump` of `run_on_core_loop` shows `mov %rcx,%cr3` not `mov %rax,%cr3` (BUG-02 regression guard)

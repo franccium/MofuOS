@@ -8,7 +8,7 @@ MofuOS is a monolithic x86_64 kernel in Rust. Boots via Limine revision 5 (UEFI)
 Runs in QEMU KVM. Has a custom software rendering pipeline and compositor.
 Currently runs a single userspace C test program (TEST_ELF embedded in kernel).
 
-The only run command: `make run` (from repo root, runs `make run-x86_64`).
+The only run command: `cargo xtask run` (or `cargo x run`; legacy `make run` still works as shim, runs `xtask::run_iso`).
 All output to serial. No display window for logs. Logs go to `logs/<timestamp>/`.
 
 ## Agent Reference Notes
@@ -60,7 +60,7 @@ Working:
 - theophe: creates window, maps back buffer, renders text via embedded-graphics,
   presents frames — compositor displays on screen
 - fs_test: userspace filesystem test suite (6 suites, embedded as FS_TEST_ELF)
-- user programs rebuilt automatically before kernel via GNUmakefile dependency
+- user programs rebuilt automatically before kernel via `xtask::build_user` → `build_kernel` dependency
 
 Not working / TODO:
 - Preemption of tight syscall loops limited [ISSUE-P9]

@@ -13,17 +13,17 @@ and userspace.
 
 ```
 MofuOS/
-  GNUmakefile          — root build orchestrator (make run targets here)
-  Cargo.toml           — workspace root; kernel is the only member
-  .cargo/config.toml   — target = x86_64-unknown-none, link-arg linker script
+  xtask/               — cargo xtask runner (cargo xtask <task>, alias cargo x)
+  GNUmakefile          — deprecated shim delegating to cargo xtask
+  Cargo.toml           — virtual workspace (kernel member, exclude xtask)
+  .cargo/config.toml   — xtask alias + target rustflags
   rust-toolchain.toml  — nightly channel, rust-src + llvm-tools-preview
   x86_64-kernel.json   — custom target spec (code-model=large, no-redzone, no-mmx, static reloc)
   linker-x86_64.ld     — kernel linker script (base 0xffffffff80000000)
-  limine.conf          — bootloader config (timeout 0, protocol limine)
+  limine.conf / bootloader/limine.conf — bootloader config (timeout 0, protocol limine)
   kernel/              — kernel crate (the only binary)
     Cargo.toml         — kernel dependencies
     build.rs           — assembles + links AP trampoline binary blob
-    GNUmakefile        — thin wrapper around cargo build
     src/
       main.rs          — binary entry: panic handler, QemuExitCode, main()
       boot.rs          — Limine requests, kmain() entry point
@@ -64,15 +64,17 @@ MofuOS/
 The ONLY command used in practice:
 
 ```
-make run
+cargo xtask run   # or cargo x run (alias); legacy: make run
 ```
 
-This invokes `make run-x86_64` which:
-1. Builds the kernel: `cargo build --target x86_64-unknown-none` inside `kernel/`
-2. Assembles the AP trampoline via `build.rs` (uses `cc` + `ld` + `objcopy`)
-3. Creates `template-x86_64.iso` with xorriso (Limine + kernel binary)
-4. Runs `log_splitter.py` in background (listens on two UNIX sockets for COM1/COM2)
-5. Launches QEMU:
+This invokes `xtask::run_iso` which:
+1. Builds the kernel: `cargo build -p kernel --target x86_64-unknown-none -Z build-std=core,alloc`
+2. Builds user programs via `clang`/`ld.lld` + `user/rustspace` cargo
+3. Assembles the AP trampoline via `kernel/build.rs` (uses `cc` + `ld` + `objcopy`)
+4. Creates `target/template-x86_64.iso` with xorriso (Limine + kernel binary, plus compat copy at `template-x86_64.iso`)
+5. Ensures ATA disk at `storage/ata_disk.img` (64M) and OVMF at `target/ovmf/`
+6. Runs `log_splitter.py` in background (listens on two UNIX sockets for COM1/COM2)
+7. Launches QEMU:
    - Machine: q35, KVM, 2 cores (cores=2 threads=1), cpu qemu64 (+tsc-deadline +apic)
    - UEFI: OVMF pflash drives
    - Boot: -cdrom template-x86_64.iso
@@ -86,19 +88,18 @@ There is NO serial stdio. All output is captured to log files under `logs/`.
 ## Cargo and Build Config
 
 Workspace `Cargo.toml`:
-- members = ["kernel"]
+- `members = ["kernel"]`, `exclude = ["xtask"]` — virtual workspace
 - kernel is the only binary
 
 `.cargo/config.toml`:
 ```toml
-[build]
-target = "x86_64-unknown-none"
+[alias]
+xtask = "run --manifest-path xtask/Cargo.toml --"
+x = "run --manifest-path xtask/Cargo.toml --"
 
 [target.x86_64-unknown-none]
 rustflags = ["-C", "link-arg=-Tlinker-x86_64.ld", "-C", "relocation-model=static"]
-
-[unstable]
-build-std = ["core", "alloc"]
+# build-std passed explicitly by xtask: cargo -Z build-std=core,alloc --target x86_64-unknown-none
 ```
 
 `rust-toolchain.toml`:

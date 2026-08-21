@@ -18,27 +18,26 @@ kernel/src/io/
   ata.rs         — AtaPioDriver: ATA PIO primary bus master, implements DiskDevice
   disk.rs        — DiskDevice trait, MockDiskDevice, DiskManager, DISK global
   mod.rs         — pub mod ata, disk, serial
-os_disk_fat32/   — seed files for the FAT32 disk image (test.txt)
-ata_disk.img     — 16MB FAT32 image used by make run-x86_64-ata (persistent)
-scripts/
-  create_ata_disk.sh — generates ata_disk.img with mkfs.fat -F 32
+ os_disk_fat32/   — seed files for the FAT32 disk image (test.txt)
+ storage/ata_disk.img — 64MB FAT32 image used by cargo xtask run (persistent, auto-created by xtask at storage/ata_disk.img)
+ scripts/
+   create_ata_disk.sh — generates storage/ata_disk.img with mkfs.fat -F 32
 ```
 
 ## How to Run with Real Persistent Disk
 
 ```
-make run-x86_64-ata
+cargo xtask run        # auto-creates storage/ata_disk.img (64M) if missing, QEMU: -device piix3-ide,id=ide -device ide-hd,drive=ata0,bus=ide.0,unit=0 -drive file=storage/ata_disk.img,format=raw,id=ata0,if=none
+cargo xtask ata-disk   # explicitly (re)create storage/ata_disk.img
 ```
 
-QEMU flags added: `-device piix3-ide,id=ide -device ide-hd,drive=ata0,bus=ide.0,unit=0
--drive file=ata_disk.img,format=raw,id=ata0,if=none`
-
-`ata_disk.img` is a raw FAT32 image on the host — writes from inside the kernel
-are committed to the file and survive QEMU exit.
+`storage/ata_disk.img` is a raw FAT32 image on the host — writes from inside the kernel
+are committed to the file and survive QEMU exit. `MockDiskDevice` is not persistent.
 
 To recreate the disk image from scratch:
 ```
-bash scripts/create_ata_disk.sh ata_disk.img 16
+bash scripts/create_ata_disk.sh -i disk_templates/fat32_os_disk_template_default -o ata_disk.img -s 64
+# or: cargo xtask ata-disk
 ```
 
 ## Architecture: Sirius VFS
@@ -136,7 +135,7 @@ pub fn init_filesystem_ata_with_cache(cache_size: usize) -> Result<(), &'static 
 With `use_cached_fs`, `init_filesystem` and `init_filesystem_ata` use `FS_CACHE_SIZE`
 (64 MB) by default. Both wrap the `Fat32Driver` in `CachedDriver::new(driver, cache_size)`.
 
-Neither is called in the default `make run` boot. `main()` calls `test_ata_filesystem()`
+Neither is called in the default `cargo xtask run` boot. `main()` calls `test_ata_filesystem()`
 when testing.
 
 ### FileSystemError

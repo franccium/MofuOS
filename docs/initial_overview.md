@@ -12,67 +12,60 @@ Toolchain: `nightly` (`rust-toolchain.toml`), `rust-src`, `llvm-tools-preview`, 
 
 ---
 
-## Build — Never `cargo` at Root
+## Build — cargo xtask
 
-Root `Cargo.toml` workspace (`members = ["kernel"]`) and `src/main.rs` (`ovmf_prebuilt` harness commented out) not build entry. All builds via `GNUmakefile`.
-
-```bash
-make all              # clone/build limine (v10.x-binary), build kernel + userspace, create template-x86_64.iso
-make all-hdd          # same but HDD image (template-x86_64.hdd) + test_disk_image.fat32.img
-make -C kernel        # kernel only (nightly cargo + AP trampoline via cc/ld/objcopy)
-make -C user          # C userspace only (clang + ld.lld); rust userspace via cargo in user/rustspace
-make clean            # kernel cargo clean + rm iso/hdd/fat32/ata_disk.img
-```
-
-`kernel/GNUmakefile`:
+All builds via `cargo xtask` (alias `cargo x`). `GNUmakefile` is a deprecated shim delegating to xtask. Root `Cargo.toml` is a virtual workspace (`members = ["kernel"]`, `exclude = ["xtask"]`).
 
 ```bash
-RUSTFLAGS="-C link-arg=-Tlinker-x86_64.ld -C relocation-model=static" cargo build --target x86_64-unknown-none --profile dev|release
+cargo xtask build    # build kernel + userspace (kernel via cargo -Z build-std, user via clang + ld.lld)
+cargo xtask iso      # clone/build limine (v10.x-binary) to target/limine, build kernel+userspace, create target/template-x86_64.iso (default)
+cargo xtask hdd      # same but HDD image target/template-x86_64.hdd
+cargo xtask clean    # cargo clean + rm iso/hdd
+# direct kernel only (without xtask):
+cargo build -p kernel --target x86_64-unknown-none -Z build-std=core,alloc
 ```
 
-`user/Makefile`: `clang --target=x86_64-unknown-elf -ffreestanding -mno-red-zone` + `ld.lld -T linker.ld`; Rust userspace `user/rustspace` `cargo fmt && cargo +nightly build -Z build-std=core,alloc -Z json-target-spec --target x86_64-user.json`.
+`kernel/build.rs` assembles AP trampoline via `cc`/`ld`/`objcopy` → `$OUT_DIR/ap_trampoline.bin` (env `AP_TRAMPOLINE_BIN`).
+
+`xtask` builds user programs: `clang --target=x86_64-unknown-elf -ffreestanding -mno-red-zone` + `ld.lld -T linker.ld`; Rust userspace `user/rustspace` `cargo +nightly build -Z build-std=core,alloc -Z json-target-spec --target x86_64-user.json`.
 
 Custom target `x86_64-kernel.json`: `code-model=large`, `disable-redzone=true`, `features="-mmx"`, `linker=rust-lld`, `linker-flavor=lld-elf`. Linker script `linker-x86_64.ld`: base `0xffffffff80000000`, `ENTRY(kmain)`, sections `.text` / `.rodata` / `.data` + Limine requests + `.bss`, discard `.eh_frame*`, `.note*`.
 
 `.cargo/config.toml`:
 
 ```toml
-[build]
-target = "x86_64-unknown-none"
+[alias]
+xtask = "run --manifest-path xtask/Cargo.toml --"
+x = "run --manifest-path xtask/Cargo.toml --"
 
 [target.x86_64-unknown-none]
 rustflags = ["-C", "link-arg=-Tlinker-x86_64.ld", "-C", "relocation-model=static"]
-
-[unstable]
-build-std = ["core", "alloc"]
+# build-std passed explicitly by xtask via -Z build-std=core,alloc
 ```
 
 ---
 
 ## Run — OVMF Required
 
-```bash
-# First time (OVMF not tracked in git):
-mkdir -p ovmf && cp /usr/share/OVMF/OVMF_VARS_4M.fd ovmf/ovmf-vars-x86_64.fd \
-               && cp /usr/share/OVMF/OVMF_CODE_4M.fd ovmf/ovmf-code-x86_64.fd
-# or: make edk2-ovmf  (curls edk2-ovmf-nightly tarball)
+OVMF is auto-discovered by `xtask` from `/usr/share/OVMF` (or `/usr/share/edk2`, `/usr/share/qemu`) and copied to `target/ovmf/`. Legacy `ovmf/` at repo root still works but is deprecated. Limine is managed at `target/limine/` (cloned `v10.x-binary` on demand).
 
-make run              # QEMU q35 + kvm + 3 cores (SMP) + ATA disk + log_splitter.py; preferred dev path
-make run-nologs       # same but -serial stdio, no socket/log splitting
-make run-fast-x86_64  # virtio-vga-gl + gtk + gl, minimal serial
-make run-fs           # adds test_disk_image.fat32.img as second drive
-QEMUFLAGS="-m 4G" make run   # override -m 2G default (KARCH=x86_64, QEMUFLAGS appended)
+```bash
+cargo xtask run              # QEMU q35 + kvm + 3 cores (SMP) + ATA disk + log_splitter.py; preferred dev path
+cargo xtask run-nologs       # same but -serial stdio, no socket/log splitting
+QEMUFLAGS="-m 4G" cargo xtask run   # override -m 2G default (QEMUFLAGS appended)
+# legacy shim still works:
+# make run / make run-nologs  (delegates to cargo xtask)
 ```
 
 QEMU details: `-M q35 -accel kvm -cpu host,+tsc-deadline,+apic -device isa-debug-exit,iobase=0xf4,iosize=0x04 -monitor telnet:127.0.0.1:1234,server,nowait`. Exit codes `kernel/src/main.rs:47-51`: `0x10` success, `0x11` failed. Remove `-no-reboot` if stuck black screen.
 
-Generated/ignored: `limine/`, `ovmf/`, `target/`, `iso_root/`, `*.iso`/`*.hdd`, `storage/ata_disk.img`, `logs/`, `user/crt0.o`/`libc.a` — never edit/commit.
+Generated/ignored: `target/` (includes `target/limine/`, `target/ovmf/`, `target/*.iso/*.hdd`, `target/iso_root/`), `storage/ata_disk.img`, `logs/`, `user/crt0.o`/`libc.a` — never edit/commit. Legacy `limine/` and `ovmf/` at repo root are gitignored shims.
 
 ---
 
 ## Logging — Unix Sockets, Not Stdio
 
-`make run` (`run-x86_64`) spawns `scripts/log_splitter.py` before QEMU:
+`cargo xtask run` spawns `scripts/log_splitter.py` before QEMU:
 
 - `COM1` (`/tmp/mofuos_com1.sock`) = kernel `serial_println_core!` → `logs/<YYYY-MM-DD_HH-MM-SS>/all.txt` + `core_N.txt` (routed by `^\[Core\s+(\d+)`, `MAX_CORES=4` — keep `kernel/src/lib.rs:13` and `scripts/log_splitter.py:22` in sync)
 - `COM2` (`/tmp/mofuos_com2.sock`) = userspace → `all.txt` + `userspace_pid_<pid>.txt` (routed by `[pid=N]` tag)
@@ -95,17 +88,18 @@ No `println!`/`print!` — no `std`, no VGA text mode handler.
 
 ```
 MofuOS/
-  GNUmakefile          — root build orchestrator
-  Cargo.toml           — workspace root; kernel only member
-  .cargo/config.toml   — target + linker flag
+  xtask/               — cargo xtask runner (cargo xtask <task>, alias cargo x)
+  GNUmakefile          — deprecated shim delegating to cargo xtask
+  Cargo.toml           — virtual workspace (kernel member, exclude xtask)
+  .cargo/config.toml   — xtask alias + target rustflags
   rust-toolchain.toml  — nightly channel
   x86_64-kernel.json   — custom target spec
   linker-x86_64.ld     — kernel ELF layout
-  limine.conf          — bootloader config (timeout 0, protocol limine)
+  limine.conf / bootloader/limine.conf — bootloader config (timeout 0, protocol limine)
   kernel/
     Cargo.toml
     build.rs           — assembles+links AP trampoline blob (cc/ld/objcopy → $OUT_DIR/ap_trampoline.bin via env AP_TRAMPOLINE_BIN)
-    GNUmakefile
+    GNUmakefile        — legacy (now unused)
     src/
       main.rs          — binary entry: panic handler, QemuExitCode, main()
       boot.rs          — Limine requests, kmain() entry point
@@ -558,11 +552,11 @@ kernel/src/io/ata.rs — AtaPioDriver ATA PIO primary bus master DiskDevice
 ### How to Run with Real Disk
 
 ```bash
-make run-x86_64-ata # QEMU: -device piix3-ide,id=ide -device ide-hd,drive=ata0,bus=ide.0,unit=0 -drive file=ata_disk.img,format=raw,id=ata0,if=none
-bash scripts/create_ata_disk.sh ata_disk.img 16 # recreate 16MB FAT32 image
+cargo xtask run              # QEMU: -device piix3-ide,id=ide -device ide-hd,drive=ata0,bus=ide.0,unit=0 -drive file=storage/ata_disk.img,format=raw,id=ata0,if=none (ATA disk auto-created at storage/ata_disk.img, 64M)
+bash scripts/create_ata_disk.sh -i disk_templates/fat32_os_disk_template_default -o ata_disk.img -s 16 # recreate 16MB FAT32 image
 ```
 
-`ata_disk.img` raw FAT32 persistent across QEMU exit; `MockDiskDevice` not.
+`storage/ata_disk.img` raw FAT32 persistent across QEMU exit; `MockDiskDevice` not.
 
 ### Sirius VFS Type Hierarchy
 
@@ -796,9 +790,9 @@ High P1:
 
 Medium P2: paging hygiene (PML4 copy check `lapic_pml4_idx` `debug_assert`), `2MiB` huge keep 4KiB, TLB shootdown future, lock ordering enforce, `on_timer_tick` accounting, `Dequeue` O(n) ok, `write_direntry` batch, `find_free_cluster` FSInfo hints, timestamps, cache size tunable, graphics double `Compositor::new` dead code delete, dirty rect, alpha blend, compositor own framebuffer, input routing, AP trampoline `0x8000` remove if Limine suffices, `X2APIC`, `4+` core testing, ELF `TEST_ELF` baked → wire `Sirius` to `sys_create_process(path)`, `create_process` dead path, `rustspace` `Arena` leak track, window double-buffer contract.
 
-Low P3: drop `#![allow(warnings,unused)]` → `clippy` CI, `no_std` test harness `make check` with `isa-debug-exit`, formatting, `build.rs` pin, doc sync `docs/` canonical vs `notes/agents/` drift, `reading_asm_with_addresses.md` objdump recipes, `FAT32 8.3`, `FSInfo`, `text.rs`, `RENDER_SHADERS`.
+Low P3: drop `#![allow(warnings,unused)]` → `clippy` CI, `no_std` test harness `cargo xtask test` with `isa-debug-exit`, formatting, `build.rs` pin, doc sync `docs/` canonical vs `notes/agents/` drift, `reading_asm_with_addresses.md` objdump recipes, `FAT32 8.3`, `FSInfo`, `text.rs`, `RENDER_SHADERS`.
 
-Suggested order Week1 `A0-1` frame free + `A0-2` guard + `A0-3` cache; Week2 `A1-1` FAT mirror + `A1-2` fb + `A1-3` ACPI + `A1-4` preempt + `A1-5` wire + `A1-7` HHDM + `A1-6` SMP 4-core; Week3 `A2-3` FS batch + `A2-4` compositor + `A2-1` PML4 assert + `A2-5` trampoline/X2APIC + `A2-6` `sys_create_process` from Sirius; Ongoing `A3-1` clippy + `make check`.
+Suggested order Week1 `A0-1` frame free + `A0-2` guard + `A0-3` cache; Week2 `A1-1` FAT mirror + `A1-2` fb + `A1-3` ACPI + `A1-4` preempt + `A1-5` wire + `A1-7` HHDM + `A1-6` SMP 4-core; Week3 `A2-3` FS batch + `A2-4` compositor + `A2-1` PML4 assert + `A2-5` trampoline/X2APIC + `A2-6` `sys_create_process` from Sirius; Ongoing `A3-1` clippy + `cargo xtask clippy` / `cargo xtask test`.
 
 ---
 
@@ -806,8 +800,8 @@ Suggested order Week1 `A0-1` frame free + `A0-2` guard + `A0-3` cache; Week2 `A1
 
 1. Read this `docs/initial_overview.md` (covers all subsystems)
 2. For deep dive see `docs/{overview,memory,process,graphics,filesystem/hardware,syscalls,conventions,rust_coding_guidelines}.md`
-3. Check build `make all`, run `make run` — logs `logs/<timestamp>/all.txt` + `core_N.txt` + `userspace_pid_N.txt`
-4. Inspect `kernel/src/lib.rs:13` `MAX_CORES` vs `scripts/log_splitter.py:22`, QEMU `cores=` in `GNUmakefile`
+3. Check build `cargo xtask iso`, run `cargo xtask run` — logs `logs/<timestamp>/all.txt` + `core_N.txt` + `userspace_pid_N.txt`
+4. Inspect `kernel/src/lib.rs:13` `MAX_CORES` vs `scripts/log_splitter.py:22`, QEMU `cores=` in `xtask/src/main.rs:run_iso`
 5. Follow conventions: lock order `CORE_POOL→PROCESS_MANAGER→SCHEDULER→FRAME_ALLOCATOR→SERIAL`, never hold lock across `jump_to_userspace`, push `PROCESS_MANAGER` before `SCHEDULER` enqueue, `HHDM_OFFSET` via `BootInfo`, XRGB via `rgba_to_xrgb`
 6. Code style: `docs/rust_coding_guidelines.md` — perf first, no `dyn`, slice APIs, `debug_assert`, `const` values, no emojis, no padded alignment, no `.` end comments
 7. Verification per item: QEMU boots no `#PF`/`#GP`, 4-core interleaves, `fs_test` passes `fsck.fat -n` clean, `clippy` zero, objdump `mov %rcx,%cr3` not `rax`, frame free count stable 1000 cycles

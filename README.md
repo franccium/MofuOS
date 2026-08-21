@@ -2,6 +2,8 @@
 
 ## Running
 
+do not
+
 ### Prerequisites
 
 - QEMU
@@ -25,8 +27,6 @@ cargo xtask iso          # build bootable ISO (target/template-x86_64.iso)
 cargo xtask hdd          # build bootable HDD (target/template-x86_64.hdd)
 cargo xtask run          # build ISO + ATA disk and launch QEMU (sockets + log_splitter.py)
 cargo xtask run-nologs   # QEMU with -serial stdio
-cargo xtask run-fast     # QEMU with virtio-vga-gl + gtk
-cargo xtask run-fs       # ISO + FAT32 test disk
 cargo xtask ata-disk     # create storage/ata_disk.img
 cargo xtask clean        # cargo clean
 cargo xtask fmt          # format all Rust code
