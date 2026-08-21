@@ -1,8 +1,9 @@
 /limine
 /ovmf
+/target
+xtask/target
 *.iso
 *.hdd
-/target
 notes.md
 architecture.md
 esp

@@ -1,272 +1,91 @@
+# MofuOS — GNUmakefile shim
+# Deprecated: use `cargo xtask` / `cargo x` directly.
+# This file delegates to xtask for backwards compatibility.
+# See `cargo xtask --help` for tasks.
+
 MAKEFLAGS += -rR
-.SUFFIXES:
+.SUFFICES:
 
-# Convenience macro to reliably declare user overridable variables.
-override USER_VARIABLE = $(if $(filter $(origin $(1)),default undefined),$(eval override $(1) := $(2)))
+# Map legacy make targets to cargo xtask
+.PHONY: all all-hdd run run-hdd fat32-image ata-disk kernel user-programs clean clean-fat32
+.PHONY: run-x86_64 run-x86_64-ata run-nologs run-fast-x86_64 run-hdd-x86_64 run-fs run-fs-x86_64 run-bios run-hdd-bios
 
-# Target architecture to build for. Default to x86_64.
-$(call USER_VARIABLE,KARCH,x86_64)
+all:
+	@echo "[make] deprecated — delegating to: cargo xtask iso"
+	cargo xtask iso
 
-# Default user QEMU flags. These are appended to the QEMU command calls.
-$(call USER_VARIABLE,QEMUFLAGS,-m 2G)
+all-hdd:
+	@echo "[make] deprecated — delegating to: cargo xtask hdd"
+	cargo xtask hdd
 
-override IMAGE_NAME := template-$(KARCH)
+run:
+	@echo "[make] deprecated — delegating to: cargo xtask run"
+	cargo xtask run
 
-.PHONY: all
-all: $(IMAGE_NAME).iso
+run-hdd:
+	cargo xtask run-hdd
 
-.PHONY: all-hdd
-all-hdd: $(IMAGE_NAME).hdd
+run-x86_64:
+	cargo xtask run
 
-.PHONY: run
-run: run-$(KARCH)
+run-x86_64-ata:
+	cargo xtask run
 
-.PHONY: run-hdd
-run-hdd: run-hdd-$(KARCH)
+run-nologs:
+	cargo xtask run-nologs
 
-.PHONY: fat32-image
-fat32-image: test_disk_image.fat32.img
+run-fast-x86_64:
+	cargo xtask run-fast
 
-ATA_DISK_IMG_TEMPLATE := disk_templates/fat32_os_disk_template_default
-ATA_DISK_IMG := ata_disk.img
+run-hdd-x86_64:
+	cargo xtask run-hdd
 
-.PHONY: ata-disk
-ata-disk: $(ATA_DISK_IMG)
+run-fs:
+	cargo xtask run-fs
 
-$(ATA_DISK_IMG):
-	bash scripts/create_ata_disk.sh -i $(ATA_DISK_IMG_TEMPLATE) -o $(ATA_DISK_IMG) -s 64
+run-fs-x86_64:
+	cargo xtask run-fs
 
-SOCKET1 := /tmp/mofuos_com1.sock
-SOCKET2 := /tmp/mofuos_com2.sock
-.PHONY: run-x86_64
-run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso $(ATA_DISK_IMG)
-	@mkdir -p logs
-	@rm -f $(SOCKET1) $(SOCKET2)
-	@python3 scripts/log_splitter.py $(SOCKET1) $(SOCKET2) & \
-	qemu-system-$(KARCH) \
-		-M q35 \
-		-accel kvm \
-		-smp cores=3,threads=1 \
-		-cpu host,+tsc-deadline,+apic \
-		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
-		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		-cdrom $(IMAGE_NAME).iso \
-		-device piix3-ide,id=ide \
-		-device ide-hd,drive=ata0,bus=ide.0,unit=0 \
-		-drive file=storage/$(ATA_DISK_IMG),format=raw,id=ata0,if=none \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-serial unix:$(SOCKET1),server \
-		-serial unix:$(SOCKET2),server,nowait \
-		-no-reboot \
-		-monitor telnet:127.0.0.1:1234,server,nowait \
-		$(QEMUFLAGS)
+run-bios:
+	cargo xtask run-bios
 
+run-hdd-bios:
+	cargo xtask run-bios
 
-.PHONY: run-x86_64-ata
-run-x86_64-ata: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso $(ATA_DISK_IMG)
-	@mkdir -p logs
-	@rm -f $(SOCKET1) $(SOCKET2)
-	@python3 scripts/log_splitter.py $(SOCKET1) $(SOCKET2) & \
-	qemu-system-$(KARCH) \
-		-M q35 \
-		-accel kvm \
-		-smp cores=3,threads=1 \
-		-cpu host,+tsc-deadline,+apic \
-		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
-		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		-cdrom $(IMAGE_NAME).iso \
-		-device piix3-ide,id=ide \
-		-device ide-hd,drive=ata0,bus=ide.0,unit=0 \
-		-drive file=$(ATA_DISK_IMG),format=raw,id=ata0,if=none \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-serial unix:$(SOCKET1),server \
-		-serial unix:$(SOCKET2),server,nowait \
-		-no-reboot \
-		-monitor telnet:127.0.0.1:1234,server,nowait \
-		$(QEMUFLAGS)
+fat32-image:
+	cargo xtask fat32-image
 
-.PHONY: run-nologs
-run-nologs: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
-	qemu-system-$(KARCH) \
-		-M q35 \
-		-accel kvm \
-		-smp cores=2,threads=1 \
-		-cpu host,+tsc-deadline,+apic \
-		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
-		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		-cdrom $(IMAGE_NAME).iso \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-no-reboot \
-		-monitor telnet:127.0.0.1:1234,server,nowait \
-		$(QEMUFLAGS); \
-	wait
+ata-disk:
+	cargo xtask ata-disk
 
-.PHONY: run-fast-x86_64
-run-fast-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
-	qemu-system-$(KARCH) \
-		-M q35 \
-		-accel kvm \
-		-cpu host,+tsc-deadline,+apic \
-		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
-		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		-cdrom $(IMAGE_NAME).iso \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-device virtio-vga-gl \
-		-display gtk,gl=on \
-		-serial stdio \
-		-no-reboot \
-		$(QEMUFLAGS)
+kernel:
+	cargo xtask build
 
-.PHONY: run-hdd-x86_64
-run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd test_disk_image.fat32.img
-	qemu-system-$(KARCH) \
-		-M q35 \
-		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
-		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		-hda $(IMAGE_NAME).hdd \
-		-hdb test_disk_image.fat32.img \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-serial stdio \
-		-no-reboot \
-		$(QEMUFLAGS)
+user-programs:
+	cargo xtask build
 
-.PHONY: run-fs
-run-fs: run-fs-$(KARCH)
+clean:
+	cargo xtask clean
 
-.PHONY: run-fs-x86_64
-run-fs-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso test_disk_image.fat32.img
-	qemu-system-$(KARCH) \
-		-M q35 \
-		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
-		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		-cdrom $(IMAGE_NAME).iso \
-		-drive file=test_disk_image.fat32.img,format=raw \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-serial stdio \
-		-no-reboot \
-		$(QEMUFLAGS)
+clean-fat32:
+	rm -f test_disk_image.fat32.img target/test_disk_image.fat32.img
 
-.PHONY: run-bios
-run-bios: $(IMAGE_NAME).iso
-	qemu-system-$(KARCH) \
-		-M q35 \
-		-cdrom $(IMAGE_NAME).iso \
-		-boot d \
-		$(QEMUFLAGS)
+# Fallthrough for any other xtask task
+%:
+	cargo xtask $@
 
-.PHONY: run-hdd-bios
-run-hdd-bios: $(IMAGE_NAME).hdd
-	qemu-system-$(KARCH) \
-		-M q35 \
-		-hda $(IMAGE_NAME).hdd \
-		$(QEMUFLAGS)
+# Legacy artefacts that previously provided limine/ovmf via make
+limine/limine:
+	@echo "[make] limine is now managed by xtask at target/limine — run: cargo xtask iso"
 
 edk2-ovmf:
-		curl -L https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/edk2-ovmf.tar.gz | gunzip | tar -xf -
+	@echo "[make] OVMF is now managed by xtask at target/ovmf — it auto-discovers /usr/share/OVMF"
 
-limine/limine:
-	rm -rf limine
-	git clone https://github.com/limine-bootloader/limine.git --branch=v10.x-binary --depth=1
-	$(MAKE) -C limine
+template-x86_64.iso:
+	cargo xtask iso
 
-.PHONY: kernel
-kernel: user-programs
-	$(MAKE) -C kernel
-
-.PHONY: user-programs
-user-programs:
-	$(MAKE) -C user
-
-
-# Clean the FAT32 image
-.PHONY: clean-fat32
-clean-fat32:
-	rm -f test_disk_image.fat32.img
-
-# Update all-hdd to depend on fat32-image
-.PHONY: all-hdd
-all-hdd: $(IMAGE_NAME).hdd test_disk_image.fat32.img
-
-
-$(IMAGE_NAME).iso: limine/limine kernel
-	rm -rf iso_root
-	mkdir -p iso_root/boot
-	cp -v kernel/kernel iso_root/boot/
-	mkdir -p iso_root/boot/limine
-	cp -v limine.conf iso_root/boot/limine/
-	mkdir -p iso_root/EFI/BOOT
-ifeq ($(KARCH),x86_64)
-	cp -v limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin iso_root/boot/limine/
-	cp -v limine/BOOTX64.EFI iso_root/EFI/BOOT/
-	cp -v limine/BOOTIA32.EFI iso_root/EFI/BOOT/
-	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
-		-no-emul-boot -boot-load-size 4 -boot-info-table \
-		--efi-boot boot/limine/limine-uefi-cd.bin \
-		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(IMAGE_NAME).iso
-	./limine/limine bios-install $(IMAGE_NAME).iso
-endif
-ifeq ($(KARCH),aarch64)
-	cp -v limine/limine-uefi-cd.bin iso_root/boot/limine/
-	cp -v limine/BOOTAA64.EFI iso_root/EFI/BOOT/
-	xorriso -as mkisofs \
-		--efi-boot boot/limine/limine-uefi-cd.bin \
-		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(IMAGE_NAME).iso
-endif
-ifeq ($(KARCH),riscv64)
-	cp -v limine/limine-uefi-cd.bin iso_root/boot/limine/
-	cp -v limine/BOOTRISCV64.EFI iso_root/EFI/BOOT/
-	xorriso -as mkisofs \
-		--efi-boot boot/limine/limine-uefi-cd.bin \
-		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(IMAGE_NAME).iso
-endif
-ifeq ($(KARCH),loongarch64)
-	cp -v limine/limine-uefi-cd.bin iso_root/boot/limine/
-	cp -v limine/BOOTLOONGARCH64.EFI iso_root/EFI/BOOT/
-	xorriso -as mkisofs \
-		--efi-boot boot/limine/limine-uefi-cd.bin \
-		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(IMAGE_NAME).iso
-endif
-	rm -rf iso_root
-
-$(IMAGE_NAME).hdd: limine/limine kernel
-	rm -f $(IMAGE_NAME).hdd
-	dd if=/dev/zero bs=1M count=0 seek=64 of=$(IMAGE_NAME).hdd
-	parted -s $(IMAGE_NAME).hdd mklabel gpt
-	parted -s $(IMAGE_NAME).hdd mkpart primary 2048s 4095s
-	parted -s $(IMAGE_NAME).hdd set 1 bios_grub on
-	parted -s $(IMAGE_NAME).hdd mkpart ESP fat32 4096s 100%
-	parted -s $(IMAGE_NAME).hdd set 2 esp on
-ifeq ($(KARCH),x86_64)
-	./limine/limine bios-install $(IMAGE_NAME).hdd
-endif
-	mkfs.fat -F 32 --offset=4096 template-x86_64.hdd
-	mmd -i $(IMAGE_NAME).hdd@@2M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
-	mcopy -i $(IMAGE_NAME).hdd@@2M kernel/kernel ::/boot
-	mcopy -i $(IMAGE_NAME).hdd@@2M limine.conf ::/boot/limine
-	mcopy -i $(IMAGE_NAME).hdd@@2M limine/limine-uefi-cd.bin ::/boot/limine
-ifeq ($(KARCH),x86_64)
-	mcopy -i $(IMAGE_NAME).hdd@@2M limine/limine-bios.sys ::/boot/limine
-	mcopy -i $(IMAGE_NAME).hdd@@2M limine/BOOTX64.EFI ::/EFI/BOOT
-	mcopy -i $(IMAGE_NAME).hdd@@2M limine/BOOTIA32.EFI ::/EFI/BOOT
-endif
-ifeq ($(KARCH),aarch64)
-	mcopy -i $(IMAGE_NAME).hdd@@2M limine/BOOTAA64.EFI ::/EFI/BOOT
-endif
-ifeq ($(KARCH),riscv64)
-	mcopy -i $(IMAGE_NAME).hdd@@2M limine/BOOTRISCV64.EFI ::/EFI/BOOT
-endif
-ifeq ($(KARCH),loongarch64)
-	mcopy -i $(IMAGE_NAME).hdd@@2M limine/BOOTLOONGARCH64.EFI ::/EFI/BOOT
-endif
+template-x86_64.hdd:
+	cargo xtask hdd
 
 test_disk_image.fat32.img:
-	./scripts/create_fat32_image.sh $@ 16
-
-.PHONY: clean
-clean:
-	$(MAKE) -C kernel clean
-	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd test_disk_image.fat32.img $(ATA_DISK_IMG)
+	cargo xtask fat32-image
