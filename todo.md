@@ -11,6 +11,10 @@ REAL TODO:
 
 - !! file caching
 
+- move to a normal rust workspace
+
+- automate some verification for userspace and kernel
+
 - get rid of dynamic allocations in file reading
 
 - hash algorithms
