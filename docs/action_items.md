@@ -41,27 +41,6 @@ With `-m 2G`, ~500 MB is usable after Limine + kernel image + heap (16 MB at `0x
 
 ---
 
-### A0-2: No guard pages for kernel stacks — silent corruption → triple fault (ISSUE-M4)
-
-**Files:** `kernel/src/gdt.rs: RSP0_STACKS, IST0_STACKS, SCHEDULER_STACKS: [KernelStack; MAX_CORES]` (32 KiB each), `kernel/src/process/syscall.rs: PER_CORE_SYSCALL: [PerCoreSyscallData; MAX_CORES]` (64 KiB)
-
-**Root cause:**
-All privileged stacks are contiguous `.bss` arrays. A deep call, large `alloca`, or interrupt nesting that exceeds 32 KiB writes past the array into the next core's `GDT`/`TSS` or adjacent static. x86_64 has `disable-redzone=true` and `code-model=large`, so leaf functions can still push. No `present=0` guard page means CPU does not `#PF`; corruption is silent until later `#GP`/`#DF`.
-
-**Failure mode:**
-Stack overflow on AP core `1` clobbers `PER_CORE_GDT[2]` or `RSP0_STACKS[2]` guard. Next interrupt on core 2 loads corrupt TSS `RSP0` → `RSP=corrupt` → double fault → IST stack also corrupt → triple fault → QEMU resets (`-no-reboot` not set, black screen). Currently masked because workloads are shallow, but enabling `RENDER_SHADERS` or deeper FS call chains will hit it.
-
-**Fix sketch:**
-1. In `memory::init_offset_page_table` after heap init, for each stack: `virt = stack_top - STACK_SIZE`, guard = `virt - 4096`. Call `mapper.unmap(page containing guard)` + `flush`. Ensure stacks are page-aligned (`#[repr(align(4096))]` already for some, verify all).
-2. Alternatively reserve one extra page per stack in the static and explicitly unmap it.
-3. Add diagnostic: `gdt::stack_bounds(core_id) -> (bottom, top)` and assert `rsp` in range on entry to `timer_interrupt_handler` and `syscall_handler` (debug_assert).
-
-**Verification:** Synthetic overflow test: `fn recurse(n){ let x=[0u8;4096]; recurse(n+1)}` on AP core, expect `#PF` at guard address with error code `0x7` (present=0, write, user=0) and `core_N.txt` logs it instead of triple fault.
-
-**Effort:** 0.5 day.
-
----
-
 ### A0-3: File cache `directory_children` never populated — `reserve_cache`/`evict_directory` are dead (filesystem.md:234 Known Issue)
 
 **Files:** `kernel/src/filesystem/file_cache.rs: FileCache`, `kernel/src/filesystem/sirius.rs: CachedDriver`
@@ -254,26 +233,6 @@ Handle `_mask_size !=8` by scaling (e.g., 5/6-bit). Add `debug_assert!(red_size=
 
 ---
 
-## Suggested Execution Order
-
-**Week 1 (Blockers):**
-1. A0-1 frame free list + BUG-05 fix — unblocks all stress tests
-2. A0-2 guard pages — prevents silent corruption during Week 1 testing
-3. A0-3 cache directory_children — 2-hour win, restores intended policy
-
-**Week 2 (High):**
-4. A1-1 FAT mirror + A1-2 framebuffer masks + A1-3 ACPI stubs — hardware correctness
-5. A1-4 preemption at syscall exit + A1-5 wire asserts + A1-7 HHDM lint
-6. A1-6 SMP 4-core matrix test (fix `log_splitter.py` mismatch)
-
-**Week 3 (Medium):**
-7. A2-3 FS batch + FSInfo, A2-4 compositor double-create + dirty rect, A2-1 PML4 assert
-8. A2-5 trampoline removal or X2APIC evaluation, A2-6 `sys_create_process(path)` from Sirius
-
-**Ongoing:**
-9. A3-1 drop `allow(warnings)`, add `cargo xtask clippy` / `cargo xtask test` CI, consolidate `docs/` vs `notes/`
-
----
 
 ## Verification Checklist (per item)
 

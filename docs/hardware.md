@@ -18,19 +18,33 @@ kernel/src/io/
 
 ## GDT / TSS (gdt.rs)
 
-One GDT + TSS per CPU core. Max cores: `MAX_CORES = 16`.
+One GDT + TSS per CPU core. Max cores: `MAX_CORES = 4` (`lib.rs:21`, single source for `xtask -smp cores=X` and `log_splitter.py`).
 
 ### Static Allocations
 
-All in `.bss` (zero-initialized at load, permanent lifetime):
+All in `.bss` (zero-initialized at load, permanent lifetime, `align(4096)` for guard):
 ```rust
-static mut RSP0_STACKS:   [KernelStack; MAX_CORES]  // 16 * 32 KiB = 512 KiB
-static mut IST0_STACKS:   [KernelStack; MAX_CORES]  // 16 * 32 KiB = 512 KiB
-static mut PER_CORE_GDT:  [Gdt;        MAX_CORES]
-static mut PER_CORE_TSS:  [UnsafeCell<TaskStateSegment>; MAX_CORES]
+const PER_CORE_STACK_SIZE: usize = 8 * 4096; // 32 KiB
+const GUARD_PAGE_SIZE: usize = 4096;
+
+#[repr(C, align(4096))]
+struct GuardedKernelStack { guard: [u8; 4096], stack: [u8; 32768] } // 36 KiB = 9 pages
+
+static mut RSP0_STACKS:      [GuardedKernelStack; MAX_CORES] // 4 * 36 KiB = 144 KiB
+static mut IST0_STACKS:      [GuardedKernelStack; MAX_CORES] // 4 * 36 KiB = 144 KiB
+static mut SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES] // 4 * 36 KiB = 144 KiB
+
+#[repr(C, align(4096))]
+struct GuardedSyscallSlot { guard: [u8; 4096], data: PerCoreSyscallData } // 72 KiB
+static mut SYSCALL_SLOTS: [GuardedSyscallSlot; MAX_CORES] // 4 * 72 KiB = 288 KiB
+
+static mut PER_CORE_GDT: [Gdt; MAX_CORES]
+static mut PER_CORE_TSS: [UnsafeCell<TaskStateSegment>; MAX_CORES]
 ```
 
-`PER_CORE_STACK_SIZE = 8 * 4096 = 32 KiB` per stack.
+Guard page is `guard` at slot base (`page-aligned`), `stack` at `guard+0x1000`, `top = stack+0x8000`. `guard` is `!PRESENT` after `boot_common::bsp_early_init` `install_guard_pages` (splits `2MiB` huge from Limine if needed via `stack_guard::unmap_guard_page` + `FrameAllocator`). Overflow hits `#PF` `present=0,write=1` at `guard` instead of silent corrupt of next `GDT/TSS`.
+
+`PER_CORE_STACK_SIZE = 8 * 4096 = 32 KiB` stack + `4096` guard = `36864` per slot.
 
 ### GDT Segment Layout (per core)
 
@@ -47,14 +61,18 @@ STAR MSR userspace: CS = 0x23 (0x20 | 3), SS = 0x1B (0x18 | 3).
 
 ### TSS Configuration (per core)
 
-- `privilege_stack_table[0]` = top of `RSP0_STACKS[core_id]`
+- `privilege_stack_table[0]` = top of `RSP0_STACKS[core_id].stack` (`gdt::rsp0_stack_top(core_id)` = `stack+0x8000`, `top-0x1000` headroom for `run_on_core_loop` `mov rsp` frame)
   Used on any ring-3 → ring-0 transition (interrupts, exceptions, SYSCALL via INT).
   Without this, hardware tries to switch to RSP=0 → immediate triple fault.
-- `interrupt_stack_table[DOUBLE_FAULT_IST_INDEX]` = top of `IST0_STACKS[core_id]`
+  Guard at `RSP0_STACKS[core_id].guard` (`gdt::rsp0_guard_page`) is `!PRESENT` -> overflow `#PF` not silent corrupt.
+- `interrupt_stack_table[DOUBLE_FAULT_IST_INDEX]` = top of `IST0_STACKS[core_id].stack` (`gdt::ist0_stack_top`)
   Used by the double-fault handler. Without a dedicated IST stack, a double fault on
   a corrupt RSP causes a triple fault.
+  Guard at `IST0_STACKS[core_id].guard`.
 
 `DOUBLE_FAULT_IST_INDEX = 0`
+
+Helpers `gdt::rsp0_bounds/ist0_bounds/scheduler_bounds(core_id) -> (VirtAddr bottom, VirtAddr top)`, `gdt::assert_rsp_in_bounds(core_id)` (`mov rsp` `debug_assert!` in `timer_interrupt_handler` when `RPL==Ring3`), `gdt::install_guard_pages(&mut FrameAllocator)` called after `init_heap` in `boot_common::bsp_early_init` (also `syscall::install_syscall_guard_pages`).
 
 ### init_core_gdt(core_id: u8)
 
@@ -160,8 +178,7 @@ Used for routing hardware IRQs (keyboard on IRQ1 → vector 0x21 typically).
 
 ## SMP — Symmetric Multiprocessing
 
-Currently configured for 2 cores in QEMU (`-smp cores=2`).
-MAX_CORES = 16 (compile-time upper bound).
+QEMU `smp` derived from `kernel/src/lib.rs:21` `MAX_CORES` (single source, `xtask/src/main.rs:14` `kernel_max_cores()` + `qemu_smp_arg()` and `scripts/log_splitter.py:22`). Default `MAX_CORES=4` (1 BSP + 3 AP) `cores=4,threads=1`. `const_assert!(MAX_CORES<=64)` for `u64` bitmap in `CorePool`.
 
 ### AP Boot Flow
 

@@ -136,7 +136,7 @@ MofuOS/
 
 ## Boot Flow
 
-### kmain in `kernel/src/boot.rs`
+### kmain in `kernel/src/boot_common.rs::bsp_early_init` (called from `kernel/src/boot.rs::kmain` and `kernel/src/bin/test_*.rs`)
 
 1. Assert `BASE_REVISION.is_supported()` (revision 5)
 2. Get UEFI memory map, Limine memory map, paging mode, `HHDM offset`, `RSDP`, framebuffer
@@ -146,12 +146,13 @@ MofuOS/
 6. Init offset page table `init_offset_page_table(hhdm_offset)` (reads `CR3`, adds `HHDM offset` → `OffsetPageTable`)
 7. Init frame allocator `MemoryMapFrameAllocator::init`
 8. Init heap `allocator::init_heap` at `HEAP_POINTER = 0xFFFF_8080_0000_0000`, `16 MB`
-9. Init ACPI `interrupts::init_acpi`, parse MP response, init CPU info `init_cpu_info`, `init_cpu_infos`
-10. Map LAPIC for core 0, init LAPIC timer
-11. Init `CORE_POOL` + `SCHEDULER` with core count, `init_current_core()` for BSP
-12. Init global memory globals `FRAME_ALLOCATOR`, `USER_MEMORY_MANAGER`, calibrate TSC `init_tsc_globals` via PIT
-13. Bootstrap AP core 1: `cpus[1].bootstrap(ap_core_from_limine_entry_point, 0x12345678)`
-14. Enable interrupts, call `main()` in `kernel/src/main.rs`
+9. Install guard pages `gdt::install_guard_pages` + `syscall::install_syscall_guard_pages` (`stack_guard::unmap_guard_page`, splits `2MiB` huge from Limine via `FrameAllocator` `PT` alloc, `flush`) for `RSP0/IST0/SCHEDULER` `GuardedKernelStack` (36 KiB) and `SYSCALL` `GuardedSyscallSlot` (72 KiB), `align(4096)`, `debug_assert` bounds
+10. Init ACPI `interrupts::init_acpi`, parse MP response, init CPU info `init_cpu_info`, `init_cpu_infos`
+11. Map LAPIC for core 0, init LAPIC timer
+12. Init `CORE_POOL` + `SCHEDULER` with core count, `init_current_core()` for BSP
+13. Init global memory globals `FRAME_ALLOCATOR`, `USER_MEMORY_MANAGER`, calibrate TSC `init_tsc_globals` via PIT
+14. Bootstrap AP cores `1..core_count` `cpus[i].bootstrap(ap_core_from_limine_entry_point, 0x12345678)`
+15. Enable interrupts, call `main()` in `kernel/src/main.rs` or test `test_main()`
 
 ### main in `kernel/src/main.rs`
 
@@ -177,7 +178,7 @@ Per AP (core 1+):
 
 ```rust
 HHDM_OFFSET: u64 = 0xFFFF_8000_0000_0000   // Higher-Half Direct Map base (expected; runtime value in BootInfo::hhdm_offset)
-MAX_CORES: u8 = 16                            // hard limit; core pool uses u64 bitmap; const_assert!(MAX_CORES <= 64)
+MAX_CORES: u8 = 4                             // single source for xtask -smp cores=X and log_splitter.py:22, hard limit 64 (u64 bitmap)
 AP_CORE_COUNT: u8 = MAX_CORES - 1
 HEAP_POINTER = 0xFFFF_8080_0000_0000          // 16 MB
 LAPIC_VIRT_BASE = 0xFFFF_FFFF_0000_0000
@@ -189,7 +190,9 @@ INVALID_PID = usize::MAX
 INVALID_WINDOW_ID = u32::MAX
 RFLAGS_DEFAULT = 0x202 // IF=1, reserved bit 1=1
 DEFAULT_NEW_PROCESS_STACK_SIZE = 1 * 1024 * 1024 // 1 MB
-SYSCALL_STACK_SIZE = 4096 * 16 // 64 KiB per core
+PER_CORE_STACK_SIZE = 8 * 4096 // 32 KiB per core (RSP0/IST0/SCHEDULER)
+GUARD_PAGE_SIZE = 4096
+SYSCALL_STACK_SIZE = 4096 * 16 // 64 KiB per core (plus 4 KiB guard = 72 KiB GuardedSyscallSlot)
 ```
 
 QEMU exit device port `0xF4` size `4`: write `0x10` success (QEMU 33), `0x11` failed (QEMU 35). Panic handler calls `exit_qemu(QemuExitCode::Failed)`.
@@ -349,7 +352,7 @@ loop:
 
 `CURRENT_PROCESS_ON_CORE: [AtomicU64; MAX_CORES]` stores pid per core, `INVALID_PID` = idle. Used syscall to identify caller.
 
-`SCHEDULER_STACKS: [KernelStack; MAX_CORES]` `32 KiB` each, `get_scheduler_stack_top(core_id)` — switched at `run_on_core_loop` entry because Limine bootstrap stack too small.
+`SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES]` `36 KiB` (`4096` guard + `32 KiB` stack, `align(4096)`) each, `get_scheduler_stack_top(core_id)` = `stack+0x8000` (`-0x1000` headroom for `run_on_core_loop` `mov rsp` frame), switched at `run_on_core_loop` entry because Limine bootstrap stack too small. Guard `!PRESENT` -> overflow `#PF`.
 
 ### Core Pool `CORE_POOL: Mutex<CorePool>`
 
@@ -392,7 +395,7 @@ Userspace convention `user/rustspace/src/lib.rs:224-244` `syscall6`: `rax=num`, 
 
 #### syscall_handler Naked Asm `syscall.rs:154-206`
 
-Per-core `64 KiB` stack `PER_CORE_SYSCALL[core_id]: PerCoreSyscallData` (`#[repr(C, align(64))]`, `stack_top: u64` first field, `_stack: [u8; 65536]`), pointed via `KERNEL_GS_BASE`:
+Per-core `72 KiB` slot `SYSCALL_SLOTS[core_id].data: PerCoreSyscallData` (`GuardedSyscallSlot{guard[4096],data}` `align(4096)`, `PerCoreSyscallData` `#[repr(C,align(64))]` `stack_top:u64` first field `_stack:[u8;65536]`), `KERNEL_GS_BASE=&SYSCALL_SLOTS[core].data` (`guard` at `slot` base `!PRESENT`, `data` at `+0x1000`, `_stack` at `data+8` `page` `guard+0x1000`), pointed via `KERNEL_GS_BASE`:
 
 ```asm
 swapgs; mov r15,rsp; mov rsp,gs:0; swapgs
@@ -650,22 +653,28 @@ Primary bus master unit 0, `28-bit LBA`, polling no DMA/IRQ. Ports `0x1F0` Data 
 
 ## Hardware — GDT/IDT/TSS, APIC, SMP, Serial `kernel/src/gdt.rs`, `interrupts.rs`, `util/`, `asm/`, `io/serial.rs`
 
-### GDT/TSS per Core `MAX_CORES=16`
+### GDT/TSS per Core `MAX_CORES=4` (single source `lib.rs:21`)
 
-Statics `.bss`:
+Statics `.bss` `align(4096)` guard+stack:
 
 ```rust
-static mut RSP0_STACKS:   [KernelStack; MAX_CORES] // 16*32KiB=512KiB, PER_CORE_STACK_SIZE=8*4096=32KiB
-static mut IST0_STACKS:   [KernelStack; MAX_CORES] // 16*32KiB
+const PER_CORE_STACK_SIZE: usize = 8 * 4096; // 32 KiB
+const GUARD_PAGE_SIZE: usize = 4096;
+#[repr(C, align(4096))] struct GuardedKernelStack { guard: [u8;4096], stack: [u8;32768] } // 36 KiB
+static mut RSP0_STACKS:      [GuardedKernelStack; MAX_CORES] // 4*36 KiB=144 KiB
+static mut IST0_STACKS:      [GuardedKernelStack; MAX_CORES] // 4*36 KiB
+static mut SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES] // 4*36 KiB, top-0x1000 headroom for run_on_core_loop
+#[repr(C, align(4096))] struct GuardedSyscallSlot { guard:[u8;4096], data:PerCoreSyscallData } // 72 KiB
+static mut SYSCALL_SLOTS: [GuardedSyscallSlot; MAX_CORES] // 4*72 KiB, KERNEL_GS_BASE=&SYSCALL_SLOTS[core].data
 static mut PER_CORE_GDT:  [Gdt; MAX_CORES]
 static mut PER_CORE_TSS:  [UnsafeCell<TaskStateSegment>; MAX_CORES]
-static mut PER_CORE_SYSCALL: [PerCoreSyscallData; MAX_CORES] // 64KiB each
-static mut SCHEDULER_STACKS: [KernelStack; MAX_CORES] // 32KiB
 ```
+
+Guard `guard` at slot base `!PRESENT` after `boot_common::bsp_early_init` `install_guard_pages` (splits `2MiB` huge via `stack_guard::unmap_guard_page`), `stack` at `+0x1000` `page-aligned`, `top=stack+0x8000` (`-0x1000` for scheduler `mov rsp`). Helpers `gdt::rsp0_guard_page/bounds`, `gdt::assert_rsp_in_bounds` (timer `RPL==Ring3` only), `syscall::syscall_bounds/assert_syscall_stack_bounds`.
 
 GDT layout per core: `0 null`, `1 0x08` kernel code ring0, `2 0x10` kernel data ring0, `3 0x18` user data ring3, `4 0x20` user code ring3, `5 0x28+` TSS (2 slots). STAR userspace `CS 0x23` (`0x20|3`), `SS 0x1B` (`0x18|3`).
 
-TSS: `privilege_stack_table[0]` = top `RSP0_STACKS[core_id]` (ring3→ring0, without it `RSP=0` → triple fault), `interrupt_stack_table[DOUBLE_FAULT_IST_INDEX=0]` = top `IST0_STACKS[core_id]` (double fault dedicated, else corrupt `RSP` → triple fault).
+TSS: `privilege_stack_table[0]` = top `RSP0_STACKS[core_id].stack` (`gdt::rsp0_stack_top` `stack+0x8000`), `interrupt_stack_table[DOUBLE_FAULT_IST_INDEX=0]` = top `IST0_STACKS[core_id].stack` (`gdt::ist0_stack_top`). Guard at `guard` `!PRESENT` -> overflow `#PF` not silent corrupt.
 
 `init_core_gdt(core_id)`: build `Gdt::new(core_id)` sets `RSP0`/`IST0`, store `PER_CORE_GDT[core_id]`, `gdt.table.load()` LGDT, reload CS via `retfq` idiom, set DS/ES/SS kernel data, `load_tss(tss_selector)` LTR. Called BSP `kmain` + each AP boot. Selectors via `get_*_selector()` lookup `PER_CORE_GDT[get_current_core_id()]`.
 
@@ -694,7 +703,7 @@ ACPI `init_acpi(rsdp_phys, hhdm_offset, mapper, frame_alloc)` via `acpi` crate `
 
 ### SMP
 
-QEMU configured `cores=2` (`cores=3` dev), `MAX_CORES=16` bitmap `u64`.
+QEMU `smp` from `MAX_CORES` `4` (`xtask/src/main.rs:14` `kernel_max_cores()` `qemu_smp_arg()` `cores=4,threads=1`), `log_splitter.py:22` dynamic, `u64` bitmap `const_assert!(MAX_CORES<=64)`.
 
 AP boot: `build.rs` assembles `src/asm/ap_trampoline.S` + `ap_trampoline.ld` → `objcopy -O binary` → `ap_trampoline.bin` embedded `env!("AP_TRAMPOLINE_BIN")` `asm/mod.rs`; BSP writes blob to phys `0x8000`, identity-maps `0x8000`/`0x9000` `setup_ap_trampoline_mapping`, `cpus[1].bootstrap(ap_core_from_limine_entry_point, 0x12345678)` sends `IPI SIPI` at trampoline; trampoline transitions real→prot→long, minimal GDT, `CR0/CR4/EFER`, load `CR3` from BSP, jump `ap_core_from_limine_entry_point`.
 
@@ -775,7 +784,7 @@ Remaining `BUG-05` frame leak `PageAlreadyMapped`, `BUG-06` framebuffer ignore L
 Blockers P0:
 
 - `A0-1`/`ISSUE-M1`/`BUG-05` no frame reclamation — bump allocator, leak on overlap, no dealloc on `terminate_process`, OOM after ~10k cycles or steady leak. Fix: free list `Vec<PhysFrame>` or HHDM linked list, `deallocate_frame`, lazy alloc fix, free on exit walk `mapped_regions`+stack+PML4 + intermediate tables.
-- `A0-2`/`ISSUE-M4` no guard pages kernel stacks (`RSP0`, `IST0`, `SCHEDULER_STACKS`, `PER_CORE_SYSCALL`) — overflow silent corrupt next core GDT/TSS → triple fault. Fix: unmap guard page `virt - 4096` after heap init, `align(4096)`, `debug_assert!` rsp bounds.
+- `A0-2`/`ISSUE-M4` **DONE** guard pages kernel stacks (`RSP0`, `IST0`, `SCHEDULER_STACKS`, `SYSCALL_SLOTS`) — `GuardedKernelStack`/`GuardedSyscallSlot` `align(4096)` `guard+stack`, `stack_guard::unmap_guard_page` splits `2MiB` huge, `install_guard_pages` after `init_heap`, `assert_rsp_in_bounds`/`assert_syscall_stack_bounds`, `run_on_core_loop` `top-0x1000` headroom, verified `kernel/src/bin/test_guard_pages.rs` `88` checks `guard !mapped` `bottom mapped`.
 - `A0-3` cache `directory_children` never populated `reserve_cache`/`evict_directory` dead. Fix: decode `parent_cluster` bits `55-32` on load, `register_file_in_directory`, lookup parent in `get_effective_importance`.
 
 High P1:

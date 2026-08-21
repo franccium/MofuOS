@@ -192,6 +192,8 @@ pub struct CoreScheduler {
 }
 ```
 
+`SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES]` `36 KiB` (`guard+stack`, `align(4096)`, `guard !PRESENT` after `boot_common::bsp_early_init`, `top-0x1000` headroom for `mov rsp` frame). `gdt::scheduler_bounds` / `assert_rsp_in_bounds` (timer `RPL==Ring3` only).
+
 Priority: 8 levels (0-7). Higher number = higher priority. Within a level: FIFO
 (Dequeue pop_front).
 
@@ -444,12 +446,13 @@ loop. If the process spends most of its time in the kernel (e.g. tight
 sys_write loop), preemption via the timer may not fire often enough to
 interleave with another process. See ISSUE-P9.
 
-### Syscall Stack
+### Syscall Stack + Guard
 
-Per-core. Each core gets its own 64 KiB stack inside a `PerCoreSyscallData` slot.
+Per-core. Each core gets `64 KiB` stack plus `4 KiB` guard inside `GuardedSyscallSlot` (total `72 KiB`).
 
 ```rust
 const SYSCALL_STACK_SIZE: usize = 4096 * 16; // 64 KiB
+const GUARD_PAGE_SIZE: usize = 4096;
 
 #[repr(C, align(64))]
 struct PerCoreSyscallData {
@@ -457,29 +460,28 @@ struct PerCoreSyscallData {
     _stack: [u8; SYSCALL_STACK_SIZE],
 }
 
-static mut PER_CORE_SYSCALL: [PerCoreSyscallData; MAX_CORES]
+#[repr(C, align(4096))]
+struct GuardedSyscallSlot { guard: [u8; 4096], data: PerCoreSyscallData } // guard at slot base
+
+static mut SYSCALL_SLOTS: [GuardedSyscallSlot; MAX_CORES] // 4 * 72 KiB, guard !PRESENT
+// KERNEL_GS_BASE = &SYSCALL_SLOTS[core].data (not guard)
 ```
 
-The `stack_top` field is the first field (`repr(C)`) so `gs:0` reads it directly
-with no offset calculation in the hot path.
+`stack_top` first field (`repr(C)`) so `gs:0` reads directly. `guard` at `slot` base `page-aligned`, `data` at `+0x1000`, `_stack` at `data+8` (`bottom &0xFFF==8`, `page(bottom)==guard+0x1000`), `top = _stack+64KiB`. Guard unmapped after `init_heap` via `stack_guard::unmap_guard_page` (splits `2MiB` huge from Limine if needed, `FrameAllocator` `PT` alloc, `flush`). Overflow at `guard` -> `#PF` `present=0` instead of silent `TSS` corrupt.
 
-Slots are cache-line aligned (`align(64)`) to prevent false sharing between cores.
+`init_syscall()` per AP:
+1. `stack_top = &slot.data._stack[64KiB]` (one past end, grows down)
+2. `slot.data.stack_top = top`
+3. `WRMSR KERNEL_GS_BASE = &slot.data` (`gs:0==top`)
 
-`init_syscall()` (called per core during AP init):
-1. Computes `stack_top = &slot._stack[SYSCALL_STACK_SIZE]` (one past the end, grows down).
-2. Writes `stack_top` into `slot.stack_top`.
-3. Writes the address of the slot into `KERNEL_GS_BASE` MSR (0xC0000102).
-   After `swapgs`, GS points to this slot, so `gs:0 == stack_top`.
-
-Naked asm prologue (two extra instructions over the old design):
+Naked asm prologue:
 ```asm
-swapgs              // swap user GS -> kernel GS (points to PerCoreSyscallData)
-mov r15, rsp        // save user RSP
-mov rsp, gs:0       // load this core's kernel stack top
-swapgs              // restore user GS — done with gs:0
+swapgs; mov r15,rsp; mov rsp,gs:0; swapgs // save user RSP, switch to per-core top
 ```
 
-`init_syscall_stack()` no longer exists. Stack init is fully inside `init_syscall()`.
+`assert_syscall_stack_bounds(core_id)` (`mov rsp` `debug_assert!(bottom<=rsp<=top)`) at top of `handle_syscall_inner`.
+
+`install_syscall_guard_pages(&mut FrameAllocator)` called after `init_heap` in `boot_common::bsp_early_init`.
 
 ## Userspace Test Program
 

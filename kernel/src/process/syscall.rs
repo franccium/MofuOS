@@ -24,7 +24,7 @@ use crate::{
 };
 use alloc::string::String;
 use alloc::vec::Vec;
-use x86_64::structures::paging::PageTableFlags;
+use x86_64::structures::paging::{Mapper, PageTableFlags};
 use core::arch::naked_asm;
 use core::sync::atomic::Ordering;
 use x86_64::registers::model_specific::{Efer, EferFlags};
@@ -122,10 +122,73 @@ impl PerCoreSyscallData {
     }
 }
 
-static mut PER_CORE_SYSCALL: [PerCoreSyscallData; crate::MAX_CORES as usize] = {
-    const EMPTY: PerCoreSyscallData = PerCoreSyscallData::zeroed();
+#[repr(C, align(4096))]
+struct GuardedSyscallSlot {
+    guard: [u8; 4096],
+    data: PerCoreSyscallData,
+}
+
+impl GuardedSyscallSlot {
+    const fn new() -> Self {
+        Self {
+            guard: [0u8; 4096],
+            data: PerCoreSyscallData::zeroed(),
+        }
+    }
+}
+
+static mut SYSCALL_SLOTS: [GuardedSyscallSlot; crate::MAX_CORES as usize] = {
+    const EMPTY: GuardedSyscallSlot = GuardedSyscallSlot::new();
     [EMPTY; crate::MAX_CORES as usize]
 };
+
+
+
+pub fn syscall_guard_page(core_id: u8) -> x86_64::VirtAddr {
+    unsafe {
+        let slot = &SYSCALL_SLOTS[core_id as usize];
+        x86_64::VirtAddr::new(slot.guard.as_ptr() as u64)
+    }
+}
+
+pub fn syscall_bounds(core_id: u8) -> (x86_64::VirtAddr, x86_64::VirtAddr) {
+    unsafe {
+        let slot = &SYSCALL_SLOTS[core_id as usize];
+        let bottom = x86_64::VirtAddr::new(slot.data._stack.as_ptr() as u64);
+        let top = x86_64::VirtAddr::new(slot.data._stack.as_ptr().add(SYSCALL_STACK_SIZE) as u64);
+        (bottom, top)
+    }
+}
+
+pub fn syscall_stack_top(core_id: u8) -> u64 {
+    unsafe {
+        let slot = &SYSCALL_SLOTS[core_id as usize];
+        slot.data._stack.as_ptr().add(SYSCALL_STACK_SIZE) as u64
+    }
+}
+
+pub fn install_syscall_guard_pages(frame_allocator: &mut crate::memory::memory::MemoryMapFrameAllocator) {
+    for core_id in 0..crate::MAX_CORES as usize {
+        unsafe {
+            crate::stack_guard::ensure_guard_unmapped(syscall_guard_page(core_id as u8), frame_allocator);
+        }
+    }
+}
+
+#[inline(always)]
+pub fn assert_syscall_stack_bounds(core_id: u8) {
+    let rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) };
+    let (bottom, top) = syscall_bounds(core_id);
+    debug_assert!(
+        rsp >= bottom.as_u64() && rsp <= top.as_u64(),
+        "syscall RSP {:#x} out of bounds core {} [{:#x}..{:#x}]",
+        rsp,
+        core_id,
+        bottom.as_u64(),
+        top.as_u64()
+    );
+}
 
 const MSR_KERNEL_GS_BASE: u32 = 0xC0000102;
 
@@ -209,6 +272,10 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
     let frame = unsafe { &mut *frame };
     x86_64::instructions::interrupts::enable();
+    {
+        let core_id = get_current_core_id();
+        assert_syscall_stack_bounds(core_id);
+    }
 
     let syscall = unsafe { core::mem::transmute::<u64, SyscallNumber>(frame.syscall_num) };
 
@@ -1169,14 +1236,14 @@ pub fn init_syscall() {
     debug_assert!(core_id < crate::MAX_CORES as usize);
 
     let stack_top = unsafe {
-        let slot = &mut PER_CORE_SYSCALL[core_id];
+        let slot = &mut SYSCALL_SLOTS[core_id].data;
         let stack_end_ptr = slot._stack.as_ptr().add(SYSCALL_STACK_SIZE);
         let top = stack_end_ptr as u64;
         slot.stack_top = top;
         top
     };
 
-    let slot_addr = unsafe { &PER_CORE_SYSCALL[core_id] as *const _ as u64 };
+    let slot_addr = unsafe { &SYSCALL_SLOTS[core_id].data as *const _ as u64 };
     unsafe {
         msr_write(MSR_KERNEL_GS_BASE, slot_addr);
     }

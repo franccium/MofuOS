@@ -3,38 +3,133 @@ use core::cell::UnsafeCell;
 use x86_64::VirtAddr;
 use x86_64::registers::segmentation::Segment;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
+use x86_64::structures::paging::Mapper;
 use x86_64::structures::tss::TaskStateSegment;
 
 use crate::{MAX_CORES, serial_println, serial_println_core};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
-// Stack size for each per-core stack (RSP0 and double-fault IST).
-// 32 KiB is enough for deeply-nested kernel frames.
-const PER_CORE_STACK_SIZE: usize = 8 * 4096; // 32 KiB
+// Stack size for each per-core stack (RSP0 and IST).
+pub const PER_CORE_STACK_SIZE: usize = 8 * 4096; // 32 KiB
+pub const GUARD_PAGE_SIZE: usize = 4096;
 
-// Backing storage for per-core kernel stacks.
-// Layout per core:
-//      [0..PER_CORE_STACK_SIZE] - RSP0 stack (ring 0 interrupt stack)
-//      [PER_CORE_STACK_SIZE..2*STACK_SIZE] - IST[0] stack (double-fault stack)
-#[repr(align(16))]
-struct KernelStack([u8; PER_CORE_STACK_SIZE]);
+#[repr(C, align(4096))]
+pub struct GuardedKernelStack {
+    pub guard: [u8; GUARD_PAGE_SIZE],
+    pub stack: [u8; PER_CORE_STACK_SIZE],
+}
 
-static mut RSP0_STACKS: [KernelStack; MAX_CORES as usize] =
-    [const { KernelStack([0u8; PER_CORE_STACK_SIZE]) }; MAX_CORES as usize];
+impl GuardedKernelStack {
+    const fn new() -> Self {
+        Self {
+            guard: [0u8; GUARD_PAGE_SIZE],
+            stack: [0u8; PER_CORE_STACK_SIZE],
+        }
+    }
+}
 
-static mut IST0_STACKS: [KernelStack; MAX_CORES as usize] =
-    [const { KernelStack([0u8; PER_CORE_STACK_SIZE]) }; MAX_CORES as usize];
+static mut RSP0_STACKS: [GuardedKernelStack; MAX_CORES as usize] =
+    [const { GuardedKernelStack::new() }; MAX_CORES as usize];
 
-// Dedicated stack for each core's scheduler loop.
-static mut SCHEDULER_STACKS: [KernelStack; MAX_CORES as usize] =
-    [const { KernelStack([0u8; PER_CORE_STACK_SIZE]) }; MAX_CORES as usize];
+static mut IST0_STACKS: [GuardedKernelStack; MAX_CORES as usize] =
+    [const { GuardedKernelStack::new() }; MAX_CORES as usize];
+
+static mut SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES as usize] =
+    [const { GuardedKernelStack::new() }; MAX_CORES as usize];
 
 pub fn get_scheduler_stack_top(core_id: u8) -> u64 {
     unsafe {
-        let stack = &SCHEDULER_STACKS[core_id as usize].0;
-        stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64
+        let slot = &SCHEDULER_STACKS[core_id as usize];
+        slot.stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64
     }
+}
+
+pub fn rsp0_stack_top(core_id: u8) -> u64 {
+    unsafe {
+        let slot = &RSP0_STACKS[core_id as usize];
+        slot.stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64
+    }
+}
+
+pub fn ist0_stack_top(core_id: u8) -> u64 {
+    unsafe {
+        let slot = &IST0_STACKS[core_id as usize];
+        slot.stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64
+    }
+}
+
+pub fn rsp0_guard_page(core_id: u8) -> VirtAddr {
+    unsafe {
+        let slot = &RSP0_STACKS[core_id as usize];
+        VirtAddr::new(slot.guard.as_ptr() as u64)
+    }
+}
+
+pub fn ist0_guard_page(core_id: u8) -> VirtAddr {
+    unsafe {
+        let slot = &IST0_STACKS[core_id as usize];
+        VirtAddr::new(slot.guard.as_ptr() as u64)
+    }
+}
+
+pub fn scheduler_guard_page(core_id: u8) -> VirtAddr {
+    unsafe {
+        let slot = &SCHEDULER_STACKS[core_id as usize];
+        VirtAddr::new(slot.guard.as_ptr() as u64)
+    }
+}
+
+pub fn rsp0_bounds(core_id: u8) -> (VirtAddr, VirtAddr) {
+    unsafe {
+        let slot = &RSP0_STACKS[core_id as usize];
+        let bottom = VirtAddr::new(slot.stack.as_ptr() as u64);
+        let top = VirtAddr::new(slot.stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64);
+        (bottom, top)
+    }
+}
+
+pub fn ist0_bounds(core_id: u8) -> (VirtAddr, VirtAddr) {
+    unsafe {
+        let slot = &IST0_STACKS[core_id as usize];
+        let bottom = VirtAddr::new(slot.stack.as_ptr() as u64);
+        let top = VirtAddr::new(slot.stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64);
+        (bottom, top)
+    }
+}
+
+pub fn scheduler_bounds(core_id: u8) -> (VirtAddr, VirtAddr) {
+    unsafe {
+        let slot = &SCHEDULER_STACKS[core_id as usize];
+        let bottom = VirtAddr::new(slot.stack.as_ptr() as u64);
+        let top = VirtAddr::new(slot.stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64);
+        (bottom, top)
+    }
+}
+
+pub fn install_guard_pages(frame_allocator: &mut crate::memory::memory::MemoryMapFrameAllocator) {
+    for core_id in 0..MAX_CORES as usize {
+        unsafe {
+            crate::stack_guard::ensure_guard_unmapped(rsp0_guard_page(core_id as u8), frame_allocator);
+            crate::stack_guard::ensure_guard_unmapped(ist0_guard_page(core_id as u8), frame_allocator);
+            crate::stack_guard::ensure_guard_unmapped(scheduler_guard_page(core_id as u8), frame_allocator);
+        }
+    }
+}
+
+#[inline(always)]
+pub fn assert_rsp_in_bounds(core_id: u8) {
+    let rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) };
+    let (bottom, top) = rsp0_bounds(core_id);
+    debug_assert!(
+        rsp >= bottom.as_u64() && rsp <= top.as_u64(),
+        "RSP {:#x} out of bounds for core {} RSP0 [{:#x}..{:#x}]",
+        rsp,
+        core_id,
+        bottom.as_u64(),
+        top.as_u64()
+    );
 }
 
 static mut PER_CORE_GDT: [Gdt; MAX_CORES as usize] = {
@@ -77,21 +172,10 @@ impl Gdt {
         let idx = core_id as usize;
         let tss = unsafe { &mut *PER_CORE_TSS[idx].get() };
 
-        // RSP0: used by the CPU on any ring3 --> ring0 transition
-        let rsp0_top = unsafe {
-            let stack = &RSP0_STACKS[idx].0;
-            // Stack grows downward; top = one-past-end of the array.
-            stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64
-        };
+        let rsp0_top = rsp0_stack_top(core_id);
         tss.privilege_stack_table[0] = VirtAddr::new(rsp0_top);
 
-        // IST[0]: dedicated stack for the double-fault handler. Without this
-        // the double-fault handler runs on whatever (possibly corrupt) RSP it
-        // inherited, which immediately causes another fault and a triple fault.
-        let ist0_top = unsafe {
-            let stack = &IST0_STACKS[idx].0;
-            stack.as_ptr().add(PER_CORE_STACK_SIZE) as u64
-        };
+        let ist0_top = ist0_stack_top(core_id);
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(ist0_top);
 
         serial_println!(

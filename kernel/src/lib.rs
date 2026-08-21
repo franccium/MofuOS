@@ -33,6 +33,7 @@ pub mod asm;
 pub mod boot_common;
 pub mod boot_info;
 pub mod bsp_init;
+pub mod stack_guard;
 pub mod data_structures;
 pub mod events;
 pub mod filesystem;

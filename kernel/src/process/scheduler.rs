@@ -291,7 +291,8 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
         "run_on_core_loop: switching to per-core scheduler stack (core_id={})",
         core_id
     );
-    let scheduler_stack_top = crate::gdt::get_scheduler_stack_top(core_id);
+    // Leave 4KiB headroom so compiler's frame stays within the stack and not in guard page of the next core
+    let scheduler_stack_top = crate::gdt::get_scheduler_stack_top(core_id) - 0x1000;
     let core_id_saved: u64;
     unsafe {
         core::arch::asm!(

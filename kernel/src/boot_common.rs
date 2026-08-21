@@ -130,6 +130,25 @@ pub unsafe fn bsp_early_init() {
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
     serial_println!("Heap initialized");
 
+    serial_println!("Installing guard pages for kernel stacks");
+    {
+        use core::mem::{size_of, offset_of};
+        serial_println!("GuardedKernelStack size {} guard off {} stack off {}", size_of::<crate::gdt::GuardedKernelStack>(), offset_of!(crate::gdt::GuardedKernelStack, guard), offset_of!(crate::gdt::GuardedKernelStack, stack));
+        for i in 0..4 {
+            let guard = crate::gdt::rsp0_guard_page(i);
+            let (bottom, top) = crate::gdt::rsp0_bounds(i);
+            serial_println!("RSP0 core {} guard {:#x} bottom {:#x} top {:#x}", i, guard.as_u64(), bottom.as_u64(), top.as_u64());
+        }
+        for i in 0..4 {
+            let guard = crate::gdt::scheduler_guard_page(i);
+            let (bottom, top) = crate::gdt::scheduler_bounds(i);
+            serial_println!("SCHED core {} guard {:#x} bottom {:#x} top {:#x}", i, guard.as_u64(), bottom.as_u64(), top.as_u64());
+        }
+    }
+    crate::gdt::install_guard_pages(&mut frame_allocator);
+    crate::process::syscall::install_syscall_guard_pages(&mut frame_allocator);
+    serial_println!("Guard pages installed");
+
     init_input_event_buffer();
 
     unsafe {

@@ -1084,6 +1084,9 @@ extern "x86-interrupt" fn double_fault_handler(
 
 extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFrame) {
     let core_id = get_current_core_id();
+    if stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3 {
+        crate::gdt::assert_rsp_in_bounds(core_id);
+    }
 
     if TIMER_DEBUG_PRINT {
         serial_println_core!("*");
