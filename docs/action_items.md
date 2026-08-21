@@ -1,7 +1,6 @@
 # MofuOS — Action Items: Detailed Issue Analysis and Remediation Plan
 
 > Source: audit of `docs/bugs.md`, `docs/issues.md`, `docs/memory.md`, `docs/process.md`, `docs/hardware.md`, `docs/graphics.md`, `docs/filesystem/filesystem.md`, `docs/conventions.md` plus direct source inspection.
-> Author stance: senior x86_64 / Rust OS — bare-metal, Limine, QEMU q35/KVM.
 > Last updated: 2026-08-21
 
 This document converts every known bug/issue/TODO into an **actionable item** with: root cause on x86_64, concrete failure mode in QEMU, severity, fix sketch, and verification.

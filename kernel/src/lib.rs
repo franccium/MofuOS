@@ -30,7 +30,9 @@ pub static AP_CORES_READY: core::sync::atomic::AtomicU8 = core::sync::atomic::At
 pub mod memory;
 extern crate alloc;
 pub mod asm;
+pub mod boot_common;
 pub mod boot_info;
+pub mod bsp_init;
 pub mod data_structures;
 pub mod events;
 pub mod filesystem;

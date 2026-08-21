@@ -11,6 +11,32 @@ fn project_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn kernel_max_cores(root: &Path) -> u8 {
+    let path = root.join("kernel/src/lib.rs");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("can't read {}: {e}", path.display()));
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("pub const MAX_CORES") {
+            if let Some(eq) = t.find('=') {
+                let after = &t[eq + 1..];
+                let digits: String = after.chars().filter(|c| c.is_ascii_digit()).collect();
+                if let Ok(v) = digits.parse::<u8>() {
+                    if v >= 1 && v <= 64 {
+                        return v;
+                    }
+                }
+            }
+        }
+    }
+    4
+}
+
+fn qemu_smp_arg(root: &Path) -> String {
+    let cores = kernel_max_cores(root);
+    format!("cores={},threads=1", cores)
+}
+
 fn run(cmd: &mut Command) {
     let status = cmd
         .status()
@@ -211,11 +237,12 @@ struct TestResult {
     serial: String,
 }
 
-fn run_test(iso: &Path, ovmf_code: &Path, ovmf_vars: &Path) -> TestResult {
+fn run_test(root: &Path, iso: &Path, ovmf_code: &Path, ovmf_vars: &Path) -> TestResult {
+    let smp = qemu_smp_arg(root);
     let out = Command::new("timeout")
-        .arg("10")
+        .arg("15")
         .arg("qemu-system-x86_64")
-        .args(["-M", "q35", "-accel", "kvm", "-cpu", "qemu64,+tsc-deadline,+apic"])
+        .args(["-M", "q35", "-accel", "kvm", "-smp", &smp, "-cpu", "qemu64,+tsc-deadline,+apic"])
         .args(["-drive", &format!("if=pflash,unit=0,format=raw,file={},readonly=on", ovmf_code.display())])
         .args(["-drive", &format!("if=pflash,unit=1,format=raw,file={}", ovmf_vars.display())])
         .args(["-cdrom", iso.to_str().unwrap()])
@@ -258,11 +285,14 @@ fn run_tests(root: &Path, filters: &[String]) {
     println!();
     let mut passed_names: Vec<&str> = Vec::new();
     let mut failed_names: Vec<(&str, Option<i32>)> = Vec::new();
+    let smp = qemu_smp_arg(root);
+    println!("{BOLD}SMP cores:{RESET} {} (from kernel/src/lib.rs MAX_CORES)", kernel_max_cores(root));
+    println!("{BOLD}QEMU smp:{RESET} {}", smp);
     for name in &bins {
         print!("  {BOLD}{name}{RESET} ... ");
         std::io::stdout().flush().unwrap();
         let iso = package_test_iso(root, name);
-        let result = run_test(&iso, &ovmf_code, &ovmf_vars);
+        let result = run_test(root, &iso, &ovmf_code, &ovmf_vars);
         if result.passed {
             println!("{GREEN}ok{RESET}");
             passed_names.push(name);
@@ -563,8 +593,10 @@ fn run_iso(root: &Path) {
         .spawn()
         .expect("failed to spawn log_splitter.py");
     std::thread::sleep(std::time::Duration::from_millis(200));
+    let smp = qemu_smp_arg(root);
+    println!("SMP cores: {} (from kernel/src/lib.rs MAX_CORES)", kernel_max_cores(root));
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-M", "q35", "-accel", "kvm", "-smp", "cores=3,threads=1", "-cpu", "host,+tsc-deadline,+apic"])
+    cmd.args(["-M", "q35", "-accel", "kvm", "-smp", &smp, "-cpu", "host,+tsc-deadline,+apic"])
         .args(["-drive", &format!("if=pflash,unit=0,format=raw,file={},readonly=on", code.display())])
         .args(["-drive", &format!("if=pflash,unit=1,format=raw,file={}", vars.display())])
         .args(["-cdrom", iso.to_str().unwrap()])
@@ -591,8 +623,10 @@ fn run_nologs(root: &Path) {
     let ata = ensure_ata_disk(root);
     let (code, vars) = ovmf(root);
     let iso = root.join("target/template-x86_64.iso");
+    let smp = qemu_smp_arg(root);
+    println!("SMP cores: {} (from kernel/src/lib.rs MAX_CORES)", kernel_max_cores(root));
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-M", "q35", "-accel", "kvm", "-smp", "cores=3,threads=1", "-cpu", "host,+tsc-deadline,+apic"])
+    cmd.args(["-M", "q35", "-accel", "kvm", "-smp", &smp, "-cpu", "host,+tsc-deadline,+apic"])
         .args(["-drive", &format!("if=pflash,unit=0,format=raw,file={},readonly=on", code.display())])
         .args(["-drive", &format!("if=pflash,unit=1,format=raw,file={}", vars.display())])
         .args(["-cdrom", iso.to_str().unwrap()])

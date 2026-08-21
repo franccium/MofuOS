@@ -15,12 +15,16 @@ REAL TODO:
 
 - automate some verification for userspace and kernel
 
+- exiting processes and reclaiming their resources
+
 - get rid of dynamic allocations in file reading
 
 - hash algorithms
 
 - better perf testing
     repetitions
+    like a reusable framework, instrumentation layer
+    markers
 
 - easier way to get file size, and sys_stat_file(fd) instead of (path)
 

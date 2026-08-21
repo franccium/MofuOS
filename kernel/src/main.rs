@@ -12,8 +12,8 @@ use embedded_graphics::pixelcolor::{Rgb888, RgbColor};
 use embedded_graphics::primitives::{
     Circle, Primitive, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle,
 };
+use kernel::bsp_init::{init_filesystem_on_bsp, init_shared_state_on_bsp, wait_for_ap_cores_blocking};
 use kernel::data_structures::vector::Vec;
-use kernel::filesystem::init_filesystem_ata;
 use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use kernel::graphics::compositor::{self, Compositor};
 use kernel::graphics::pipeline::{
@@ -27,7 +27,7 @@ use kernel::interrupts;
 use kernel::process::CORE_POOL;
 use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, TEST_ELF};
 use kernel::process::shared_state::{
-    get_shared_program_data_buffer, get_shared_program_data_buffer_mut, init_shared_state,
+    get_shared_program_data_buffer, get_shared_program_data_buffer_mut,
 };
 use kernel::util::cpuinfo::{
     AP_CORE_APIC_ID_MESSAGE_OFFSET, AP_CORE_CR3_MESSAGE_OFFSET, SECRET_MESSAGE_OFFSET,
@@ -72,12 +72,7 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 fn main() -> ! {
     serial_println_core!("Welcome to MofuOS!");
 
-    match init_filesystem_ata() {
-        Ok(()) => serial_println_core!("OK: filesystem initialized from ATA drive"),
-        Err(e) => {
-            serial_println_core!("FAIL: filesystem init failed: {}", e);
-        }
-    }
+    let _ = init_filesystem_on_bsp();
     kernel::tests_exp::test_ata::test_ata_filesystem();
 
     //test_process_system();
@@ -98,7 +93,7 @@ fn main() -> ! {
         //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
         serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
-        init_shared_state();
+        init_shared_state_on_bsp();
 
         serial_println_core!("Shared state initialized");
         // let mut compositor = Compositor::new(fb_width as u32, fb_height as u32);
@@ -269,20 +264,8 @@ fn main() -> ! {
 
         init_compositor(fb_width as u32, fb_height as u32);
         serial_println_core!("Compositor initialized");
-        // {
-        //     let mut compositor = get_compositor();
-        //     let (window_id, window_buffer, _event_buffer) = compositor.create_window(20, 20, 30, 30, 0);
-        //     serial_println_core!("Created window with ID: {}", window_id);
-        //     compositor.focus_window(0);
-        //     compositor.compose(fb);
-        // }
 
-        let core_count = CORE_POOL.lock().total_cores();
-        serial_println_core!("Waiting for {} AP cores to be ready...", core_count - 1);
-        while kernel::AP_CORES_READY.load(core::sync::atomic::Ordering::Acquire) < (core_count - 1)
-        {
-            hlt();
-        }
+        wait_for_ap_cores_blocking();
         kernel::process_start::create_userspace_processes();
 
         serial_println_core!("Created initial userspace processes");
