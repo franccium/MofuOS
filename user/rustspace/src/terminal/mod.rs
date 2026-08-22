@@ -330,6 +330,62 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         self.needs_redraw = true;
     }
 
+    fn det_flow_demo(&mut self, count: usize) {
+        const LINE: &str = "AAAAA BBBB CCC ";
+        let total = count.saturating_mul(5);
+        let t0 = unsafe { crate::tsc_read().0 };
+        for _ in 0..total {
+            self.write_str(LINE);
+        }
+        let t1 = unsafe { crate::tsc_read().0 };
+        let delta = t1.wrapping_sub(t0);
+        let mut msg_buf = [0u8; 64];
+        let mut pos = 0;
+        msg_buf[pos..pos + 6].copy_from_slice(b"flow: ");
+        pos += 6;
+        let mut tmp = total;
+        let mut rev = [0u8; 20];
+        let mut rev_len = 0;
+        if tmp == 0 {
+            rev[0] = b'0';
+            rev_len = 1;
+        } else {
+            while tmp > 0 {
+                rev[rev_len] = b'0' + (tmp % 10) as u8;
+                rev_len += 1;
+                tmp /= 10;
+            }
+        }
+        for i in (0..rev_len).rev() {
+            msg_buf[pos] = rev[i];
+            pos += 1;
+        }
+        msg_buf[pos..pos + 15].copy_from_slice(b" lines, cycles=");
+        pos += 15;
+        let mut v = delta;
+        let mut rev2 = [0u8; 20];
+        let mut rev2_len = 0;
+        if v == 0 {
+            rev2[0] = b'0';
+            rev2_len = 1;
+        } else {
+            while v > 0 {
+                rev2[rev2_len] = b'0' + (v % 10) as u8;
+                rev2_len += 1;
+                v /= 10;
+            }
+        }
+        for i in (0..rev2_len).rev() {
+            if pos >= msg_buf.len() {
+                break;
+            }
+            msg_buf[pos] = rev2[i];
+            pos += 1;
+        }
+        let s = unsafe { core::str::from_utf8_unchecked(&msg_buf[..pos]) };
+        self.write_line(s);
+    }
+
     fn flow_demo(&mut self, count: usize) {
         const LOREM: &[u8] = include_bytes!("../../utils/lorem_ipsum.txt");
         if LOREM.is_empty() {
@@ -461,6 +517,28 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 };
                 self.flow_demo(count);
             }
+            "abc" => {
+                let count = if args.is_empty() {
+                    1600
+                } else {
+                    let mut v: usize = 0;
+                    let mut valid = true;
+                    for b in args.bytes() {
+                        if b.is_ascii_digit() {
+                            v = v * 10 + (b - b'0') as usize;
+                        } else {
+                            valid = false;
+                            break;
+                        }
+                    }
+                    if !valid || v == 0 || v > 20000 {
+                        self.write_line("flow: usage: flow [lines 1..20000] (default 1600)");
+                        return;
+                    }
+                    v
+                };
+                self.det_flow_demo(count);
+            }
             "odys" => unsafe {
                 match crate::lookup_program(cmd) {
                     Some(elf_path) => {
@@ -519,7 +597,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                         None => (s_trimmed, ""),
                     };
                     match cmd {
-                        "deb" | "odys" | "flow" | "clear" => self.execute_command(),
+                        "deb" | "odys" | "flow" | "abc" | "clear" => self.execute_command(),
                         _ => {}
                     }
                 }
