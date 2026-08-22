@@ -1,3 +1,4 @@
+pub mod input;
 pub mod line_index;
 pub mod scrollback;
 
@@ -61,7 +62,7 @@ pub struct Terminal<D: DrawTarget<Color = Rgb888>> {
     pub font_metrics: FontMetrics,
     pub last_command_abs: Option<(u64, u64)>,
     pub last_command_buf: Vec<u8>,
-    pub command_mode: bool,
+    pub input_state: input::InputState,
     pub scroll_offset: usize,
 }
 
@@ -94,7 +95,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             font_metrics,
             last_command_abs: None,
             last_command_buf: Vec::new(),
-            command_mode: false,
+            input_state: input::InputState::new(),
             scroll_offset: 0,
         }
     }
@@ -127,7 +128,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
 
     fn clamp_scroll(&mut self) {
         let max_scroll = self.lines.count.saturating_sub(self.viewport_rows);
-        self.scroll_offset = min(scroll_offset, max_scroll);
+        self.scroll_offset = min(self.scroll_offset, max_scroll);
     }
 
     fn scroll_up_lines(&mut self, n: usize) {
@@ -479,143 +480,79 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
     }
 
     fn handle_special_key(&mut self, key: crate::KeyCode, key_state: crate::KeyState) {
-        // Ctrl toggle command mode
-        if (key == crate::KeyCode::LControl || key == crate::KeyCode::RControl)
-            && key_state == crate::KeyState::Pressed
-        {
-            self.command_mode = !self.command_mode;
-            // optional feedback: keep silent to avoid polluting scrollback
-            self.needs_redraw = true;
-            return;
-        }
-        // In command mode, Q/E/A/D control scrolling via KeyEvent
-        if self.command_mode {
-            match key {
-                crate::KeyCode::Q => {
-                    if key_state == crate::KeyState::Pressed {
-                        let n = self.viewport_rows;
-                        self.scroll_up_lines(n);
-                    }
-                    return;
-                }
-                crate::KeyCode::E => {
-                    if key_state == crate::KeyState::Pressed {
-                        let n = self.viewport_rows;
-                        self.scroll_down_lines(n);
-                    }
-                    return;
-                }
-                crate::KeyCode::A => {
-                    if key_state == crate::KeyState::Pressed {
-                        self.scroll_up_lines(1);
-                    }
-                    return;
-                }
-                crate::KeyCode::D => {
-                    if key_state == crate::KeyState::Pressed {
-                        self.scroll_down_lines(1);
-                    }
-                    return;
-                }
-                _ => {}
-            }
-        }
-        match key {
-            crate::KeyCode::ArrowUp => {
-                if !self.command_mode {
-                    self.recall_last_command();
-                }
-            }
-            crate::KeyCode::ArrowLeft => {}
-            crate::KeyCode::ArrowDown => {}
-            _ => {}
+        let mut tmp_event = crate::InputEvent {
+            event_type: crate::EventType::KeyEvent,
+            _pad: [0; 3],
+            value: key as u32,
+            extra: key_state as u32,
+            reserved: 0,
+        };
+        if let Some(action) = input::translate(tmp_event, &mut self.input_state) {
+            self.apply_action(action);
         }
     }
 
-    pub fn handle_event(&mut self, event: crate::InputEvent) {
-        let v = event.value;
-        match event.event_type {
-            crate::EventType::CharEvent => {
-                if let Some(c) = char::from_u32(v) {
-                    // In command mode, intercept Q/E/A/D as scroll (char path)
-                    if self.command_mode {
-                        let lower = c.to_ascii_lowercase();
-                        match lower {
-                            'q' => {
-                                self.scroll_up_page();
-                                self.needs_redraw = true;
-                                return;
-                            }
-                            'e' => {
-                                self.scroll_down_page();
-                                self.needs_redraw = true;
-                                return;
-                            }
-                            'a' => {
-                                self.scroll_up_lines(1);
-                                self.needs_redraw = true;
-                                return;
-                            }
-                            'd' => {
-                                self.scroll_down_lines(1);
-                                self.needs_redraw = true;
-                                return;
-                            }
-                            _ => {}
-                        }
-                        // Ctrl itself may come as char 0x11? Ignore
-                        if c == '\u{11}' || c == '\u{03}' {
-                            return;
-                        }
-                        // Block other typing in command mode
-                        self.needs_redraw = true;
-                        return;
-                    }
-                    match c {
-                        crate::AsciiChar::BACKSPACE => self.backspace(),
-                        crate::AsciiChar::NEWLINE | crate::AsciiChar::CARRIAGE_RETURN => {
-                            self.capture_last_command();
-                            let last = self.last_command_buf.clone();
-                            self.newline();
-                            if !last.is_empty() {
-                                let s_trimmed = core::str::from_utf8(&last).unwrap_or("").trim();
-                                let (cmd, _) = match s_trimmed.find(' ') {
-                                    Some(i) => s_trimmed.split_at(i),
-                                    None => (s_trimmed, ""),
-                                };
-                                match cmd {
-                                    "deb" | "odys" | "flow" | "clear" => self.execute_command(),
-                                    _ => {}
-                                }
-                            }
-                            // Keep at bottom after new command unless user is scrolled
-                            // If at bottom, stay bottom; otherwise keep offset
-                            // No auto-reset; clamp ensures valid
-                            self.clamp_scroll();
-                        }
-                        c if !c.is_control() => {
-                            // If scrolled, typing should jump to bottom
-                            if self.scroll_offset != 0 {
-                                self.scroll_offset = 0;
-                            }
-                            let b = c as u8;
-                            self.write_bytes_internal(&[b]);
-                        }
-                        _ => {}
-                    }
-                    self.needs_redraw = true;
-                }
-            }
-            crate::EventType::KeyEvent => {
-                let keycode =
-                    unsafe { core::mem::transmute::<u8, crate::KeyCode>(event.value as u8) };
-                let key_state =
-                    unsafe { core::mem::transmute::<u8, crate::KeyState>(event.extra as u8) };
-                self.handle_special_key(keycode, key_state);
+    fn apply_action(&mut self, action: input::InputAction) {
+        match action {
+            input::InputAction::ToggleCommandMode => {
                 self.needs_redraw = true;
             }
-            crate::EventType::MouseEvent => {}
-            _ => {}
+            input::InputAction::Scroll { dir, amount } => match (dir, amount) {
+                (input::ScrollDir::Up, input::ScrollAmount::Page) => {
+                    self.scroll_up_lines(self.viewport_rows)
+                }
+                (input::ScrollDir::Down, input::ScrollAmount::Page) => {
+                    self.scroll_down_lines(self.viewport_rows)
+                }
+                (input::ScrollDir::Up, input::ScrollAmount::Line) => self.scroll_up_lines(1),
+                (input::ScrollDir::Down, input::ScrollAmount::Line) => self.scroll_down_lines(1),
+            },
+            input::InputAction::Backspace => self.backspace(),
+            input::InputAction::Enter => {
+                self.capture_last_command();
+                let last = self.last_command_buf.clone();
+                self.newline();
+                if !last.is_empty() {
+                    let s_trimmed = core::str::from_utf8(&last).unwrap_or("").trim();
+                    let (cmd, _) = match s_trimmed.find(' ') {
+                        Some(i) => s_trimmed.split_at(i),
+                        None => (s_trimmed, ""),
+                    };
+                    match cmd {
+                        "deb" | "odys" | "flow" | "clear" => self.execute_command(),
+                        _ => {}
+                    }
+                }
+                self.clamp_scroll();
+            }
+            input::InputAction::Char(c) => {
+                if self.scroll_offset != 0 {
+                    self.scroll_offset = 0;
+                }
+                let b = c as u8;
+                self.write_bytes_internal(&[b]);
+            }
+            input::InputAction::ArrowUp => {
+                if !self.input_state.command_mode {
+                    self.recall_last_command();
+                }
+            }
+            input::InputAction::ArrowDown
+            | input::InputAction::ArrowLeft
+            | input::InputAction::ArrowRight
+            | input::InputAction::Home
+            | input::InputAction::End
+            | input::InputAction::PageUp
+            | input::InputAction::PageDown
+            | input::InputAction::Escape
+            | input::InputAction::Ignore => {}
+        }
+        self.needs_redraw = true;
+    }
+
+    pub fn handle_event(&mut self, event: crate::InputEvent) {
+        if let Some(action) = input::translate(event, &mut self.input_state) {
+            self.apply_action(action);
         }
     }
 }
