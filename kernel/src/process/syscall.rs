@@ -521,49 +521,35 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let size = frame.arg1 as usize;
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
-
-            let old_heap_end = {
-                let pm = PROCESS_MANAGER.lock();
-                match pm.get_process(pid) {
-                    Ok(proc) => proc.memory_layout.heap_end,
-                    Err(_) => {
-                        serial_println_core!("sys_allocate: pid={} not found", pid);
-                        return u64::MAX;
-                    }
-                }
-            };
-
-            let new_heap_end = old_heap_end + size as u64;
             let umm = crate::memory::get_user_mem_mgr();
             let mut fa = crate::memory::get_frame_allocator();
-
-            let result = {
-                let mut pm = PROCESS_MANAGER.lock();
-                match pm.get_process_mut(pid) {
-                    Ok(proc) => match proc.memory_layout.grow_heap(new_heap_end, umm, &mut fa) {
-                        Ok(_) => {
-                            serial_println_core!(
-                                "sys_allocate: pid={} size={} -> ptr={:#x}",
-                                pid,
-                                size,
-                                old_heap_end.as_u64()
-                            );
-                            old_heap_end.as_u64()
-                        }
-                        Err(e) => {
-                            serial_println_core!(
-                                "sys_allocate: pid={} size={} grow_heap failed: {:?}",
-                                pid,
-                                size,
-                                e
-                            );
-                            u64::MAX
-                        }
-                    },
-                    Err(_) => u64::MAX,
+            let mut pm = PROCESS_MANAGER.lock();
+            match pm.get_process_mut(pid) {
+                Ok(proc) => match proc.memory_layout.allocate_heap(size, umm, &mut fa) {
+                    Ok(old_ptr) => {
+                        serial_println_core!(
+                            "sys_allocate: pid={} size={} -> ptr={:#x}",
+                            pid,
+                            size,
+                            old_ptr.as_u64()
+                        );
+                        old_ptr.as_u64()
+                    }
+                    Err(e) => {
+                        serial_println_core!(
+                            "sys_allocate: pid={} size={} allocate_heap failed: {:?}",
+                            pid,
+                            size,
+                            e
+                        );
+                        u64::MAX
+                    }
+                },
+                Err(_) => {
+                    serial_println_core!("sys_allocate: pid={} not found", pid);
+                    u64::MAX
                 }
-            };
-            result
+            }
         }
         SyscallNumber::MapWindowBuffer => {
             let window_id = frame.arg1 as u32;

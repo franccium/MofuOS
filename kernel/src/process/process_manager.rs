@@ -144,8 +144,8 @@ impl ProcessManager {
                 top_page_table_phys: PhysAddr::new(page_table_base),
                 stack_top: VirtAddr::new(stack_top),
                 stack_size: 0,
-                heap_start: VirtAddr::new(0),
-                heap_end: VirtAddr::new(0),
+                heap_start: VirtAddr::new(crate::process::process::PROCESS_HEAP_VIRT_START),
+                heap_end: VirtAddr::new(crate::process::process::PROCESS_HEAP_VIRT_START),
                 mapped_regions: alloc::vec::Vec::<MappedMemoryRegion>::new(),
                 next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
                 allocated_ranges: alloc::vec::Vec::new()

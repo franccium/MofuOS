@@ -16,6 +16,8 @@ pub const FS_CACHED_TEST_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fs_test_cached");
 pub const ODYS_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/odys");
+pub const MEMSTRESS_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/memstress");
 
 #[derive(Debug)]
 pub struct ElfLoadInfo {

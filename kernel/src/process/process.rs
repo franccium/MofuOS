@@ -153,13 +153,12 @@ impl Process {
         stack_top: u64,
         page_table_base_phys: u64,
     ) -> Result<Self, MapToError<Size4KiB>> {
-        // The caller has to provide a fully-constructed memory layout
         let memory_layout = crate::process::process_mem::ProcessMemoryLayout {
             top_page_table_phys: x86_64::PhysAddr::new(page_table_base_phys),
             stack_top: x86_64::VirtAddr::new(stack_top),
             stack_size: 0,
             heap_start: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_START),
-            heap_end: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_END),
+            heap_end: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_START),
             mapped_regions: alloc::vec::Vec::new(),
             next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
             allocated_ranges: alloc::vec::Vec::new()

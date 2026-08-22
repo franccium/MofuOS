@@ -222,7 +222,7 @@ impl MemoryMapFrameAllocator {
             memory_map,
             curr_region_index: 0,
             frame_offset_in_region: 0,
-            free_list: alloc::vec::Vec::with_capacity(FRAME_FREE_LIST_DEFAULT_SIZE),
+            free_list: alloc::vec::Vec::new(),
         }
     }
 
@@ -241,20 +241,21 @@ impl MemoryMapFrameAllocator {
     pub fn allocated_bump_frames(&self) -> usize {
         let page_size = PAGE_SIZE as u64;
         let mut count: usize = 0;
+
         for idx in 0..self.curr_region_index {
             let region = self.memory_map[idx];
-            if region.type_ != MEMMAP_USABLE {
-                continue;
-            }
-            let start = align_up(region.base, page_size);
-            let end = region.base + region.length;
-            if end > start {
-                count += ((end - start) / page_size) as usize;
-                if idx == self.curr_region_index {
-                    break;
+            if region.type_ == MEMMAP_USABLE {
+                let start = align_up(region.base, page_size);
+                let end = region.base + region.length;
+                if end > start {
+                    count += ((end - start) / page_size) as usize;
+                    if idx == self.curr_region_index {
+                        break;
+                    }
                 }
             }
         }
+        
         if let Some(region) = self.memory_map.get(self.curr_region_index) {
             if region.type_ == MEMMAP_USABLE {
                 count += (self.frame_offset_in_region / page_size) as usize;

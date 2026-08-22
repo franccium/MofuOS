@@ -47,10 +47,26 @@ impl ProcessMemoryLayout {
             stack_top: VirtAddr::new(0),
             stack_size: 0u64,
             heap_start: VirtAddr::new(PROCESS_HEAP_VIRT_START),
-            heap_end: VirtAddr::new(PROCESS_HEAP_VIRT_END),
+            heap_end: VirtAddr::new(PROCESS_HEAP_VIRT_START),
             next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
             allocated_ranges: Vec::new(),
         })
+    }
+
+    pub fn allocate_heap(
+        &mut self,
+        size_bytes: usize,
+        address_space_manager: MutexGuard<'_, UserMemoryManager>,
+        frame_allocator: &mut MemoryMapFrameAllocator,
+    ) -> Result<VirtAddr, MapToError<Size4KiB>> {
+        if size_bytes == 0 {
+            return Ok(self.heap_end);
+        }
+        let aligned_size = align_to_page_size(size_bytes as u64);
+        let old_heap_end = self.heap_end;
+        let new_heap_end = old_heap_end + aligned_size;
+        self.grow_heap(new_heap_end, address_space_manager, frame_allocator)?;
+        Ok(old_heap_end)
     }
 
     pub fn grow_heap(
@@ -155,16 +171,16 @@ impl ProcessMemoryLayout {
         for region in self.mapped_regions.iter() {
             let start = region.start_virt;
             let size = region.size_bytes;
-            if size == 0 {
-                continue;
-            }
-            let start_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
-            let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
-                start + size - 1u64,
-            );
-            for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
-                if let Some(phys) = user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address()) {
-                    push_owned(phys);
+            if size != 0 {
+                let start_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
+                let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
+                    start + size - 1u64,
+                );
+
+                for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
+                    if let Some(phys) = user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address()) {
+                        push_owned(phys);
+                    }
                 }
             }
         }
@@ -184,17 +200,17 @@ impl ProcessMemoryLayout {
         }
 
         for &(start_u64, size_u64) in self.allocated_ranges.iter() {
-            if size_u64 == 0 {
-                continue;
-            }
-            let start = VirtAddr::new(start_u64);
-            let start_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
-            let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
-                start + size_u64 - 1u64,
-            );
-            for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
-                if let Some(phys) = user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address()) {
-                    push_owned(phys);
+            if size_u64 != 0 {
+                let start = VirtAddr::new(start_u64);
+                let start_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
+                let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
+                    start + size_u64 - 1u64,
+                );
+                
+                for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
+                    if let Some(phys) = user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address()) {
+                        push_owned(phys);
+                    }
                 }
             }
         }

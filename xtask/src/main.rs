@@ -185,6 +185,23 @@ fn discover_test_bins(root: &Path) -> Vec<String> {
     names
 }
 
+fn discover_usertest_bins(root: &Path) -> Vec<String> {
+    let bin_dir = root.join("kernel/src/bin");
+    let Ok(entries) = fs::read_dir(&bin_dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            let stem = name.strip_suffix(".rs")?;
+            (stem.starts_with("test_user") || stem.starts_with("test_usermem")).then(|| stem.to_string())
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 fn build_all_test_kernels(root: &Path, bins: &[String]) {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root).args([
@@ -237,27 +254,159 @@ struct TestResult {
     serial: String,
 }
 
-fn run_test(root: &Path, iso: &Path, ovmf_code: &Path, ovmf_vars: &Path) -> TestResult {
+fn save_test_logs(root: &Path, test_name: &str, serial: &str, com2_raw_path: Option<&Path>) {
+    let test_logs_root = root.join("test_logs");
+    let test_dir = test_logs_root.join(test_name);
+    let _ = fs::create_dir_all(&test_dir);
+    // Also keep legacy flat log for convenience
+    let _ = fs::create_dir_all(&test_logs_root);
+    let _ = fs::write(test_logs_root.join(format!("{}.log", test_name)), serial);
+    // Merge COM2 raw if present
+    let mut combined = serial.to_string();
+    if let Some(p) = com2_raw_path {
+        if let Ok(com2) = fs::read_to_string(p) {
+            if !com2.trim().is_empty() {
+                combined.push_str("\n");
+                combined.push_str(&com2);
+            }
+        }
+    }
+    // ANSI strip
+    let ansi_re = regex_lite_strip_ansi(&combined);
+    // Write all.txt
+    let _ = fs::write(test_dir.join("all.txt"), &ansi_re);
+    // Also write flat combined
+    let _ = fs::write(test_logs_root.join(format!("{}.log", test_name)), &ansi_re);
+    // Split per core / per pid like log_splitter.py
+    let max_cores = kernel_max_cores(root) as usize;
+    let mut core_writers: Vec<Option<std::fs::File>> = (0..max_cores).map(|_| None).collect();
+    for i in 0..max_cores {
+        let path = test_dir.join(format!("core_{}.txt", i));
+        if let Ok(f) = std::fs::File::create(&path) {
+            core_writers[i] = Some(f);
+        }
+    }
+    let mut pid_writers: std::collections::HashMap<u32, std::fs::File> = std::collections::HashMap::new();
+    for line in ansi_re.lines() {
+        // core split: ^[Core N
+        if line.starts_with("[Core ") {
+            if let Some(core_id) = parse_core_id(line) {
+                if core_id < max_cores {
+                    if let Some(f) = core_writers[core_id].as_mut() {
+                        let _ = std::io::Write::write_all(f, format!("{}\n", line).as_bytes());
+                    }
+                }
+            }
+        }
+        // pid split: [pid=N]
+        if let Some(pid) = parse_pid(line) {
+            let entry = pid_writers.entry(pid).or_insert_with(|| {
+                std::fs::File::create(test_dir.join(format!("userspace_pid_{}.txt", pid))).unwrap()
+            });
+            let cleaned = line.replacen(&format!("[pid={}]", pid), "", 1).trim().to_string();
+            let _ = std::io::Write::write_all(entry, format!("{}\n", cleaned).as_bytes());
+        }
+    }
+}
+
+fn regex_lite_strip_ansi(s: &str) -> String {
+    // lite ANSI strip without regex crate: remove \x1b[...m
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                // consume until 'm' or letter
+                for ch in chars.by_ref() {
+                    if ch.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn parse_core_id(line: &str) -> Option<usize> {
+    // "[Core N |" or "[Core N]"
+    let rest = line.strip_prefix("[Core ")?;
+    let end = rest.find(|c: char| !c.is_ascii_digit())?;
+    rest[..end].parse().ok()
+}
+
+fn parse_pid(line: &str) -> Option<u32> {
+    let start = line.find("[pid=")?;
+    let rest = &line[start + 5..];
+    let end = rest.find(']')?;
+    rest[..end].parse().ok()
+}
+
+fn run_test_with_timeout(root: &Path, iso: &Path, ovmf_code: &Path, ovmf_vars: &Path, timeout_secs: &str) -> TestResult {
     let smp = qemu_smp_arg(root);
+    // Prepare test_logs path for COM2 capture (file backend)
+    // We don't yet know test_name here, so use generic temp file and let caller handle saving.
+    // Keep stdio for COM1, file for COM2 to preserve both.
+    let com2_tmp = root.join("target").join(format!("com2_{}.log", std::process::id()));
+    let com2_arg = format!("file:{}", com2_tmp.display());
     let out = Command::new("timeout")
-        .arg("15")
+        .arg(timeout_secs)
         .arg("qemu-system-x86_64")
         .args(["-M", "q35", "-accel", "kvm", "-smp", &smp, "-cpu", "qemu64,+tsc-deadline,+apic"])
         .args(["-drive", &format!("if=pflash,unit=0,format=raw,file={},readonly=on", ovmf_code.display())])
         .args(["-drive", &format!("if=pflash,unit=1,format=raw,file={}", ovmf_vars.display())])
         .args(["-cdrom", iso.to_str().unwrap()])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
-        .args(["-serial", "stdio", "-display", "none", "-no-reboot"])
+        .args(["-serial", "stdio", "-serial", &com2_arg, "-display", "none", "-no-reboot"])
         .args(["-m", "256M"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn qemu: {e}"));
     let exit_code = out.status.code();
+    let mut serial = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Merge COM2 file (userspace) if present — QEMU file backend for -serial 2
+    if let Ok(com2) = fs::read_to_string(&com2_tmp) {
+        if !com2.trim().is_empty() {
+            serial.push_str("\n");
+            serial.push_str(&com2);
+        }
+        let _ = fs::remove_file(&com2_tmp);
+    } else {
+        let _ = fs::remove_file(&com2_tmp);
+    }
     TestResult {
         passed: exit_code == Some(TEST_SUCCESS_EXIT),
         exit_code,
-        serial: String::from_utf8_lossy(&out.stdout).into_owned(),
+        serial,
+    }
+}
+
+fn run_test(root: &Path, iso: &Path, ovmf_code: &Path, ovmf_vars: &Path) -> TestResult {
+    run_test_with_timeout(root, iso, ovmf_code, ovmf_vars, "15")
+}
+
+fn build_user_rust_only(root: &Path) {
+    println!("Building Rust userspace (for usertest)…");
+    let rustspace_dir = root.join("user/rustspace");
+    if !rustspace_dir.join("Cargo.toml").exists() {
+        eprintln!("user/rustspace/Cargo.toml not found — nothing to build");
+        return;
+    }
+    let _ = Command::new("cargo").args(["fmt"]).current_dir(&rustspace_dir).status();
+    let status = Command::new("cargo")
+        .args(["+nightly", "build", "-Z", "build-std=core,alloc", "-Z", "json-target-spec", "--target", "x86_64-user.json"])
+        .current_dir(&rustspace_dir)
+        .status();
+    if let Ok(s) = status {
+        if !s.success() {
+            panic!("Rust userspace build failed");
+        }
+    } else {
+        panic!("failed to spawn cargo for rustspace");
     }
 }
 
@@ -293,8 +442,18 @@ fn run_tests(root: &Path, filters: &[String]) {
         std::io::stdout().flush().unwrap();
         let iso = package_test_iso(root, name);
         let result = run_test(root, &iso, &ovmf_code, &ovmf_vars);
+        // Save logs like log_splitter → test_logs/<name>/all.txt + core_N.txt + userspace
+        save_test_logs(root, name, &result.serial, None);
         if result.passed {
-            println!("{GREEN}ok{RESET}");
+            println!("{GREEN}ok{RESET} (log: test_logs/{}/all.txt)", name);
+            let serial = result.serial.trim();
+            if !serial.is_empty() {
+                println!("  {YELLOW}---- serial output ----{RESET}");
+                for line in serial.lines() {
+                    println!("  {line}");
+                }
+                println!("  {YELLOW}-----------------------{RESET}");
+            }
             passed_names.push(name);
         } else {
             let code_str = match result.exit_code {
@@ -303,7 +462,7 @@ fn run_tests(root: &Path, filters: &[String]) {
                 Some(TEST_FAILED_EXIT) => format!("{} (kernel reported failure)", TEST_FAILED_EXIT),
                 Some(c) => c.to_string(),
             };
-            println!("{RED}FAILED{RESET} (exit code: {code_str})");
+            println!("{RED}FAILED{RESET} (exit code: {code_str}) (log: test_logs/{}/all.txt)", name);
             let serial = result.serial.trim();
             if !serial.is_empty() {
                 println!("  {YELLOW}---- serial output ----{RESET}");
@@ -317,7 +476,7 @@ fn run_tests(root: &Path, filters: &[String]) {
     }
     println!();
     if failed_names.is_empty() {
-        println!("{GREEN}{BOLD}test result: ok.{RESET} {} passed; 0 failed", passed_names.len());
+        println!("{GREEN}{BOLD}test result: ok.{RESET} {} passed; 0 failed (logs in test_logs/)", passed_names.len());
     } else {
         println!("{BOLD}tests:{RESET}");
         for name in &passed_names {
@@ -684,9 +843,94 @@ fn clippy(root: &Path, extra: &[String]) {
     }
 }
 
+fn run_usertests(root: &Path, filters: &[String]) {
+    let all_bins = discover_usertest_bins(root);
+    if all_bins.is_empty() {
+        eprintln!("No usertest binaries found in kernel/src/bin/test_user*.rs or test_usermem*.rs");
+        std::process::exit(1);
+    }
+    let bins: Vec<String> = if filters.is_empty() {
+        all_bins
+    } else {
+        all_bins.into_iter().filter(|name| filters.iter().any(|f| name.contains(f.as_str()))).collect()
+    };
+    if bins.is_empty() {
+        eprintln!("No usertests matched the given filter(s).");
+        std::process::exit(1);
+    }
+    ensure_limine(root);
+    build_user_rust_only(root);
+    println!("{BOLD}Building usertest kernels…{RESET}");
+    build_all_test_kernels(root, &bins);
+    let (ovmf_code, ovmf_vars) = ovmf(root);
+    println!();
+    let mut passed_names: Vec<&str> = Vec::new();
+    let mut failed_names: Vec<(&str, Option<i32>)> = Vec::new();
+    let smp = qemu_smp_arg(root);
+    println!("{BOLD}SMP cores:{RESET} {} (from kernel/src/lib.rs MAX_CORES)", kernel_max_cores(root));
+    println!("{BOLD}QEMU smp:{RESET} {}", smp);
+    for name in &bins {
+        print!("  {BOLD}{name}{RESET} ... ");
+        std::io::stdout().flush().unwrap();
+        let iso = package_test_iso(root, name);
+        let result = run_test_with_timeout(root, &iso, &ovmf_code, &ovmf_vars, "30");
+        save_test_logs(root, name, &result.serial, None);
+        if result.passed {
+            println!("{GREEN}ok{RESET} (log: test_logs/{}/all.txt)", name);
+            let serial = result.serial.trim();
+            if !serial.is_empty() {
+                println!("  {YELLOW}---- serial output ----{RESET}");
+                for line in serial.lines() {
+                    println!("  {line}");
+                }
+                println!("  {YELLOW}-----------------------{RESET}");
+            }
+            passed_names.push(name);
+        } else {
+            let code_str = match result.exit_code {
+                None => "none (timeout)".to_string(),
+                Some(UNEXPECTED_EXIT) => format!("{} (unexpected exit)", UNEXPECTED_EXIT),
+                Some(TEST_FAILED_EXIT) => format!("{} (kernel reported failure)", TEST_FAILED_EXIT),
+                Some(c) => c.to_string(),
+            };
+            println!("{RED}FAILED{RESET} (exit code: {code_str}) (log: test_logs/{}/all.txt)", name);
+            let serial = result.serial.trim();
+            if !serial.is_empty() {
+                println!("  {YELLOW}---- serial output ----{RESET}");
+                for line in serial.lines() {
+                    println!("  {line}");
+                }
+                println!("  {YELLOW}-----------------------{RESET}");
+            }
+            failed_names.push((name, result.exit_code));
+        }
+    }
+    println!();
+    if failed_names.is_empty() {
+        println!("{GREEN}{BOLD}usertest result: ok.{RESET} {} passed; 0 failed (logs in test_logs/)", passed_names.len());
+    } else {
+        println!("{BOLD}usertests:{RESET}");
+        for name in &passed_names {
+            println!("  {GREEN}ok{RESET}    {name}");
+        }
+        for (name, exit_code) in &failed_names {
+            let code_str = match exit_code {
+                None => "none (timeout)".to_string(),
+                Some(UNEXPECTED_EXIT) => format!("{} (unexpected exit)", UNEXPECTED_EXIT),
+                Some(TEST_FAILED_EXIT) => format!("{} (kernel reported failure)", TEST_FAILED_EXIT),
+                Some(c) => c.to_string(),
+            };
+            println!("  {RED}FAILED{RESET} {name} (exit code: {code_str})");
+        }
+        println!();
+        println!("{RED}{BOLD}usertest result: FAILED.{RESET} {} passed; {} failed", passed_names.len(), failed_names.len());
+        std::process::exit(1);
+    }
+}
+
 fn print_usage() {
     eprintln!(
-        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO + ATA disk and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n   ata-disk     Create ATA disk image (storage/ata_disk.img)\n  test [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  fat32-image  Create test FAT32 disk image\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
+        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO + ATA disk and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n   ata-disk     Create ATA disk image (storage/ata_disk.img)\n  test [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  usertest [filter…] Build and run userspace integration tests (kernel/src/bin/test_user*.rs, test_usermem*.rs)\n  fat32-image  Create test FAT32 disk image\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
     );
 }
 
@@ -712,6 +956,7 @@ fn main() {
             ensure_ata_disk(&root);
         }
         Some("test") => run_tests(&root, &extra),
+        Some("usertest") => run_usertests(&root, &extra),
         Some("fat32-image") => fat32_image(&root),
         Some("clean") => clean(&root),
         Some("fmt") => fmt(&root, &extra),

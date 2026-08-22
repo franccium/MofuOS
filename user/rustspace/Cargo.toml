@@ -29,6 +29,10 @@ path = "src/bin/theophe.rs"
 name = "fs_test"
 path = "src/bin/fs_test.rs"
 
+[[bin]]
+name = "memstress"
+path = "src/bin/memstress.rs"
+
 [dependencies.lazy_static]
 version = "1.5"
 features = ["spin_no_std"]
