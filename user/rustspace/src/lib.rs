@@ -10,6 +10,7 @@ use spin::Mutex;
 use x86_64::structures::paging::PageTableFlags;
 
 pub mod gfx;
+pub mod terminal;
 
 pub const SYS_CREATE_PROCESS: u64 = 0;
 pub const SYS_TERMINATE_PROCESS: u64 = 1;

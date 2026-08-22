@@ -73,20 +73,78 @@
 
 
 ## Style Guides
-Do not write comments like these after making requested changes, just do the changes
+##### Do not write comments like these after making requested changes, just do the changes
 // ---------------------------------------------------------------------------
 // CachedDriver<D> — caching wrapper, fully generic, zero extra dispatch
 // ---------------------------------------------------------------------------
 
-Do not pad like:
+##### Do not do "pretty comments" using ---- and other delimiters, if you have to do comments, do them raw
+
+##### Do not pad declarations like:
 const READ  = 0b00000001;
 const WRITE = 0b00000010;
 Just leave it like:
 const READ = 0b00000001;
 const WRITE = 0b00000010;
 
-Do not end comments with a dot
+##### Do not end comments with a dot
 
+##### Do not compress lines, create breathing space in lines
+Example of bad line compression:
+```rust
+pub fn write_bytes(&mut self, bytes: &[u8]) -> u64 {
+    let start_abs = self.absolute_filled;
+    let mut remaining = bytes.len();
+    let mut offset = 0;
+    while remaining > 0 {
+        let chunk_max = remaining;
+        let dest = self.get_writable_slice(chunk_max);
+        let n = core::cmp::min(dest.len(), remaining);
+        dest[..n].copy_from_slice(&bytes[offset..offset + n]);
+        self.commit_bytes(n);
+        offset += n;
+        remaining -= n;
+    }
+    start_abs
+}
+```
+Corrected:
+```rust
+pub fn write_bytes(&mut self, bytes: &[u8]) -> u64 {
+    let start_abs = self.absolute_filled;
+    let mut remaining = bytes.len();
+    let mut offset = 0;
 
+    while remaining > 0 {
+        let chunk_max = remaining;
+        let dest = self.get_writable_slice(chunk_max);
+        let n = core::cmp::min(dest.len(), remaining);
+        dest[..n].copy_from_slice(&bytes[offset..offset + n]);
+        self.commit_bytes(n);
 
-Example of bad code
+        offset += n;
+        remaining -= n;
+    }
+
+    start_abs
+}
+```
+
+##### Use min, max, clamp for clamping values instead of 'if'
+Example of bad:
+```rust
+if to_read_len > max_len {
+    to_read_len = max_len;
+}
+if to_clamp > max_val {
+    to_clamp = max_val;
+}
+else if to_clamp < min_val {
+    to_clamp = min_val;
+}
+```
+Corrected example:
+```rust
+to_read_len = min(to_read_len, max_len);
+to_clamp = clamp(to_clamp, min_val, max_val);
+```
