@@ -280,6 +280,11 @@ pub unsafe fn sys_exit(code: i32) -> ! {
 }
 
 #[inline(always)]
+pub unsafe fn sys_terminate_process(pid: usize, exit_code: i32) -> bool {
+    unsafe { syscall2(SYS_TERMINATE_PROCESS, pid as u64, exit_code as u64) == 0 }
+}
+
+#[inline(always)]
 pub unsafe fn sys_yield() {
     unsafe { syscall1(SYS_YIELD, 0) };
 }

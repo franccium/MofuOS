@@ -200,6 +200,7 @@ impl UserMemoryManager {
                         flush.flush();
                     }
                     Err(MapToError::PageAlreadyMapped(_existing_frame)) => {
+                        frame_allocator.deallocate_frame(phys_frame);
                         // This page was already mapped by a previous segment whose
                         // virtual range overlaps ours at a page boundary.
                         //
@@ -237,7 +238,10 @@ impl UserMemoryManager {
                             }
                         }
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        frame_allocator.deallocate_frame(phys_frame);
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -324,6 +328,253 @@ impl UserMemoryManager {
         )?;
 
         Ok(stack_top)
+    }
+
+    pub fn unmap_all_user_pages_with_owned_set(
+        &self,
+        pml4_phys: PhysAddr,
+        owned_phys: &[PhysAddr],
+        frame_allocator: &mut MemoryMapFrameAllocator,
+    ) {
+        let mut already_freed: alloc::vec::Vec<PhysAddr> = alloc::vec::Vec::new();
+        let pml4_virt = VirtAddr::new(pml4_phys.as_u64() + self.phys_offset);
+        let pml4 = unsafe { &mut *(pml4_virt.as_u64() as *mut PageTable) };
+        
+        for pml4_idx in 0..256 {
+            let pml4_entry_present = {
+                let e = &pml4[pml4_idx];
+                !e.is_unused() && e.flags().contains(PageTableFlags::PRESENT)
+            };
+            if !pml4_entry_present {
+                continue;
+            }
+            if pml4[pml4_idx].flags().contains(PageTableFlags::HUGE_PAGE) {
+                continue;
+            }
+
+            let pdpt_phys = pml4[pml4_idx].addr();
+            let pdpt_virt = VirtAddr::new(pdpt_phys.as_u64() + self.phys_offset);
+            let pdpt = unsafe { &mut *(pdpt_virt.as_u64() as *mut PageTable) };
+            
+            for pdpt_idx in 0..512 {
+                let pdpt_entry_present = {
+                    let e = &pdpt[pdpt_idx];
+                    !e.is_unused() && e.flags().contains(PageTableFlags::PRESENT)
+                };
+                if !pdpt_entry_present {
+                    continue;
+                }
+                if pdpt[pdpt_idx].flags().contains(PageTableFlags::HUGE_PAGE) {
+                    continue;
+                }
+
+                let pd_phys = pdpt[pdpt_idx].addr();
+                let pd_virt = VirtAddr::new(pd_phys.as_u64() + self.phys_offset);
+                let pd = unsafe { &mut *(pd_virt.as_u64() as *mut PageTable) };
+                
+                for pd_idx in 0..512 {
+                    let pd_entry_present = {
+                        let e = &pd[pd_idx];
+                        !e.is_unused() && e.flags().contains(PageTableFlags::PRESENT)
+                    };
+                    if !pd_entry_present {
+                        continue;
+                    }
+
+                    if pd[pd_idx].flags().contains(PageTableFlags::HUGE_PAGE) {
+                        let leaf_phys = pd[pd_idx].addr();
+                        let vaddr = ((pml4_idx as u64) << 39)
+                            | ((pdpt_idx as u64) << 30)
+                            | ((pd_idx as u64) << 21);
+                        let virt = VirtAddr::new(vaddr);
+                        let mut is_owned = false;
+                        for &o in owned_phys {
+                            if o == leaf_phys {
+                                is_owned = true;
+                                break;
+                            }
+                        }
+                        pd[pd_idx].set_unused();
+                        unsafe { x86_64::instructions::tlb::flush(virt); }
+
+                        if is_owned {
+                            let mut already = false;
+                            for &f in already_freed.iter() {
+                                if f == leaf_phys {
+                                    already = true;
+                                    break;
+                                }
+                            }
+                            if !already {
+                                debug_assert!(leaf_phys.as_u64().is_multiple_of(PAGE_SIZE as u64));
+                                let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                                    leaf_phys,
+                                );
+                                frame_allocator.deallocate_frame(frame);
+                                already_freed.push(leaf_phys);
+                            }
+                        }
+                        continue;
+                    }
+
+                    let pt_phys = pd[pd_idx].addr();
+                    let pt_virt = VirtAddr::new(pt_phys.as_u64() + self.phys_offset);
+                    let pt = unsafe { &mut *(pt_virt.as_u64() as *mut PageTable) };
+                    
+                    for pt_idx in 0..512 {
+                        let pt_entry_present = {
+                            let e = &pt[pt_idx];
+                            !e.is_unused() && e.flags().contains(PageTableFlags::PRESENT)
+                        };
+                        if !pt_entry_present {
+                            continue;
+                        }
+
+                        let leaf_phys = pt[pt_idx].addr();
+                        let vaddr = ((pml4_idx as u64) << 39)
+                            | ((pdpt_idx as u64) << 30)
+                            | ((pd_idx as u64) << 21)
+                            | ((pt_idx as u64) << 12);
+                        let virt = VirtAddr::new(vaddr);
+                        let mut is_owned = false;
+                        for &o in owned_phys {
+                            if o == leaf_phys {
+                                is_owned = true;
+                                break;
+                            }
+                        }
+                        pt[pt_idx].set_unused();
+
+                        unsafe { x86_64::instructions::tlb::flush(virt); }
+
+                        if is_owned {
+                            let mut already = false;
+                            for &f in already_freed.iter() {
+                                if f == leaf_phys {
+                                    already = true;
+                                    break;
+                                }
+                            }
+                            if !already {
+                                let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                                    leaf_phys,
+                                );
+                                frame_allocator.deallocate_frame(frame);
+                                already_freed.push(leaf_phys);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        unsafe { x86_64::instructions::tlb::flush_all(); }
+    }
+
+    pub fn reclaim_empty_user_tables(
+        &self,
+        pml4_phys: PhysAddr,
+        frame_allocator: &mut MemoryMapFrameAllocator,
+    ) {
+        let pml4_virt = VirtAddr::new(pml4_phys.as_u64() + self.phys_offset);
+        let pml4 = unsafe { &mut *(pml4_virt.as_u64() as *mut PageTable) };
+        
+        for pml4_idx in 0..256 {
+            let pdpt_phys_opt = {
+                let e = &pml4[pml4_idx];
+                if e.is_unused() || !e.flags().contains(PageTableFlags::PRESENT) {
+                    None
+                } else if e.flags().contains(PageTableFlags::HUGE_PAGE) {
+                    None
+                } else {
+                    Some(e.addr())
+                }
+            };
+            let Some(pdpt_phys) = pdpt_phys_opt else {
+                continue;
+            };
+
+            let pdpt_virt = VirtAddr::new(pdpt_phys.as_u64() + self.phys_offset);
+            let pdpt = unsafe { &mut *(pdpt_virt.as_u64() as *mut PageTable) };
+            
+            for pdpt_idx in 0..512 {
+                let pd_phys_opt = {
+                    let e = &pdpt[pdpt_idx];
+                    if e.is_unused() || !e.flags().contains(PageTableFlags::PRESENT) {
+                        None
+                    } else if e.flags().contains(PageTableFlags::HUGE_PAGE) {
+                        None
+                    } else {
+                        Some(e.addr())
+                    }
+                };
+                let Some(pd_phys) = pd_phys_opt else {
+                    continue;
+                };
+
+                let pd_virt = VirtAddr::new(pd_phys.as_u64() + self.phys_offset);
+                let pd = unsafe { &mut *(pd_virt.as_u64() as *mut PageTable) };
+                
+                for pd_idx in 0..512 {
+                    let pt_phys_opt = {
+                        let e = &pd[pd_idx];
+                        if e.is_unused() || !e.flags().contains(PageTableFlags::PRESENT) {
+                            None
+                        } else if e.flags().contains(PageTableFlags::HUGE_PAGE) {
+                            None
+                        } else {
+                            Some(e.addr())
+                        }
+                    };
+                    let Some(pt_phys) = pt_phys_opt else {
+                        continue;
+                    };
+
+                    let pt_virt = VirtAddr::new(pt_phys.as_u64() + self.phys_offset);
+                    let pt_is_empty = unsafe {
+                        let pt_ref = &*(pt_virt.as_u64() as *const PageTable);
+                        pt_ref.iter().all(|e| e.is_unused())
+                    };
+                    if pt_is_empty {
+                        let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(pt_phys);
+                        pd[pd_idx].set_unused();
+                        frame_allocator.deallocate_frame(frame);
+                    }
+                }
+                
+                let pd_is_empty = unsafe {
+                    let pd_ref = &*(pd_virt.as_u64() as *const PageTable);
+                    pd_ref.iter().all(|e| e.is_unused())
+                };
+                if pd_is_empty {
+                    let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(pd_phys);
+                    pdpt[pdpt_idx].set_unused();
+                    frame_allocator.deallocate_frame(frame);
+                }
+            }
+            
+            let pdpt_is_empty = unsafe {
+                let pdpt_ref = &*(pdpt_virt.as_u64() as *const PageTable);
+                pdpt_ref.iter().all(|e| e.is_unused())
+            };
+            if pdpt_is_empty {
+                let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(pdpt_phys);
+                pml4[pml4_idx].set_unused();
+                frame_allocator.deallocate_frame(frame);
+            }
+        }
+        
+        unsafe { x86_64::instructions::tlb::flush_all(); }
+    }
+
+    pub fn free_pml4_frame(
+        &self,
+        pml4_phys: PhysAddr,
+        frame_allocator: &mut MemoryMapFrameAllocator,
+    ) {
+        debug_assert!(pml4_phys.as_u64().is_multiple_of(PAGE_SIZE as u64));
+        let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(pml4_phys);
+        frame_allocator.deallocate_frame(frame);
+        unsafe { x86_64::instructions::tlb::flush_all(); }
     }
 }
 

@@ -320,6 +320,110 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
 
             0u64
         }
+        SyscallNumber::TerminateProcess => {
+            let target_pid = frame.arg1 as usize;
+            let exit_code = frame.arg2 as i32;
+            let caller_core = get_current_core_id();
+            let caller_pid = scheduler::get_current_process_for_core(caller_core);
+
+            if target_pid == INVALID_PID || target_pid == ARCHE_PID {
+                serial_println_core!(
+                    "TerminateProcess: invalid target pid {}",
+                    target_pid
+                );
+                return u64::MAX;
+            }
+
+            let target_parent = {
+                let pm = PROCESS_MANAGER.lock();
+                match pm.get_process(target_pid) {
+                    Ok(p) => p.parent_pid,
+                    Err(_) => {
+                        serial_println_core!(
+                            "TerminateProcess: target pid {} not found",
+                            target_pid
+                        );
+                        return u64::MAX;
+                    }
+                }
+            };
+
+            let allowed = target_pid == caller_pid
+                || target_parent == caller_pid
+                || caller_pid == ARCHE_PID;
+            if !allowed {
+                serial_println_core!(
+                    "TerminateProcess: pid {} denied to kill {} (parent {})",
+                    caller_pid,
+                    target_pid,
+                    target_parent
+                );
+                return u64::MAX;
+            }
+
+            for core_id in 0..crate::MAX_CORES {
+                let running = scheduler::get_current_process_for_core(core_id);
+                if running == target_pid && core_id != caller_core {
+                    serial_println_core!(
+                        "TerminateProcess: target {} running on core {} busy",
+                        target_pid,
+                        core_id
+                    );
+                    return u64::MAX;
+                }
+            }
+
+            let is_self = target_pid == caller_pid;
+            if is_self {
+                {
+                    let mut pm = PROCESS_MANAGER.lock();
+                    if let Ok(proc) = pm.get_process_mut(caller_pid) {
+                        proc.execution_context.rip = frame.user_rip;
+                        proc.execution_context.rsp = frame.user_rsp;
+                        proc.execution_context.rflags = frame.rflags;
+                    }
+                }
+                unsafe {
+                    let kernel_phys = crate::memory::get_user_mem_mgr().kernel_page_table_phys;
+                    let kf = x86_64::structures::paging::PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(
+                        kernel_phys,
+                    );
+                    x86_64::registers::control::Cr3::write(
+                        kf,
+                        x86_64::registers::control::Cr3Flags::empty(),
+                    );
+                }
+                {
+                    let mut pm = PROCESS_MANAGER.lock();
+                    if let Err(e) = pm.terminate_process(target_pid, exit_code, false) {
+                        serial_println_core!("TerminateProcess self failed: {:?}", e);
+                        return u64::MAX;
+                    }
+                }
+                x86_64::instructions::interrupts::disable();
+                scheduler::return_to_scheduler();
+            } else {
+                let res = {
+                    let mut pm = PROCESS_MANAGER.lock();
+                    pm.terminate_process(target_pid, exit_code, false)
+                };
+                match res {
+                    Ok(()) => {
+                        serial_println_core!(
+                            "TerminateProcess: pid {} killed {} with code {}",
+                            caller_pid,
+                            target_pid,
+                            exit_code
+                        );
+                        0
+                    }
+                    Err(e) => {
+                        serial_println_core!("TerminateProcess: kill failed: {:?}", e);
+                        u64::MAX
+                    }
+                }
+            }
+        }
         SyscallNumber::Write => {
             let fd = frame.arg1;
             let buf = frame.arg2 as *const u8;
@@ -395,6 +499,16 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let pid = scheduler::get_current_process_for_core(core_id);
             serial_println_core!("sys_exit: PID {} exiting with code {}", pid, exit_code);
 
+            unsafe {
+                let kernel_phys = crate::memory::get_user_mem_mgr().kernel_page_table_phys;
+                let kf = x86_64::structures::paging::PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(
+                    kernel_phys,
+                );
+                x86_64::registers::control::Cr3::write(
+                    kf,
+                    x86_64::registers::control::Cr3Flags::empty(),
+                );
+            }
             {
                 let mut pm = PROCESS_MANAGER.lock();
                 pm.terminate_process(pid, exit_code as i32, false);

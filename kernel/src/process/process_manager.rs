@@ -4,7 +4,7 @@ use crate::process::process::{PROCESS_USER_VADDR_ALLOC_START, ProcessResources};
 use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
 use crate::process::kernel_thread::{KernelThread, ThreadGroup, ThreadState};
-use crate::process::process::{INVALID_PID, MAX_PRIORITY, Process, ProcessState};
+use crate::process::process::{INVALID_PID, MAX_PRIORITY, PID, Process, ProcessState};
 use crate::process::process_mem::MappedMemoryRegion;
 use crate::process::scheduler::SCHEDULER;
 use crate::{serial_println, serial_println_core};
@@ -305,10 +305,31 @@ impl ProcessManager {
             return Err(ProcessError::DoubleDelete);
         }
 
-        let process = self.get_process_mut(pid)?;
-        let children = process.children.clone();
-        process.state = ProcessState::Terminated;
-        process.exit_code = Some(exit_code);
+        let children: Vec<PID>;
+        let layout_to_free: crate::process::process_mem::ProcessMemoryLayout;
+        let need_free: bool;
+        {
+            let process = self.get_process_mut(pid)?;
+            children = process.children.clone();
+            process.state = ProcessState::Terminated;
+            process.exit_code = Some(exit_code);
+            layout_to_free = process.memory_layout.clone();
+            need_free = process.memory_layout.top_page_table_phys.as_u64() != 0;
+            if need_free {
+                process.memory_layout.top_page_table_phys = PhysAddr::new(0);
+            }
+        }
+
+        if need_free && layout_to_free.top_page_table_phys.as_u64() != 0 {
+            let user_mgr = crate::memory::get_user_mem_mgr();
+            let mut frame_allocator = crate::memory::get_frame_allocator();
+            layout_to_free.free_address_space(&user_mgr, &mut frame_allocator);
+            serial_println!(
+                "terminate_process: freed address space for PID {} (free frames: {})",
+                pid,
+                frame_allocator.free_frame_count()
+            );
+        }
 
         // Get the core assignment for cleanup
         let core_id = self.get_process_core(pid);
@@ -323,6 +344,14 @@ impl ProcessManager {
                     serial_println!("Released core {} for terminated process {}", core, pid);
                 }
             }
+        }
+
+        {
+            interrupts::disable();
+            let mut sched = SCHEDULER.lock();
+            sched.remove_pid(pid);
+            drop(sched);
+            interrupts::enable();
         }
 
         // Handle children

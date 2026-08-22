@@ -131,4 +131,88 @@ impl ProcessMemoryLayout {
         //TODO:
         None
     }
+
+    pub fn free_address_space(
+        &self,
+        user_mgr: &UserMemoryManager,
+        frame_allocator: &mut MemoryMapFrameAllocator,
+    ) {
+        if self.top_page_table_phys.as_u64() == 0 {
+            return;
+        }
+        let pml4_phys = self.top_page_table_phys;
+        let mut owned_phys: Vec<PhysAddr> = Vec::new();
+
+        let mut push_owned = |phys: PhysAddr| {
+            for &existing in owned_phys.iter() {
+                if existing == phys {
+                    return;
+                }
+            }
+            owned_phys.push(phys);
+        };
+
+        for region in self.mapped_regions.iter() {
+            let start = region.start_virt;
+            let size = region.size_bytes;
+            if size == 0 {
+                continue;
+            }
+            let start_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
+            let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
+                start + size - 1u64,
+            );
+            for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
+                if let Some(phys) = user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address()) {
+                    push_owned(phys);
+                }
+            }
+        }
+
+        if self.stack_size > 0 {
+            let stack_bottom = self.stack_top - self.stack_size;
+            let start_page =
+                x86_64::structures::paging::Page::<Size4KiB>::containing_address(stack_bottom);
+            let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
+                self.stack_top - 1u64,
+            );
+            for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
+                if let Some(phys) = user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address()) {
+                    push_owned(phys);
+                }
+            }
+        }
+
+        for &(start_u64, size_u64) in self.allocated_ranges.iter() {
+            if size_u64 == 0 {
+                continue;
+            }
+            let start = VirtAddr::new(start_u64);
+            let start_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
+            let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
+                start + size_u64 - 1u64,
+            );
+            for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
+                if let Some(phys) = user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address()) {
+                    push_owned(phys);
+                }
+            }
+        }
+
+        serial_println!(
+            "free_address_space: pml4 {:#x} owned_frames {}",
+            pml4_phys.as_u64(),
+            owned_phys.len()
+        );
+
+        user_mgr.unmap_all_user_pages_with_owned_set(pml4_phys, &owned_phys, frame_allocator);
+        user_mgr.reclaim_empty_user_tables(pml4_phys, frame_allocator);
+        user_mgr.free_pml4_frame(pml4_phys, frame_allocator);
+
+        serial_println!(
+            "free_address_space: freed pml4 {:#x} free_list now {}",
+            pml4_phys.as_u64(),
+            frame_allocator.free_frame_count()
+        );
+    }
 }

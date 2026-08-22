@@ -11,6 +11,7 @@ use x86_64::{
 };
 
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
+const FRAME_FREE_LIST_DEFAULT_SIZE: usize = 1024; 
 
 #[derive(Clone, Copy)]
 pub struct IdentityAcpiHandler {
@@ -40,6 +41,7 @@ pub struct MemoryMapFrameAllocator {
     memory_map: &'static [&'static Entry],
     curr_region_index: usize,
     frame_offset_in_region: u64,
+    free_list: alloc::vec::Vec<PhysFrame<Size4KiB>>,
 }
 
 pub const fn align_up(x: u64, align: u64) -> u64 {
@@ -220,6 +222,48 @@ impl MemoryMapFrameAllocator {
             memory_map,
             curr_region_index: 0,
             frame_offset_in_region: 0,
+            free_list: alloc::vec::Vec::with_capacity(FRAME_FREE_LIST_DEFAULT_SIZE),
+        }
+    }
+
+    pub fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        debug_assert!(
+            frame.start_address().as_u64().is_multiple_of(PAGE_SIZE as u64),
+            "deallocate_frame: unaligned frame"
+        );
+        self.free_list.push(frame);
+    }
+
+    pub fn free_frame_count(&self) -> usize {
+        self.free_list.len()
+    }
+
+    pub fn allocated_bump_frames(&self) -> usize {
+        let page_size = PAGE_SIZE as u64;
+        let mut count: usize = 0;
+        for idx in 0..self.curr_region_index {
+            let region = self.memory_map[idx];
+            if region.type_ != MEMMAP_USABLE {
+                continue;
+            }
+            let start = align_up(region.base, page_size);
+            let end = region.base + region.length;
+            if end > start {
+                count += ((end - start) / page_size) as usize;
+                if idx == self.curr_region_index {
+                    break;
+                }
+            }
+        }
+        if let Some(region) = self.memory_map.get(self.curr_region_index) {
+            if region.type_ == MEMMAP_USABLE {
+                count += (self.frame_offset_in_region / page_size) as usize;
+            }
+        }
+        if count >= self.free_list.len() {
+            count - self.free_list.len()
+        } else {
+            0
         }
     }
 
@@ -235,6 +279,9 @@ impl MemoryMapFrameAllocator {
 
 unsafe impl FrameAllocator<Size4KiB> for MemoryMapFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        if let Some(frame) = self.free_list.pop() {
+            return Some(frame);
+        }
         loop {
             let region = self.memory_map.get(self.curr_region_index)?;
 

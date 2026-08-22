@@ -214,13 +214,16 @@ impl Process {
                 segment.flags,
             );
 
-            address_space_manager.map_virt_mem_region(
+            if let Err(e) = address_space_manager.map_virt_mem_region(
                 memory_layout.top_page_table_phys,
                 vaddr,
                 in_memory_size,
                 flags,
                 &mut frame_allocator,
-            )?;
+            ) {
+                memory_layout.free_address_space(&*address_space_manager, &mut *frame_allocator);
+                return Err(e);
+            }
 
             // Copy segment file data into the mapped pages via HHDM.
             // translate_user_virt_to_phys returns the physical address of the
@@ -297,12 +300,19 @@ impl Process {
             .unwrap();
 
         let stack_size = DEFAULT_NEW_PROCESS_STACK_SIZE;
-        let stack_top = address_space_manager.create_main_stack(
+        let stack_top = match address_space_manager.create_main_stack(
             memory_layout.top_page_table_phys,
             stack_size,
             &mut frame_allocator,
-        )?;
+        ) {
+            Ok(top) => top,
+            Err(e) => {
+                memory_layout.free_address_space(&*address_space_manager, &mut *frame_allocator);
+                return Err(e);
+            }
+        };
         memory_layout.stack_top = stack_top;
+        memory_layout.stack_size = stack_size;
 
         let context = ExecutionContext::new(
             elf_info.entry_point,

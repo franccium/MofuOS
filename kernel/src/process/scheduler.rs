@@ -168,6 +168,42 @@ impl CoreScheduler {
     pub fn core_id(&self) -> u8 {
         self.core_id
     }
+
+    pub fn remove_pid(&mut self, pid: PID) -> bool {
+        let mut removed = false;
+        for q in self.ready_queues.iter_mut() {
+            if q.is_empty() {
+                continue;
+            }
+            let mut new_q = Dequeue::with_capacity(q.len().max(4));
+            while q.len() > 0 {
+                let p = q.pop_front();
+                if p == pid {
+                    removed = true;
+                } else {
+                    new_q.push_back(p);
+                }
+            }
+            *q = new_q;
+        }
+        if !self.blocked_queue.is_empty() {
+            let mut new_blocked = Dequeue::with_capacity(self.blocked_queue.len().max(4));
+            while self.blocked_queue.len() > 0 {
+                let p = self.blocked_queue.pop_front();
+                if p == pid {
+                    removed = true;
+                } else {
+                    new_blocked.push_back(p);
+                }
+            }
+            self.blocked_queue = new_blocked;
+        }
+        if self.current_thread == pid {
+            self.current_thread = INVALID_PID;
+            removed = true;
+        }
+        removed
+    }
 }
 
 /// Global multi-core scheduler
@@ -282,6 +318,40 @@ impl Scheduler {
             total_ready,
             total_blocked,
         }
+    }
+
+    pub fn remove_pid(&mut self, pid: PID) -> bool {
+        let mut removed = false;
+        for core in self.per_core.iter_mut() {
+            if core.remove_pid(pid) {
+                removed = true;
+            }
+        }
+        if removed {
+            serial_println_core!("Scheduler: removed PID {} from queues", pid);
+        }
+        removed
+    }
+
+    pub fn is_pid_queued(&self, pid: PID) -> bool {
+        for core in self.per_core.iter() {
+            for q in core.ready_queues.iter() {
+                for &p in q.iter() {
+                    if p == pid {
+                        return true;
+                    }
+                }
+            }
+            for &p in core.blocked_queue.iter() {
+                if p == pid {
+                    return true;
+                }
+            }
+            if core.current_running() == pid {
+                return true;
+            }
+        }
+        false
     }
 }
 

@@ -51,6 +51,10 @@ static inline long syscall3(long num, long arg1, long arg2, long arg3) {
     return syscall6(num, arg1, arg2, arg3, 0, 0, 0);
 }
 
+static inline long syscall2(long num, long arg1, long arg2) {
+    return syscall6(num, arg1, arg2, 0, 0, 0, 0);
+}
+
 static inline long syscall1(long num, long arg1) {
     return syscall6(num, arg1, 0, 0, 0, 0, 0);
 }
@@ -74,6 +78,10 @@ static inline long sys_read(int fd, void *buf, size_t count) {
 
 static inline void* sys_allocate(size_t size) {
     return (void*)syscall1(SYS_ALLOCATE, size);
+}
+
+static inline long sys_terminate_process(size_t pid, int code) {
+    return syscall2(SYS_TERMINATE_PROCESS, (long)pid, (long)code);
 }
 
 #endif
