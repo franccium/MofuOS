@@ -2,7 +2,7 @@ pub mod line_index;
 pub mod scrollback;
 
 use alloc::vec::Vec;
-use core::cmp::min;
+use core::cmp::{max, min};
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb888,
@@ -136,7 +136,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             self.max_chars_per_line - len
         }
     }
-    
+
     fn ensure_current_line_has_space(&mut self) {
         if self.current_line_remaining_space() == 0 {
             let next = self.scrollback.current_absolute();
@@ -192,7 +192,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
 
     fn write_bytes_internal(&mut self, bytes: &[u8]) {
         let mut seg_start = 0;
-        
+
         for i in 0..bytes.len() {
             if bytes[i] == b'\n' {
                 if i > seg_start {
@@ -259,7 +259,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 continue;
             }
             let len = meta.len();
-            let bytes = self.scrollback.read_at(meta.first_p, len);
+            let bytes = self.scrollback.read_at(meta.first_pos, len);
             if bytes.is_empty() {
                 continue;
             }
@@ -275,7 +275,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         if cur.is_empty() {
             return;
         }
-        let new_end = cur.one_past_last_p - 1;
+        let new_end = cur.one_past_last_pos - 1;
         self.lines.truncate_last(new_end);
         self.scrollback.remove_last_byte();
         self.needs_redraw = true;
@@ -290,10 +290,10 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         }
 
         let len = cur.len();
-        let bytes = self.scrollback.read_at(cur.first_p, len);
+        let bytes = self.scrollback.read_at(cur.first_pos, len);
         self.last_command_buf.clear();
         self.last_command_buf.extend_from_slice(bytes);
-        self.last_command_abs = Some((cur.first_p, cur.one_past_last_p));
+        self.last_command_abs = Some((cur.first_pos, cur.one_past_last_pos));
     }
 
     fn recall_last_command(&mut self) {

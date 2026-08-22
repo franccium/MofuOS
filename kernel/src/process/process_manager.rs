@@ -10,8 +10,8 @@ use crate::process::scheduler::SCHEDULER;
 use crate::{serial_println, serial_println_core};
 use alloc::string::String;
 use spin::Mutex;
-use x86_64::{PhysAddr, VirtAddr};
 use x86_64::instructions::interrupts;
+use x86_64::{PhysAddr, VirtAddr};
 
 pub const ARCHE_PID: usize = 0;
 
@@ -148,7 +148,7 @@ impl ProcessManager {
                 heap_end: VirtAddr::new(crate::process::process::PROCESS_HEAP_VIRT_START),
                 mapped_regions: alloc::vec::Vec::<MappedMemoryRegion>::new(),
                 next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
-                allocated_ranges: alloc::vec::Vec::new()
+                allocated_ranges: alloc::vec::Vec::new(),
             },
         };
 

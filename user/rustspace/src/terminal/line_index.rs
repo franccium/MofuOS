@@ -28,20 +28,20 @@ pub struct LineIndex {
     pub lines: alloc::vec::Vec<LineMeta>,
     pub current: usize,
     pub count: usize,
-    pub max_lines: usize,
+    pub max: usize,
 }
 
 impl LineIndex {
-    pub fn new(max_lines: usize) -> Self {
-        let mut lines = alloc::vec::Vec::with_capacity(max_lines);
-        for _ in 0..max_lines {
+    pub fn new(max: usize) -> Self {
+        let mut lines = alloc::vec::Vec::with_capacity(max);
+        for _ in 0..max {
             lines.push(LineMeta::empty(0));
         }
         Self {
             lines,
             current: 0,
             count: 1,
-            max_lines: max_lines,
+            max,
         }
     }
 

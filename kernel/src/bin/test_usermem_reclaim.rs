@@ -5,12 +5,10 @@
 extern crate alloc;
 
 use core::sync::atomic::Ordering;
-use kernel::{
-    boot_common, bsp_init, serial_println_core, AP_CORES_READY, MAX_CORES,
-};
 use kernel::process::elf_loader::{ElfLoadInfo, MEMSTRESS_ELF};
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::scheduler::SCHEDULER;
+use kernel::{AP_CORES_READY, MAX_CORES, boot_common, bsp_init, serial_println_core};
 use x86_64::instructions::{hlt, port::Port};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +42,11 @@ pub unsafe extern "C" fn kmain() -> ! {
 
 fn test_main() -> ! {
     serial_println_core!("=== test_usermem_reclaim: start ===");
-    serial_println_core!("MAX_CORES={} AP_CORE_COUNT={}", MAX_CORES, kernel::AP_CORE_COUNT);
+    serial_println_core!(
+        "MAX_CORES={} AP_CORE_COUNT={}",
+        MAX_CORES,
+        kernel::AP_CORE_COUNT
+    );
 
     kernel::process::shared_state::init_shared_state();
 
@@ -101,7 +103,11 @@ fn test_main() -> ! {
     loop {
         let now = kernel::interrupts::system_uptime_ns();
         if now.saturating_sub(start) >= timeout_ns {
-            serial_println_core!("FAIL: memstress pid={} timed out after {} ms", pid, TIMEOUT_MS);
+            serial_println_core!(
+                "FAIL: memstress pid={} timed out after {} ms",
+                pid,
+                TIMEOUT_MS
+            );
             success = false;
             break;
         }
@@ -115,7 +121,11 @@ fn test_main() -> ! {
             Some((kernel::process::process::ProcessState::Terminated, code)) => {
                 terminated = true;
                 exit_code = code;
-                serial_println_core!("test_usermem_reclaim: pid={} terminated code={:?}", pid, code);
+                serial_println_core!(
+                    "test_usermem_reclaim: pid={} terminated code={:?}",
+                    pid,
+                    code
+                );
                 break;
             }
             Some((state, _)) => {
@@ -198,7 +208,11 @@ fn test_main() -> ! {
     }
 
     let total_cores = kernel::process::CORE_POOL.lock().total_cores();
-    serial_println_core!("test_usermem_reclaim: AP_CORES_READY={} total_cores={}", AP_CORES_READY.load(Ordering::Acquire), total_cores);
+    serial_println_core!(
+        "test_usermem_reclaim: AP_CORES_READY={} total_cores={}",
+        AP_CORES_READY.load(Ordering::Acquire),
+        total_cores
+    );
 
     if success {
         serial_println_core!("PASS: usermem reclaim verified (4 allocs >2M strained and freed)");

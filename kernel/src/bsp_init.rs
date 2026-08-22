@@ -1,7 +1,8 @@
 use crate::{
-    AP_CORES_READY, MAX_CORES, serial_println_core,
-    process::{CORE_POOL, shared_state::init_shared_state},
+    AP_CORES_READY, MAX_CORES,
     filesystem::init_filesystem_ata,
+    process::{CORE_POOL, shared_state::init_shared_state},
+    serial_println_core,
 };
 use core::sync::atomic::Ordering;
 use x86_64::instructions::hlt;
@@ -30,7 +31,10 @@ pub fn init_filesystem_on_bsp() -> Result<(), &'static str> {
 pub fn wait_for_ap_cores_blocking() {
     let core_count = CORE_POOL.lock().total_cores();
     let expected_ap = core_count.saturating_sub(1);
-    serial_println_core!("bsp_init: waiting for {} AP cores to be ready...", expected_ap);
+    serial_println_core!(
+        "bsp_init: waiting for {} AP cores to be ready...",
+        expected_ap
+    );
     while AP_CORES_READY.load(Ordering::Acquire) < expected_ap {
         hlt();
     }
@@ -79,21 +83,39 @@ pub fn check_ap_cores_ready() -> (u8, u8) {
 pub fn verify_smp_boot(timeout_ms: u64) -> bool {
     let ok = wait_for_ap_cores_with_timeout(timeout_ms);
     let (ready, expected) = check_ap_cores_ready();
-    serial_println_core!("verify_smp_boot: ready={} expected={} timeout={}ms result={}", ready, expected, timeout_ms, ok);
+    serial_println_core!(
+        "verify_smp_boot: ready={} expected={} timeout={}ms result={}",
+        ready,
+        expected,
+        timeout_ms,
+        ok
+    );
     if !ok {
         return false;
     }
     if ready != expected {
-        serial_println_core!("verify_smp_boot: mismatch ready {} != expected {}", ready, expected);
+        serial_println_core!(
+            "verify_smp_boot: mismatch ready {} != expected {}",
+            ready,
+            expected
+        );
         return false;
     }
     let total = CORE_POOL.lock().total_cores();
     if total == 0 || total > MAX_CORES {
-        serial_println_core!("verify_smp_boot: total_cores {} out of range 1..={}", total, MAX_CORES);
+        serial_println_core!(
+            "verify_smp_boot: total_cores {} out of range 1..={}",
+            total,
+            MAX_CORES
+        );
         return false;
     }
     if total as u64 != (expected as u64 + 1) {
-        serial_println_core!("verify_smp_boot: total {} != expected+1 {}", total, expected + 1);
+        serial_println_core!(
+            "verify_smp_boot: total {} != expected+1 {}",
+            total,
+            expected + 1
+        );
         return false;
     }
     true

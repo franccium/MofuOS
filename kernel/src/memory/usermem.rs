@@ -339,7 +339,7 @@ impl UserMemoryManager {
         let mut already_freed: alloc::vec::Vec<PhysAddr> = alloc::vec::Vec::new();
         let pml4_virt = VirtAddr::new(pml4_phys.as_u64() + self.phys_offset);
         let pml4 = unsafe { &mut *(pml4_virt.as_u64() as *mut PageTable) };
-        
+
         for pml4_idx in 0..256 {
             let pml4_entry_present = {
                 let e = &pml4[pml4_idx];
@@ -355,7 +355,7 @@ impl UserMemoryManager {
             let pdpt_phys = pml4[pml4_idx].addr();
             let pdpt_virt = VirtAddr::new(pdpt_phys.as_u64() + self.phys_offset);
             let pdpt = unsafe { &mut *(pdpt_virt.as_u64() as *mut PageTable) };
-            
+
             for pdpt_idx in 0..512 {
                 let pdpt_entry_present = {
                     let e = &pdpt[pdpt_idx];
@@ -371,7 +371,7 @@ impl UserMemoryManager {
                 let pd_phys = pdpt[pdpt_idx].addr();
                 let pd_virt = VirtAddr::new(pd_phys.as_u64() + self.phys_offset);
                 let pd = unsafe { &mut *(pd_virt.as_u64() as *mut PageTable) };
-                
+
                 for pd_idx in 0..512 {
                     let pd_entry_present = {
                         let e = &pd[pd_idx];
@@ -395,7 +395,9 @@ impl UserMemoryManager {
                             }
                         }
                         pd[pd_idx].set_unused();
-                        unsafe { x86_64::instructions::tlb::flush(virt); }
+                        unsafe {
+                            x86_64::instructions::tlb::flush(virt);
+                        }
 
                         if is_owned {
                             let mut already = false;
@@ -420,7 +422,7 @@ impl UserMemoryManager {
                     let pt_phys = pd[pd_idx].addr();
                     let pt_virt = VirtAddr::new(pt_phys.as_u64() + self.phys_offset);
                     let pt = unsafe { &mut *(pt_virt.as_u64() as *mut PageTable) };
-                    
+
                     for pt_idx in 0..512 {
                         let pt_entry_present = {
                             let e = &pt[pt_idx];
@@ -445,7 +447,9 @@ impl UserMemoryManager {
                         }
                         pt[pt_idx].set_unused();
 
-                        unsafe { x86_64::instructions::tlb::flush(virt); }
+                        unsafe {
+                            x86_64::instructions::tlb::flush(virt);
+                        }
 
                         if is_owned {
                             let mut already = false;
@@ -467,7 +471,9 @@ impl UserMemoryManager {
                 }
             }
         }
-        unsafe { x86_64::instructions::tlb::flush_all(); }
+        unsafe {
+            x86_64::instructions::tlb::flush_all();
+        }
     }
 
     pub fn reclaim_empty_user_tables(
@@ -477,7 +483,7 @@ impl UserMemoryManager {
     ) {
         let pml4_virt = VirtAddr::new(pml4_phys.as_u64() + self.phys_offset);
         let pml4 = unsafe { &mut *(pml4_virt.as_u64() as *mut PageTable) };
-        
+
         for pml4_idx in 0..256 {
             let pdpt_phys_opt = {
                 let e = &pml4[pml4_idx];
@@ -495,7 +501,7 @@ impl UserMemoryManager {
 
             let pdpt_virt = VirtAddr::new(pdpt_phys.as_u64() + self.phys_offset);
             let pdpt = unsafe { &mut *(pdpt_virt.as_u64() as *mut PageTable) };
-            
+
             for pdpt_idx in 0..512 {
                 let pd_phys_opt = {
                     let e = &pdpt[pdpt_idx];
@@ -513,7 +519,7 @@ impl UserMemoryManager {
 
                 let pd_virt = VirtAddr::new(pd_phys.as_u64() + self.phys_offset);
                 let pd = unsafe { &mut *(pd_virt.as_u64() as *mut PageTable) };
-                
+
                 for pd_idx in 0..512 {
                     let pt_phys_opt = {
                         let e = &pd[pd_idx];
@@ -535,35 +541,45 @@ impl UserMemoryManager {
                         pt_ref.iter().all(|e| e.is_unused())
                     };
                     if pt_is_empty {
-                        let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(pt_phys);
+                        let frame =
+                            x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                                pt_phys,
+                            );
                         pd[pd_idx].set_unused();
                         frame_allocator.deallocate_frame(frame);
                     }
                 }
-                
+
                 let pd_is_empty = unsafe {
                     let pd_ref = &*(pd_virt.as_u64() as *const PageTable);
                     pd_ref.iter().all(|e| e.is_unused())
                 };
                 if pd_is_empty {
-                    let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(pd_phys);
+                    let frame =
+                        x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                            pd_phys,
+                        );
                     pdpt[pdpt_idx].set_unused();
                     frame_allocator.deallocate_frame(frame);
                 }
             }
-            
+
             let pdpt_is_empty = unsafe {
                 let pdpt_ref = &*(pdpt_virt.as_u64() as *const PageTable);
                 pdpt_ref.iter().all(|e| e.is_unused())
             };
             if pdpt_is_empty {
-                let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(pdpt_phys);
+                let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                    pdpt_phys,
+                );
                 pml4[pml4_idx].set_unused();
                 frame_allocator.deallocate_frame(frame);
             }
         }
-        
-        unsafe { x86_64::instructions::tlb::flush_all(); }
+
+        unsafe {
+            x86_64::instructions::tlb::flush_all();
+        }
     }
 
     pub fn free_pml4_frame(
@@ -572,9 +588,12 @@ impl UserMemoryManager {
         frame_allocator: &mut MemoryMapFrameAllocator,
     ) {
         debug_assert!(pml4_phys.as_u64().is_multiple_of(PAGE_SIZE as u64));
-        let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(pml4_phys);
+        let frame =
+            x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(pml4_phys);
         frame_allocator.deallocate_frame(frame);
-        unsafe { x86_64::instructions::tlb::flush_all(); }
+        unsafe {
+            x86_64::instructions::tlb::flush_all();
+        }
     }
 }
 

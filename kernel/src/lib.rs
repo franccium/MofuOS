@@ -33,7 +33,6 @@ pub mod asm;
 pub mod boot_common;
 pub mod boot_info;
 pub mod bsp_init;
-pub mod stack_guard;
 pub mod data_structures;
 pub mod events;
 pub mod filesystem;
@@ -44,6 +43,7 @@ pub mod io;
 pub mod process;
 pub mod process_start;
 pub mod programs;
+pub mod stack_guard;
 pub mod tests_exp;
 pub mod util;
 

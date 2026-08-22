@@ -5,7 +5,6 @@ use crate::memory::memory::{PAGE_SIZE, align_down, align_up};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use x86_64::PhysAddr;
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -13,6 +12,7 @@ use embedded_graphics::Pixel;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::{Dimensions, DrawTarget, OriginDimensions, Point, Size};
 use embedded_graphics::primitives::Rectangle;
+use x86_64::PhysAddr;
 
 pub type WindowID = u32;
 pub const INVALID_WINDOW_ID: WindowID = u32::MAX;

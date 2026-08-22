@@ -2,11 +2,13 @@ use alloc::format;
 use alloc::string::String;
 
 use crate::process::elf_loader::{
-    FS_CACHED_TEST_ELF, FS_TEST_ELF, GAME_ELF, ODYS_ELF, PING_ELF, RUST_FIRST_ELF, SMALL_ELF, TEST_ELF, THEOPHE_ELF,
+    FS_CACHED_TEST_ELF, FS_TEST_ELF, GAME_ELF, ODYS_ELF, PING_ELF, RUST_FIRST_ELF, SMALL_ELF,
+    TEST_ELF, THEOPHE_ELF,
 };
 use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
 use crate::{
-    RUN_FS_CACHED_TEST, RUN_FS_TEST, RUN_ODYS, RUN_THEOPHE, USE_GAME_PROGRAM, USE_PING_PROGRAM, USE_RUST_USER_PROGRAMS, USE_TEST_PROGRAM, serial_println,
+    RUN_FS_CACHED_TEST, RUN_FS_TEST, RUN_ODYS, RUN_THEOPHE, USE_GAME_PROGRAM, USE_PING_PROGRAM,
+    USE_RUST_USER_PROGRAMS, USE_TEST_PROGRAM, serial_println,
 };
 
 pub fn create_init_process() {

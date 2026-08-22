@@ -17,7 +17,8 @@ use limine::{
     mp::{self, MP_FLAG_X2APIC, MpGotoFunction, MpInfo, MpRespData},
     paging::PagingMode,
     request::{
-        EfiMemmapRequest, FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest, PagingModeRequest, RsdpRequest,
+        EfiMemmapRequest, FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest,
+        PagingModeRequest, RsdpRequest,
     },
 };
 
@@ -132,17 +133,34 @@ pub unsafe fn bsp_early_init() {
 
     serial_println!("Installing guard pages for kernel stacks");
     {
-        use core::mem::{size_of, offset_of};
-        serial_println!("GuardedKernelStack size {} guard off {} stack off {}", size_of::<crate::gdt::GuardedKernelStack>(), offset_of!(crate::gdt::GuardedKernelStack, guard), offset_of!(crate::gdt::GuardedKernelStack, stack));
+        use core::mem::{offset_of, size_of};
+        serial_println!(
+            "GuardedKernelStack size {} guard off {} stack off {}",
+            size_of::<crate::gdt::GuardedKernelStack>(),
+            offset_of!(crate::gdt::GuardedKernelStack, guard),
+            offset_of!(crate::gdt::GuardedKernelStack, stack)
+        );
         for i in 0..4 {
             let guard = crate::gdt::rsp0_guard_page(i);
             let (bottom, top) = crate::gdt::rsp0_bounds(i);
-            serial_println!("RSP0 core {} guard {:#x} bottom {:#x} top {:#x}", i, guard.as_u64(), bottom.as_u64(), top.as_u64());
+            serial_println!(
+                "RSP0 core {} guard {:#x} bottom {:#x} top {:#x}",
+                i,
+                guard.as_u64(),
+                bottom.as_u64(),
+                top.as_u64()
+            );
         }
         for i in 0..4 {
             let guard = crate::gdt::scheduler_guard_page(i);
             let (bottom, top) = crate::gdt::scheduler_bounds(i);
-            serial_println!("SCHED core {} guard {:#x} bottom {:#x} top {:#x}", i, guard.as_u64(), bottom.as_u64(), top.as_u64());
+            serial_println!(
+                "SCHED core {} guard {:#x} bottom {:#x} top {:#x}",
+                i,
+                guard.as_u64(),
+                bottom.as_u64(),
+                top.as_u64()
+            );
         }
     }
     crate::gdt::install_guard_pages(&mut frame_allocator);

@@ -3,13 +3,13 @@
 
 extern crate alloc;
 
-use kernel::{boot_common, serial_println_core, MAX_CORES};
 use kernel::gdt;
 use kernel::process::syscall;
+use kernel::{MAX_CORES, boot_common, serial_println_core};
 use x86_64::VirtAddr;
+use x86_64::instructions::{hlt, port::Port};
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{OffsetPageTable, PageTable, Translate};
-use x86_64::instructions::{hlt, port::Port};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -23,7 +23,9 @@ pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
         let mut port = Port::new(0xF4);
         port.write(exit_code as u32);
     }
-    loop { hlt(); }
+    loop {
+        hlt();
+    }
 }
 
 #[panic_handler]
@@ -77,11 +79,21 @@ fn test_main() -> ! {
             total_checks += 1;
             let mapped = is_kernel_page_mapped(guard);
             if mapped {
-                serial_println_core!("FAIL: core {} {} guard {:#x} should be UNMAPPED but is mapped", core_id, name, guard.as_u64());
+                serial_println_core!(
+                    "FAIL: core {} {} guard {:#x} should be UNMAPPED but is mapped",
+                    core_id,
+                    name,
+                    guard.as_u64()
+                );
                 success = false;
                 failed_checks += 1;
             } else {
-                serial_println_core!("ok: core {} {} guard {:#x} unmapped", core_id, name, guard.as_u64());
+                serial_println_core!(
+                    "ok: core {} {} guard {:#x} unmapped",
+                    core_id,
+                    name,
+                    guard.as_u64()
+                );
             }
         }
 
@@ -95,11 +107,21 @@ fn test_main() -> ! {
             total_checks += 1;
             let mapped = is_kernel_page_mapped(bottom);
             if !mapped {
-                serial_println_core!("FAIL: core {} {} stack bottom {:#x} should be MAPPED but is not", core_id, name, bottom.as_u64());
+                serial_println_core!(
+                    "FAIL: core {} {} stack bottom {:#x} should be MAPPED but is not",
+                    core_id,
+                    name,
+                    bottom.as_u64()
+                );
                 success = false;
                 failed_checks += 1;
             } else {
-                serial_println_core!("ok: core {} {} stack bottom {:#x} mapped", core_id, name, bottom.as_u64());
+                serial_println_core!(
+                    "ok: core {} {} stack bottom {:#x} mapped",
+                    core_id,
+                    name,
+                    bottom.as_u64()
+                );
             }
         }
 
@@ -114,11 +136,21 @@ fn test_main() -> ! {
             let last_byte = VirtAddr::new(top.as_u64() - 1);
             let mapped = is_kernel_page_mapped(last_byte);
             if !mapped {
-                serial_println_core!("FAIL: core {} {} stack top-1 {:#x} should be MAPPED but is not", core_id, name, last_byte.as_u64());
+                serial_println_core!(
+                    "FAIL: core {} {} stack top-1 {:#x} should be MAPPED but is not",
+                    core_id,
+                    name,
+                    last_byte.as_u64()
+                );
                 success = false;
                 failed_checks += 1;
             } else {
-                serial_println_core!("ok: core {} {} stack top-1 {:#x} mapped", core_id, name, last_byte.as_u64());
+                serial_println_core!(
+                    "ok: core {} {} stack top-1 {:#x} mapped",
+                    core_id,
+                    name,
+                    last_byte.as_u64()
+                );
             }
         }
 
@@ -131,7 +163,12 @@ fn test_main() -> ! {
         ] {
             total_checks += 1;
             if guard.as_u64() & 0xFFF != 0 {
-                serial_println_core!("FAIL: core {} {} guard {:#x} not page aligned", core_id, name, guard.as_u64());
+                serial_println_core!(
+                    "FAIL: core {} {} guard {:#x} not page aligned",
+                    core_id,
+                    name,
+                    guard.as_u64()
+                );
                 success = false;
                 failed_checks += 1;
             }
@@ -143,7 +180,12 @@ fn test_main() -> ! {
         ] {
             total_checks += 1;
             if bottom.as_u64() & 0xFFF != 0 {
-                serial_println_core!("FAIL: core {} {} bottom {:#x} not page aligned", core_id, name, bottom.as_u64());
+                serial_println_core!(
+                    "FAIL: core {} {} bottom {:#x} not page aligned",
+                    core_id,
+                    name,
+                    bottom.as_u64()
+                );
                 success = false;
                 failed_checks += 1;
             }
@@ -151,14 +193,23 @@ fn test_main() -> ! {
         // syscall bottom is stack_top+8, so it is 8 bytes into page
         total_checks += 1;
         if syscall_bottom.as_u64() & 0xFFF != 8 {
-            serial_println_core!("FAIL: core {} SYSCALL bottom {:#x} expected offset 8", core_id, syscall_bottom.as_u64());
+            serial_println_core!(
+                "FAIL: core {} SYSCALL bottom {:#x} expected offset 8",
+                core_id,
+                syscall_bottom.as_u64()
+            );
             success = false;
             failed_checks += 1;
         }
         total_checks += 1;
         let page_base = VirtAddr::new(syscall_bottom.as_u64() & !0xFFF);
         if syscall_guard + 4096u64 != page_base {
-            serial_println_core!("FAIL: core {} SYSCALL guard {:#x}+4096 != page base {:#x}", core_id, syscall_guard.as_u64(), page_base.as_u64());
+            serial_println_core!(
+                "FAIL: core {} SYSCALL guard {:#x}+4096 != page base {:#x}",
+                core_id,
+                syscall_guard.as_u64(),
+                page_base.as_u64()
+            );
             success = false;
             failed_checks += 1;
         }
@@ -170,13 +221,22 @@ fn test_main() -> ! {
         let (rsp0_bottom, _) = gdt::rsp0_bounds(core_id);
         total_checks += 1;
         if rsp0_guard + 4096u64 != rsp0_bottom {
-            serial_println_core!("FAIL: core {} RSP0 guard {:#x} +4096 != bottom {:#x}", core_id, rsp0_guard.as_u64(), rsp0_bottom.as_u64());
+            serial_println_core!(
+                "FAIL: core {} RSP0 guard {:#x} +4096 != bottom {:#x}",
+                core_id,
+                rsp0_guard.as_u64(),
+                rsp0_bottom.as_u64()
+            );
             success = false;
             failed_checks += 1;
         }
     }
 
-    serial_println_core!("test_guard_pages: {}/{} checks passed", total_checks - failed_checks, total_checks);
+    serial_println_core!(
+        "test_guard_pages: {}/{} checks passed",
+        total_checks - failed_checks,
+        total_checks
+    );
 
     if success {
         serial_println_core!("PASS: all guard pages correctly installed");

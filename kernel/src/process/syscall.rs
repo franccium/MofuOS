@@ -24,10 +24,10 @@ use crate::{
 };
 use alloc::string::String;
 use alloc::vec::Vec;
-use x86_64::structures::paging::{Mapper, PageTableFlags};
 use core::arch::naked_asm;
 use core::sync::atomic::Ordering;
 use x86_64::registers::model_specific::{Efer, EferFlags};
+use x86_64::structures::paging::{Mapper, PageTableFlags};
 
 #[cfg(feature = "use_cached_fs")]
 use crate::filesystem::file_cache::CacheImportance;
@@ -142,8 +142,6 @@ static mut SYSCALL_SLOTS: [GuardedSyscallSlot; crate::MAX_CORES as usize] = {
     [EMPTY; crate::MAX_CORES as usize]
 };
 
-
-
 pub fn syscall_guard_page(core_id: u8) -> x86_64::VirtAddr {
     unsafe {
         let slot = &SYSCALL_SLOTS[core_id as usize];
@@ -167,10 +165,15 @@ pub fn syscall_stack_top(core_id: u8) -> u64 {
     }
 }
 
-pub fn install_syscall_guard_pages(frame_allocator: &mut crate::memory::memory::MemoryMapFrameAllocator) {
+pub fn install_syscall_guard_pages(
+    frame_allocator: &mut crate::memory::memory::MemoryMapFrameAllocator,
+) {
     for core_id in 0..crate::MAX_CORES as usize {
         unsafe {
-            crate::stack_guard::ensure_guard_unmapped(syscall_guard_page(core_id as u8), frame_allocator);
+            crate::stack_guard::ensure_guard_unmapped(
+                syscall_guard_page(core_id as u8),
+                frame_allocator,
+            );
         }
     }
 }
@@ -327,10 +330,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let caller_pid = scheduler::get_current_process_for_core(caller_core);
 
             if target_pid == INVALID_PID || target_pid == ARCHE_PID {
-                serial_println_core!(
-                    "TerminateProcess: invalid target pid {}",
-                    target_pid
-                );
+                serial_println_core!("TerminateProcess: invalid target pid {}", target_pid);
                 return u64::MAX;
             }
 
@@ -348,9 +348,8 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 }
             };
 
-            let allowed = target_pid == caller_pid
-                || target_parent == caller_pid
-                || caller_pid == ARCHE_PID;
+            let allowed =
+                target_pid == caller_pid || target_parent == caller_pid || caller_pid == ARCHE_PID;
             if !allowed {
                 serial_println_core!(
                     "TerminateProcess: pid {} denied to kill {} (parent {})",
@@ -385,9 +384,9 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 }
                 unsafe {
                     let kernel_phys = crate::memory::get_user_mem_mgr().kernel_page_table_phys;
-                    let kf = x86_64::structures::paging::PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(
-                        kernel_phys,
-                    );
+                    let kf = x86_64::structures::paging::PhysFrame::<
+                        x86_64::structures::paging::Size4KiB,
+                    >::containing_address(kernel_phys);
                     x86_64::registers::control::Cr3::write(
                         kf,
                         x86_64::registers::control::Cr3Flags::empty(),
@@ -501,9 +500,9 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
 
             unsafe {
                 let kernel_phys = crate::memory::get_user_mem_mgr().kernel_page_table_phys;
-                let kf = x86_64::structures::paging::PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(
-                    kernel_phys,
-                );
+                let kf = x86_64::structures::paging::PhysFrame::<
+                    x86_64::structures::paging::Size4KiB,
+                >::containing_address(kernel_phys);
                 x86_64::registers::control::Cr3::write(
                     kf,
                     x86_64::registers::control::Cr3Flags::empty(),
@@ -1262,24 +1261,30 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let size_bytes = frame.arg1 as usize;
             let page_flags = PageTableFlags::from_bits_truncate(frame.arg2);
             let buffer_info_out = frame.arg3 as *mut CircularBufferInfo;
-            
+
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
-            
+
             let mut frame_allocator = get_frame_allocator();
             let user_memory_manager = &crate::memory::get_user_mem_mgr();
             let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
-            
-            if let Ok(proc) = pm.get_process_mut(pid) {
-                serial_println_core!(
-                    "CreateCircularBuffer: found process for pid: {}",
-                    pid
-                );
 
-                match CircularBuffer::map_for_user(size_bytes, page_flags as PageTableFlags, user_memory_manager, &mut proc.memory_layout, &mut frame_allocator)
-                {
+            if let Ok(proc) = pm.get_process_mut(pid) {
+                serial_println_core!("CreateCircularBuffer: found process for pid: {}", pid);
+
+                match CircularBuffer::map_for_user(
+                    size_bytes,
+                    page_flags as PageTableFlags,
+                    user_memory_manager,
+                    &mut proc.memory_layout,
+                    &mut frame_allocator,
+                ) {
                     Some(buffer_info) => {
-                        serial_println_core!("CreateCircularBuffer: buffer created, virt_base: {}, view_size: {}", buffer_info.virtual_base, buffer_info.view_size);
+                        serial_println_core!(
+                            "CreateCircularBuffer: buffer created, virt_base: {}, view_size: {}",
+                            buffer_info.virtual_base,
+                            buffer_info.view_size
+                        );
                         *buffer_info_out = buffer_info;
                         return 0;
                     }
@@ -1291,7 +1296,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             }
 
             u64::MAX
-        },
+        }
 
         SyscallNumber::GetCpuInfo => {
             let buffer_ptr = frame.arg1 as usize;

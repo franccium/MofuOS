@@ -1,7 +1,8 @@
 use crate::memory::memory::{MemoryMapFrameAllocator, PAGE_SIZE};
 use crate::memory::usermem::UserMemoryManager;
 use crate::process::process::{
-    PROCESS_HEAP_VIRT_END, PROCESS_HEAP_VIRT_START, PROCESS_USER_VADDR_ALLOC_END, PROCESS_USER_VADDR_ALLOC_START,
+    PROCESS_HEAP_VIRT_END, PROCESS_HEAP_VIRT_START, PROCESS_USER_VADDR_ALLOC_END,
+    PROCESS_USER_VADDR_ALLOC_START,
 };
 use crate::{serial_println, serial_println_core};
 use alloc::vec::Vec;
@@ -172,13 +173,17 @@ impl ProcessMemoryLayout {
             let start = region.start_virt;
             let size = region.size_bytes;
             if size != 0 {
-                let start_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
+                let start_page =
+                    x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
                 let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
                     start + size - 1u64,
                 );
 
-                for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
-                    if let Some(phys) = user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address()) {
+                for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page)
+                {
+                    if let Some(phys) =
+                        user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address())
+                    {
                         push_owned(phys);
                     }
                 }
@@ -193,7 +198,9 @@ impl ProcessMemoryLayout {
                 self.stack_top - 1u64,
             );
             for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
-                if let Some(phys) = user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address()) {
+                if let Some(phys) =
+                    user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address())
+                {
                     push_owned(phys);
                 }
             }
@@ -202,13 +209,17 @@ impl ProcessMemoryLayout {
         for &(start_u64, size_u64) in self.allocated_ranges.iter() {
             if size_u64 != 0 {
                 let start = VirtAddr::new(start_u64);
-                let start_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
+                let start_page =
+                    x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
                 let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
                     start + size_u64 - 1u64,
                 );
-                
-                for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
-                    if let Some(phys) = user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address()) {
+
+                for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page)
+                {
+                    if let Some(phys) =
+                        user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address())
+                    {
                         push_owned(phys);
                     }
                 }

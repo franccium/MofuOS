@@ -23,7 +23,8 @@ pub const DEFAULT_NEW_PROCESS_STACK_SIZE: u64 = 1 * 1024 * 1024;
 
 pub const PROCESS_USER_VADDR_ALLOC_MAX_SIZE: u64 = 0x0000_0000_5000_0000;
 pub const PROCESS_USER_VADDR_ALLOC_START: u64 = 0x0000_0000_1000_0000;
-pub const PROCESS_USER_VADDR_ALLOC_END: u64 = PROCESS_USER_VADDR_ALLOC_START + PROCESS_USER_VADDR_ALLOC_MAX_SIZE;
+pub const PROCESS_USER_VADDR_ALLOC_END: u64 =
+    PROCESS_USER_VADDR_ALLOC_START + PROCESS_USER_VADDR_ALLOC_MAX_SIZE;
 
 pub const PROCESS_HEAP_SIZE_BYTES: u64 = 2 * 1024 * 1024;
 pub const PROCESS_HEAP_VIRT_START: u64 = 0x0000_0000_6000_0000;
@@ -161,7 +162,7 @@ impl Process {
             heap_end: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_START),
             mapped_regions: alloc::vec::Vec::new(),
             next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
-            allocated_ranges: alloc::vec::Vec::new()
+            allocated_ranges: alloc::vec::Vec::new(),
         };
 
         Ok(Self {

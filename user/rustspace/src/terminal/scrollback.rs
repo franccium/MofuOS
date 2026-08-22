@@ -104,7 +104,7 @@ impl Scrollback {
             }
         };
         debug_assert!(offset_from_base < self.view_size);
-        
+
         unsafe {
             let ptr = self.base.add(offset_from_base);
             core::slice::from_raw_parts(ptr, to_read_len)

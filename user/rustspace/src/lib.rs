@@ -553,21 +553,56 @@ pub unsafe fn sys_get_cpu_info(out_info: &mut CpuInfoFlat) -> bool {
     ret == 0
 }
 
-// Arena bump allocator
-// Asks the kernel for SLAB_SIZE bytes at a time and hands out addresses
-// from within that arena. Only calls sys_allocate again when the current arena is exhausted
-const SLAB_SIZE: usize = 64 * 1024;
+// Arena bump allocator with size-class free lists
+// Bump for fresh slabs, free lists for reuse. SLAB_SIZE 16KiB per request.
+const SLAB_SIZE: usize = 16 * 1024;
+
+const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+const NUM_SIZES: usize = 10;
+
+struct FreeNode {
+    next: Option<*mut FreeNode>,
+}
+
+unsafe impl Send for FreeNode {}
+unsafe impl Sync for FreeNode {}
+
+struct LargeNode {
+    next: Option<*mut LargeNode>,
+    size: usize,
+}
+
+unsafe impl Send for LargeNode {}
+unsafe impl Sync for LargeNode {}
+
+const fn list_index(requested: usize) -> Option<usize> {
+    let mut i = 0;
+    while i < NUM_SIZES {
+        if BLOCK_SIZES[i] >= requested {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
 
 pub struct Arena {
     cursor: core::sync::atomic::AtomicUsize,
     end: core::sync::atomic::AtomicUsize,
+    small_heads: spin::Mutex<[Option<*mut FreeNode>; NUM_SIZES]>,
+    large_head: spin::Mutex<Option<*mut LargeNode>>,
 }
+
+unsafe impl Send for Arena {}
+unsafe impl Sync for Arena {}
 
 impl Arena {
     const fn new() -> Self {
         Self {
             cursor: core::sync::atomic::AtomicUsize::new(0),
             end: core::sync::atomic::AtomicUsize::new(0),
+            small_heads: spin::Mutex::new([None; NUM_SIZES]),
+            large_head: spin::Mutex::new(None),
         }
     }
 
@@ -605,12 +640,122 @@ unsafe impl GlobalAlloc for Arena {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         use core::sync::atomic::Ordering::{AcqRel, Acquire};
 
+        let size = layout.size();
+        let align = layout.align();
+
+        if size == 0 {
+            return core::ptr::NonNull::dangling().as_ptr();
+        }
+
+        if align <= 8 {
+            if let Some(idx) = list_index(size) {
+                let block_size = BLOCK_SIZES[idx];
+                if let Some(ptr) = {
+                    let mut heads = self.small_heads.lock();
+                    let node = heads[idx].take();
+                    if let Some(n) = node {
+                        let next = unsafe { (*n).next };
+                        heads[idx] = next;
+                        Some(n as *mut u8)
+                    } else {
+                        None
+                    }
+                } {
+                    return ptr;
+                }
+                
+                loop {
+                    let cursor = self.cursor.load(Acquire);
+                    let end = self.end.load(Acquire);
+                    let aligned = (cursor + block_size - 1) & !(block_size - 1);
+                    let next = aligned + block_size;
+                    if next <= end {
+                        match self.cursor.compare_exchange(cursor, next, AcqRel, Acquire) {
+                            Ok(_) => return aligned as *mut u8,
+                            Err(_) => continue,
+                        }
+                    }
+
+                    if !unsafe { self.grow() } {
+                        return core::ptr::null_mut();
+                    }
+                }
+            }
+        }
+
+        if size > 4096 || align > 8 {
+            let mut large = self.large_head.lock();
+            let mut prev: Option<*mut LargeNode> = None;
+            let mut cur = *large;
+
+            while let Some(node) = cur {
+                let node_size = unsafe { (*node).size };
+                let node_ptr = node as usize;
+                let aligned_ptr = (node_ptr + align - 1) & !(align - 1);
+                let padding = aligned_ptr - node_ptr;
+                let needed = size + padding;
+
+                if node_size >= needed {
+                    let next = unsafe { (*node).next };
+                    if let Some(p) = prev {
+                        unsafe { (*p).next = next };
+                    } else {
+                        *large = next;
+                    }
+
+                    let remainder_size = node_size - needed;
+                    if remainder_size >= core::mem::size_of::<LargeNode>() + 16 {
+                        let rem_ptr = (aligned_ptr + size) as *mut LargeNode;
+                        unsafe {
+                            (*rem_ptr).next = *large;
+                            (*rem_ptr).size = remainder_size - core::mem::size_of::<LargeNode>();
+                        }
+                        *large = Some(rem_ptr);
+                    }
+                    core::mem::drop(large);
+
+                    return aligned_ptr as *mut u8;
+                }
+
+                prev = cur;
+                cur = unsafe { (*node).next };
+            }
+
+            core::mem::drop(large);
+
+            loop {
+                let cursor = self.cursor.load(Acquire);
+                let end = self.end.load(Acquire);
+                let aligned = (cursor + align - 1) & !(align - 1);
+                let next = aligned + size;
+
+                if next <= end {
+                    match self.cursor.compare_exchange(cursor, next, AcqRel, Acquire) {
+                        Ok(_) => return aligned as *mut u8,
+                        Err(_) => continue,
+                    }
+                }
+
+                if size > SLAB_SIZE {
+                    let base = unsafe { sys_allocate(size) };
+                    if base == INVALID_ALLOC {
+                        return core::ptr::null_mut();
+                    }
+                    
+                    return base as *mut u8;
+                }
+
+                if !unsafe { self.grow() } {
+                    return core::ptr::null_mut();
+                }
+            }
+        }
+
         loop {
             let cursor = self.cursor.load(Acquire);
             let end = self.end.load(Acquire);
-
-            let aligned = (cursor + layout.align() - 1) & !(layout.align() - 1);
-            let next = aligned + layout.size();
+            let aligned = (cursor + align - 1) & !(align - 1);
+            let next = aligned + size;
 
             if next <= end {
                 match self.cursor.compare_exchange(cursor, next, AcqRel, Acquire) {
@@ -625,7 +770,33 @@ unsafe impl GlobalAlloc for Arena {
         }
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if ptr.is_null() || layout.size() == 0 {
+            return;
+        }
+        let size = layout.size();
+        let align = layout.align();
+
+        if align <= 8 {
+            if let Some(idx) = list_index(size) {
+                let node = ptr as *mut FreeNode;
+                let mut heads = self.small_heads.lock();
+                unsafe {
+                    (*node).next = heads[idx];
+                }
+                heads[idx] = Some(node);
+                return;
+            }
+        }
+
+        let mut large = self.large_head.lock();
+        let node = ptr as *mut LargeNode;
+        unsafe {
+            (*node).next = *large;
+            (*node).size = size;
+        }
+        *large = Some(node);
+    }
 }
 
 #[alloc_error_handler]

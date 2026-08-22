@@ -11,7 +11,7 @@ use x86_64::{
 };
 
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
-const FRAME_FREE_LIST_DEFAULT_SIZE: usize = 1024; 
+const FRAME_FREE_LIST_DEFAULT_SIZE: usize = 1024;
 
 #[derive(Clone, Copy)]
 pub struct IdentityAcpiHandler {
@@ -228,7 +228,10 @@ impl MemoryMapFrameAllocator {
 
     pub fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
         debug_assert!(
-            frame.start_address().as_u64().is_multiple_of(PAGE_SIZE as u64),
+            frame
+                .start_address()
+                .as_u64()
+                .is_multiple_of(PAGE_SIZE as u64),
             "deallocate_frame: unaligned frame"
         );
         self.free_list.push(frame);
@@ -255,7 +258,7 @@ impl MemoryMapFrameAllocator {
                 }
             }
         }
-        
+
         if let Some(region) = self.memory_map.get(self.curr_region_index) {
             if region.type_ == MEMMAP_USABLE {
                 count += (self.frame_offset_in_region / page_size) as usize;

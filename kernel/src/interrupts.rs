@@ -1161,10 +1161,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
         let key_state = match key_event.state {
             PcKeyState::Down | PcKeyState::SingleShot => KeyState::Pressed,
-            PcKeyState::Up=> KeyState::Released,
+            PcKeyState::Up => KeyState::Released,
         };
-        if let Some(decoded_key) = keyboard.process_keyevent(key_event)
-        {
+        if let Some(decoded_key) = keyboard.process_keyevent(key_event) {
             match decoded_key {
                 DecodedKey::Unicode(c) => {
                     unsafe {

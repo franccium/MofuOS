@@ -12,7 +12,9 @@ use embedded_graphics::pixelcolor::{Rgb888, RgbColor};
 use embedded_graphics::primitives::{
     Circle, Primitive, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle,
 };
-use kernel::bsp_init::{init_filesystem_on_bsp, init_shared_state_on_bsp, wait_for_ap_cores_blocking};
+use kernel::bsp_init::{
+    init_filesystem_on_bsp, init_shared_state_on_bsp, wait_for_ap_cores_blocking,
+};
 use kernel::data_structures::vector::Vec;
 use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use kernel::graphics::compositor::{self, Compositor};

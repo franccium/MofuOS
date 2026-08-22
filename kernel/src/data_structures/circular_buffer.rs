@@ -5,10 +5,13 @@ use x86_64::{
     structures::paging::{FrameAllocator, Page, PageTableFlags, PhysFrame, Size4KiB},
 };
 
-use crate::{memory::{
-    memory::{MemoryMapFrameAllocator, PAGE_SIZE, align_up},
-    usermem::UserMemoryManager,
-}, process::process_mem::ProcessMemoryLayout};
+use crate::{
+    memory::{
+        memory::{MemoryMapFrameAllocator, PAGE_SIZE, align_up},
+        usermem::UserMemoryManager,
+    },
+    process::process_mem::ProcessMemoryLayout,
+};
 
 pub struct CircularBuffer {
     data: VirtAddr,
@@ -52,28 +55,32 @@ impl CircularBuffer {
             for i in 0..frame_count {
                 let frame = frame_allocator.allocate_frame()?;
 
-                user_memory_manager.map_specific_frame(
-                    page_table,
-                    virt_view_base + (i * PAGE_SIZE) as u64,
-                    frame.start_address(),
-                    page_flags,
-                    frame_allocator,
-                ).ok()?;
+                user_memory_manager
+                    .map_specific_frame(
+                        page_table,
+                        virt_view_base + (i * PAGE_SIZE) as u64,
+                        frame.start_address(),
+                        page_flags,
+                        frame_allocator,
+                    )
+                    .ok()?;
 
-                user_memory_manager.map_specific_frame(
-                    page_table,
-                    virt_second_view_base + (i * PAGE_SIZE) as u64,
-                    frame.start_address(),
-                    page_flags,
-                    frame_allocator,
-                ).ok()?;
+                user_memory_manager
+                    .map_specific_frame(
+                        page_table,
+                        virt_second_view_base + (i * PAGE_SIZE) as u64,
+                        frame.start_address(),
+                        page_flags,
+                        frame_allocator,
+                    )
+                    .ok()?;
             }
 
             return Some(CircularBufferInfo {
                 virtual_base: virt_view_base.as_u64(),
                 view_size: data_size as u64,
                 total_virtual_size: total_virt_size as u64,
-            })
+            });
         }
         None
     }

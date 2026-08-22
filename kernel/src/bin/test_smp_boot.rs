@@ -5,8 +5,8 @@
 extern crate alloc;
 
 use core::sync::atomic::Ordering;
-use kernel::{serial_println_core, AP_CORES_READY, MAX_CORES, bsp_init, boot_common};
 use kernel::process::CORE_POOL;
+use kernel::{AP_CORES_READY, MAX_CORES, boot_common, bsp_init, serial_println_core};
 use x86_64::instructions::{hlt, port::Port};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,22 +40,41 @@ pub unsafe extern "C" fn kmain() -> ! {
 
 fn test_main() -> ! {
     serial_println_core!("=== test_smp_boot: start ===");
-    serial_println_core!("test_smp_boot: MAX_CORES={} AP_CORE_COUNT={}", MAX_CORES, kernel::AP_CORE_COUNT);
+    serial_println_core!(
+        "test_smp_boot: MAX_CORES={} AP_CORE_COUNT={}",
+        MAX_CORES,
+        kernel::AP_CORE_COUNT
+    );
 
     let total_cores = CORE_POOL.lock().total_cores();
     let expected_ap = total_cores.saturating_sub(1);
-    serial_println_core!("test_smp_boot: CORE_POOL total_cores={} expected_ap={}", total_cores, expected_ap);
-    serial_println_core!("test_smp_boot: AP_CORES_READY initial={}", AP_CORES_READY.load(Ordering::Acquire));
+    serial_println_core!(
+        "test_smp_boot: CORE_POOL total_cores={} expected_ap={}",
+        total_cores,
+        expected_ap
+    );
+    serial_println_core!(
+        "test_smp_boot: AP_CORES_READY initial={}",
+        AP_CORES_READY.load(Ordering::Acquire)
+    );
 
     const TIMEOUT_MS: u64 = 5000;
     let ok = bsp_init::wait_for_ap_cores_with_timeout(TIMEOUT_MS);
     let (ready, expected) = bsp_init::check_ap_cores_ready();
-    serial_println_core!("test_smp_boot: after wait ready={} expected={} ok={}", ready, expected, ok);
+    serial_println_core!(
+        "test_smp_boot: after wait ready={} expected={} ok={}",
+        ready,
+        expected,
+        ok
+    );
 
     let mut success = true;
 
     if !ok {
-        serial_println_core!("FAIL: AP cores did not become ready within {} ms", TIMEOUT_MS);
+        serial_println_core!(
+            "FAIL: AP cores did not become ready within {} ms",
+            TIMEOUT_MS
+        );
         success = false;
     }
 
@@ -65,7 +84,11 @@ fn test_main() -> ! {
     }
 
     if total_cores as u8 != MAX_CORES {
-        serial_println_core!("INFO: total_cores {} != MAX_CORES {} (QEMU smp may be less than max)", total_cores, MAX_CORES);
+        serial_println_core!(
+            "INFO: total_cores {} != MAX_CORES {} (QEMU smp may be less than max)",
+            total_cores,
+            MAX_CORES
+        );
     }
 
     if total_cores != (expected as u8 + 1) && expected != 0 {
@@ -74,7 +97,11 @@ fn test_main() -> ! {
     }
 
     if total_cores == 0 || total_cores > MAX_CORES {
-        serial_println_core!("FAIL: total_cores {} out of range 1..={}", total_cores, MAX_CORES);
+        serial_println_core!(
+            "FAIL: total_cores {} out of range 1..={}",
+            total_cores,
+            MAX_CORES
+        );
         success = false;
     }
 
@@ -83,7 +110,11 @@ fn test_main() -> ! {
     }
 
     if success {
-        serial_println_core!("PASS: all {} AP cores reported ready (total {} cores)", expected, total_cores);
+        serial_println_core!(
+            "PASS: all {} AP cores reported ready (total {} cores)",
+            expected,
+            total_cores
+        );
         serial_println_core!("=== test_smp_boot: ok ===");
         exit_qemu(QemuExitCode::Success);
     } else {

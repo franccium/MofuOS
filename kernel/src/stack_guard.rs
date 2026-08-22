@@ -1,15 +1,18 @@
-use x86_64::{
-    VirtAddr, PhysAddr,
-    structures::paging::{PageTable, PageTableFlags, PhysFrame, Page, Size4KiB},
-    registers::control::Cr3,
-};
 use crate::memory::memory::MemoryMapFrameAllocator;
-use x86_64::structures::paging::FrameAllocator;
 use crate::serial_println;
+use x86_64::structures::paging::FrameAllocator;
+use x86_64::{
+    PhysAddr, VirtAddr,
+    registers::control::Cr3,
+    structures::paging::{Page, PageTable, PageTableFlags, PhysFrame, Size4KiB},
+};
 
 const PAGE_SIZE: u64 = 4096;
 
-pub unsafe fn unmap_guard_page(vaddr: VirtAddr, frame_allocator: &mut MemoryMapFrameAllocator) -> Result<(), &'static str> {
+pub unsafe fn unmap_guard_page(
+    vaddr: VirtAddr,
+    frame_allocator: &mut MemoryMapFrameAllocator,
+) -> Result<(), &'static str> {
     let hhdm = crate::boot_info::boot_info().hhdm_offset;
     let (pml4_frame, _) = Cr3::read();
     let pml4_virt = VirtAddr::new(pml4_frame.start_address().as_u64() + hhdm);
@@ -50,7 +53,9 @@ pub unsafe fn unmap_guard_page(vaddr: VirtAddr, frame_allocator: &mut MemoryMapF
         let huge_phys_base = pd_entry.addr().as_u64();
         let huge_flags = pd_entry.flags();
         // allocate new PT
-        let pt_frame = frame_allocator.allocate_frame().ok_or("out of frames for PT split")?;
+        let pt_frame = frame_allocator
+            .allocate_frame()
+            .ok_or("out of frames for PT split")?;
         let pt_phys = pt_frame.start_address();
         let pt_virt = VirtAddr::new(pt_phys.as_u64() + hhdm);
         let pt = unsafe { &mut *pt_virt.as_mut_ptr::<PageTable>() };
@@ -75,9 +80,15 @@ pub unsafe fn unmap_guard_page(vaddr: VirtAddr, frame_allocator: &mut MemoryMapF
         let mut pd_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
         pd_entry.set_addr(pt_phys, pd_flags);
 
-        unsafe { x86_64::instructions::tlb::flush_all(); }
+        unsafe {
+            x86_64::instructions::tlb::flush_all();
+        }
 
-        serial_println!("guard: split 2MiB huge page at pd_idx {} for vaddr {:#x}", pd_idx, vaddr.as_u64());
+        serial_println!(
+            "guard: split 2MiB huge page at pd_idx {} for vaddr {:#x}",
+            pd_idx,
+            vaddr.as_u64()
+        );
 
         return Ok(());
     } else {
@@ -92,13 +103,18 @@ pub unsafe fn unmap_guard_page(vaddr: VirtAddr, frame_allocator: &mut MemoryMapF
 
         pt_entry.set_unused();
 
-        unsafe { x86_64::instructions::tlb::flush(VirtAddr::new(vaddr.as_u64())); }
+        unsafe {
+            x86_64::instructions::tlb::flush(VirtAddr::new(vaddr.as_u64()));
+        }
 
         return Ok(());
     }
 }
 
-pub unsafe fn ensure_guard_unmapped(vaddr: VirtAddr, frame_allocator: &mut MemoryMapFrameAllocator) {
+pub unsafe fn ensure_guard_unmapped(
+    vaddr: VirtAddr,
+    frame_allocator: &mut MemoryMapFrameAllocator,
+) {
     match unsafe { unmap_guard_page(vaddr, frame_allocator) } {
         Ok(()) => serial_println!("guard: unmapped {:#x} ok", vaddr.as_u64()),
         Err(e) => serial_println!("guard: failed to unmap {:#x}: {}", vaddr.as_u64(), e),

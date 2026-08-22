@@ -53,7 +53,7 @@ impl AsciiChar {
 #[repr(u8)]
 pub enum EventType {
     None = 0,
-    CharEvent= 1,
+    CharEvent = 1,
     KeyEvent = 2,
     MouseEvent = 3,
 }

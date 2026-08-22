@@ -110,9 +110,18 @@ pub fn scheduler_bounds(core_id: u8) -> (VirtAddr, VirtAddr) {
 pub fn install_guard_pages(frame_allocator: &mut crate::memory::memory::MemoryMapFrameAllocator) {
     for core_id in 0..MAX_CORES as usize {
         unsafe {
-            crate::stack_guard::ensure_guard_unmapped(rsp0_guard_page(core_id as u8), frame_allocator);
-            crate::stack_guard::ensure_guard_unmapped(ist0_guard_page(core_id as u8), frame_allocator);
-            crate::stack_guard::ensure_guard_unmapped(scheduler_guard_page(core_id as u8), frame_allocator);
+            crate::stack_guard::ensure_guard_unmapped(
+                rsp0_guard_page(core_id as u8),
+                frame_allocator,
+            );
+            crate::stack_guard::ensure_guard_unmapped(
+                ist0_guard_page(core_id as u8),
+                frame_allocator,
+            );
+            crate::stack_guard::ensure_guard_unmapped(
+                scheduler_guard_page(core_id as u8),
+                frame_allocator,
+            );
         }
     }
 }
