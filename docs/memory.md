@@ -32,23 +32,28 @@ kernel's own PML4 into the new page table.
 
 File: `memory/memory.rs`
 
-Simple bump allocator over Limine's memory map. Only allocates from `MEMMAP_USABLE`
-entries. No deallocation support (frames are never returned). Once the kernel is
-initialized the frame allocator should not be used for hot-path allocations.
+Bump allocator with free-list reclamation over Limine's memory map. Allocates from
+`MEMMAP_USABLE` entries; freed frames are returned to an intrusive free list and
+reused before bumping.
 
 ```rust
 pub struct MemoryMapFrameAllocator {
     memory_map: &'static [&'static Entry],
     curr_region_index: usize,
     frame_offset_in_region: u64,
+    free_list: Vec<PhysFrame<Size4KiB>>,
 }
 ```
+
+`allocate_frame()` pops `free_list` first, else bumps `curr_region_index`/`frame_offset_in_region`.
+`deallocate_frame(frame)` pushes onto `free_list` (debug_assert 4 KiB aligned).
+`free_frame_count()` and `allocated_bump_frames()` expose reclamation for tests.
 
 Usage: `memory::get_frame_allocator()` → `MutexGuard<MemoryMapFrameAllocator>`.
 Global: `FRAME_ALLOCATOR: Once<Mutex<MemoryMapFrameAllocator>>`.
 
-KNOWN LIMITATION: There is no `deallocate_frame`. Pages allocated for processes
-are never reclaimed. This is a known TODO.
+Init note: `Vec::new()` (not `with_capacity`) before `allocator::init_heap` to avoid
+heap allocation before heap is mapped (`boot_common::bsp_early_init` order).
 
 ## Offset Page Table
 
@@ -151,13 +156,56 @@ pub struct ProcessMemoryLayout {
     pub top_page_table_phys: PhysAddr,
     pub stack_top: VirtAddr,
     pub stack_size: u64,
-    pub heap_start: VirtAddr,  // 0x0000_0000_6000_0000 (placeholder)
-    pub heap_end: VirtAddr,    // same (heap not yet implemented for userspace)
+    pub heap_start: VirtAddr,  // 0x0000_0000_6000_0000
+    pub heap_end: VirtAddr,    // bump cursor, starts == heap_start
     pub mapped_regions: Vec<MappedMemoryRegion>,
+    pub next_alloc_vaddr: VirtAddr,       // 0x1000_0000 bump for CircularBuffer etc
+    pub allocated_ranges: Vec<(u64,u64)>, // tracked for reclaim
 }
 ```
 
-`ProcessMemoryLayout::new` allocates a new address space via `UserMemoryManager`.
+`ProcessMemoryLayout::new` allocates a new address space via `UserMemoryManager` and
+initializes `heap_start == heap_end == PROCESS_HEAP_VIRT_START` (empty heap). Before
+2026-08-22 `heap_end` was incorrectly `VIRT_END`; fixed to `VIRT_START` so first
+`sys_allocate` returns `0x6000_0000`.
+
+### Heap growth and reclamation
+
+- `allocate_heap(size, umm, fa) -> VirtAddr` – single-lock bump API used by `sys_allocate(5)`.
+  Aligns `size` to 4 KiB, computes `new = heap_end + aligned`, calls `grow_heap(new)`,
+  returns old `heap_end`. Replaces previous double-lock `old/new` arithmetic in `syscall.rs`.
+
+- `grow_heap(new_heap_end, umm, fa)` – maps `heap_end..new_heap_end` via
+  `UserMemoryManager::map_virt_mem_region` (`PRESENT|WRITABLE|USER_ACCESSIBLE`,
+  per-page frame alloc, merges `PageAlreadyMapped` flags), pushes `MappedMemoryRegion`,
+  bumps `heap_end`. Shrink path only moves cursor (no unmap; heap never shrinks in
+  current `sys_allocate` path).
+
+- `allocate_virtual_range(size) -> VirtAddr` – bump at `0x1000_0000..0x5000_0000`
+  for `CircularBuffer` double-map and window buffers; `find_free_gap` is TODO.
+
+- `free_address_space(user_mgr, frame_allocator)` – reclamation on `terminate_process`.
+  Collects owned `PhysAddr` from `mapped_regions` + `stack` + `allocated_ranges` via
+  `translate_user_virt_to_phys`, then:
+  1. `user_mgr.unmap_all_user_pages_with_owned_set(pml4, owned, fa)` – walks user
+     PML4 0..255 (handles 2 MiB huge), `set_unused` + `tlb::flush` per page,
+     `deallocate_frame` for owned leaves (dedup via `already_freed`).
+  2. `user_mgr.reclaim_empty_user_tables(pml4, fa)` – frees empty PT/PD/PDPT frames
+     bottom-up (`is_unused` all entries) + `deallocate_frame`.
+  3. `user_mgr.free_pml4_frame(pml4, fa)` – frees top-level table + `flush_all`.
+
+  Intermediate page tables allocated via `FrameAllocator` during `map_to` are thus
+  reclaimed. Verified by `test_usermem_reclaim` (`kernel/src/bin/test_usermem_reclaim.rs`)
+  which does 4×528384 (≈2.06 MB > 2 MB heap) allocations, exits, and asserts
+  `free_frame_count` returns to baseline (801 vs 0 before) and PID removed from
+  `PROCESS_MANAGER` + `SCHEDULER`.
+
+### UserMemoryManager helpers
+
+- `unmap_all_user_pages_with_owned_set`, `reclaim_empty_user_tables`, `free_pml4_frame`
+  in `memory/usermem.rs` implement the walk. `get_page_flags` used for merge on
+  `PageAlreadyMapped`. `translate_kernel_heap_virt_to_phys` walks kernel PML4 (no
+  `vaddr - HHDM_OFFSET` for heap – bug BUG-11).
 
 ## Global Memory Accessors
 
@@ -172,10 +220,27 @@ memory::get_user_mem_mgr()    -> MutexGuard<UserMemoryManager>
 
 ## Known Issues / TODOs
 
-- No frame deallocation: leaked physical memory on process exit.
-- No per-process heap (user heap_start == heap_end == 0x6000_0000, not mapped).
-- `map_virt_mem_region` allocates one physical frame per virtual page even on overlap;
-  the unused frame from an `AlreadyMapped` error is leaked.
+- `map_virt_mem_region` overlap frame leak fixed: on `PageAlreadyMapped` the spare
+  frame is now `deallocate_frame`'d and flags merged. Huge-page intermediate tables
+  are still 4 KiB-only; no 2 MiB alloc path.
+- Process exit reclamation implemented (`free_address_space` + `unmap` + `reclaim`),
+  but `find_free_gap` for `allocate_virtual_range` is still TODO (returns `None` if
+  `next_alloc_vaddr` exceeds `0x5000_0000`). Reclaim is single-core; TLB shootdown
+  via IPI not needed (per-process PML4 private) but kernel global unmap will need it.
 - ACPI region mapping helper (`map_acpi_regions`) is currently commented out in kmain.
 - `IdendtityAcpiHandler` (typo: should be "Identity") — most read/write methods are
   `todo!()` panics, only the mapping is implemented.
+- Early `Vec::with_capacity` in `MemoryMapFrameAllocator::init` must stay `Vec::new`
+  until after `init_heap` (heap before alloc).
+
+## Tests and logs
+
+- `cargo xtask usertest` (`kernel/src/bin/test_usermem_reclaim.rs`) exercises user heap
+  reclamation: boots via `boot_common::bsp_early_init` + `init_shared_state`, waits for
+  APs, snapshots `free_frame_count`, creates `memstress` ELF (`user/rustspace/src/bin/memstress.rs`
+  4×528384), polls `PROCESS_MANAGER`/`SCHEDULER` for `Terminated`, asserts `free` reclaimed
+  and `cleanup_dead` removes PID. QEMU `-serial stdio -serial file:` captures COM1+COM2.
+- `cargo xtask test` and `usertest` save split logs like `scripts/log_splitter.py` to
+  `test_logs/<test>/all.txt` + `core_N.txt` + `userspace_pid_N.txt` via `xtask/src/main.rs:save_test_logs`
+  (ANSI stripped, `MAX_CORES` from `kernel/src/lib.rs:21`). Also `cargo xtask usertest 2>&1 | cat`
+  now prints serial even on `ok` (previously only on fail).

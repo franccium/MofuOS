@@ -219,7 +219,7 @@ PML4 split: `0..255` user, `256..511` kernel. New user PML4 copies kernel entrie
 
 ### Frame Allocator `memory/memory.rs`
 
-`MemoryMapFrameAllocator` — bump allocator over Limine `MEMMAP_USABLE`. No `deallocate_frame` yet (leak). Fields `memory_map`, `curr_region_index`, `frame_offset_in_region`. Global `FRAME_ALLOCATOR: Once<Mutex<MemoryMapFrameAllocator>>`. No frame reclamation — leaked on `PageAlreadyMapped` (`BUG-05`) and on process exit (`ISSUE-M1`).
+`MemoryMapFrameAllocator` — bump + free-list allocator over Limine `MEMMAP_USABLE`. Fields `memory_map`, `curr_region_index`, `frame_offset_in_region`, `free_list: Vec<PhysFrame>`. Global `FRAME_ALLOCATOR: Once<Mutex<MemoryMapFrameAllocator>>`. `allocate_frame` pops `free_list` first else bumps; `deallocate_frame` pushes; `free_frame_count`/`allocated_bump_frames` for tests. `Vec::new()` before `init_heap` (no heap-before-alloc). Reclaimed on `PageAlreadyMapped` and on `terminate_process` via `free_address_space`.
 
 `init_offset_page_table(hhdm_offset)` helpers `align_up`/`align_down`.
 
@@ -239,11 +239,12 @@ pub struct UserMemoryManager {
 Global `USER_MEMORY_MANAGER: Once<Mutex<UserMemoryManager>>`. Access `memory::get_user_mem_mgr()`.
 
 - `allocate_new_address_space` — alloc 4KiB frame for new PML4, zero, copy kernel entries `256..511`, return phys.
-- `map_virt_mem_region` — per page alloc frame, `map_to` with `protection_flags | USER_ACCESSIBLE`, on `PageAlreadyMapped` merges flags (`OR` caps, `AND` `NO_EXECUTE`), leaked frame on miss.
+- `map_virt_mem_region` — per page alloc frame, `map_to` with `protection_flags | USER_ACCESSIBLE`, on `PageAlreadyMapped` merges flags (`OR` caps, `AND` `NO_EXECUTE`), **deallocates** spare frame.
 - `create_main_stack` — maps `stack_size` ending at `USER_STACK_TOP`, flags `PRESENT|WRITABLE`
-- `translate_user_virt_to_phys` — walks `PML4→PDPT→PD→PT` (handles 2MiB huge), used ELF load + window buffer map
+- `translate_user_virt_to_phys` — walks `PML4→PDPT→PD→PT` (handles 2MiB huge), used ELF load + window buffer map + reclaim
 - `get_page_flags` — walk to read `PageTableFlags`
 - `map_specific_frame` — maps explicit `phys_addr` into user PML4 with `PRESENT|WRITABLE|USER_ACCESSIBLE|NO_EXECUTE` (no alloc), used window buffers + circular buffers
+- `unmap_all_user_pages_with_owned_set`/`reclaim_empty_user_tables`/`free_pml4_frame` — free leaves + tables on `terminate_process`
 - `translate_kernel_heap_virt_to_phys` removed — use page-table walk via `kernel_page_table_phys`, never `vaddr - HHDM_OFFSET` for heap (latter bug `BUG-11`)
 
 `ProcessMemoryLayout` in `process/process_mem.rs`:
@@ -254,12 +255,14 @@ pub struct ProcessMemoryLayout {
     pub stack_top: VirtAddr,
     pub stack_size: u64,
     pub heap_start: VirtAddr, // 0x6000_0000
-    pub heap_end: VirtAddr,
+    pub heap_end: VirtAddr,   // == heap_start initially, bump via allocate_heap
     pub mapped_regions: Vec<MappedMemoryRegion>,
+    pub next_alloc_vaddr: VirtAddr, // 0x1000_0000
+    pub allocated_ranges: Vec<(u64,u64)>,
 }
 ```
 
-`grow_heap` bump at `0x6000_0000` via `sys_allocate(5)`, maps `PRESENT|WRITABLE|USER_ACCESSIBLE|NO_EXECUTE`.
+`allocate_heap`/`grow_heap` bump at `0x6000_0000` via `sys_allocate(5)`, maps `PRESENT|WRITABLE|USER_ACCESSIBLE|NO_EXECUTE`; `free_address_space` reclaims on exit.
 
 Globals accessor:
 
@@ -775,7 +778,7 @@ Style: `impl` directly below type, group methods `constructors, getters, mutatio
 
 `BUG-11` `translate_kernel_heap_virt_to_phys` `vaddr - HHDM_OFFSET` mapped garbage `~512GB`: fixed walk kernel page table via `kernel_page_table_phys`.
 
-Remaining `BUG-05` frame leak `PageAlreadyMapped`, `BUG-06` framebuffer ignore Limine masks, `BUG-07` ACPI `todo!()` stubs.
+Remaining `BUG-06` framebuffer ignore Limine masks, `BUG-07` ACPI `todo!()` stubs (`BUG-05` frame leak now fixed via `deallocate_frame` on `AlreadyMapped`).
 
 ---
 
@@ -783,7 +786,7 @@ Remaining `BUG-05` frame leak `PageAlreadyMapped`, `BUG-06` framebuffer ignore L
 
 Blockers P0:
 
-- `A0-1`/`ISSUE-M1`/`BUG-05` no frame reclamation — bump allocator, leak on overlap, no dealloc on `terminate_process`, OOM after ~10k cycles or steady leak. Fix: free list `Vec<PhysFrame>` or HHDM linked list, `deallocate_frame`, lazy alloc fix, free on exit walk `mapped_regions`+stack+PML4 + intermediate tables.
+- `A0-1`/`ISSUE-M1`/`BUG-05` **RESOLVED 2026-08-22** frame reclamation — `MemoryMapFrameAllocator` now `free_list: Vec<PhysFrame>` + `deallocate_frame`/`free_frame_count`/`allocated_bump_frames` (`Vec::new()` before `init_heap`), `map_virt_mem_region` deallocates spare on `PageAlreadyMapped`, `ProcessMemoryLayout::free_address_space` + `unmap_all_user_pages_with_owned_set`/`reclaim_empty_user_tables`/`free_pml4_frame` walks `mapped_regions`+stack+`allocated_ranges` and intermediate tables; `terminate_process` frees + `release_core` + `SCHEDULER.remove_pid`; `heap_end` fixed to `VIRT_START`; `allocate_heap` single-lock; verified `test_usermem_reclaim` 4×528384 → 801 frames reclaimed, `cargo xtask test/usertest` 3/3 → `test_logs/<test>/all.txt`.
 - `A0-2`/`ISSUE-M4` **DONE** guard pages kernel stacks (`RSP0`, `IST0`, `SCHEDULER_STACKS`, `SYSCALL_SLOTS`) — `GuardedKernelStack`/`GuardedSyscallSlot` `align(4096)` `guard+stack`, `stack_guard::unmap_guard_page` splits `2MiB` huge, `install_guard_pages` after `init_heap`, `assert_rsp_in_bounds`/`assert_syscall_stack_bounds`, `run_on_core_loop` `top-0x1000` headroom, verified `kernel/src/bin/test_guard_pages.rs` `88` checks `guard !mapped` `bottom mapped`.
 - `A0-3` cache `directory_children` never populated `reserve_cache`/`evict_directory` dead. Fix: decode `parent_cluster` bits `55-32` on load, `register_file_in_directory`, lookup parent in `get_effective_importance`.
 
@@ -809,8 +812,8 @@ Suggested order Week1 `A0-1` frame free + `A0-2` guard + `A0-3` cache; Week2 `A1
 
 1. Read this `docs/initial_overview.md` (covers all subsystems)
 2. For deep dive see `docs/{overview,memory,process,graphics,filesystem/hardware,syscalls,conventions,rust_coding_guidelines}.md`
-3. Check build `cargo xtask iso`, run `cargo xtask run` — logs `logs/<timestamp>/all.txt` + `core_N.txt` + `userspace_pid_N.txt`
-4. Inspect `kernel/src/lib.rs:13` `MAX_CORES` vs `scripts/log_splitter.py:22`, QEMU `cores=` in `xtask/src/main.rs:run_iso`
+3. Check build `cargo xtask iso`, run `cargo xtask run` — logs `logs/<timestamp>/all.txt` + `core_N.txt` + `userspace_pid_N.txt`; tests `cargo xtask test`/`cargo xtask usertest` → `test_logs/<test>/all.txt` + `core_N.txt` + `userspace_pid_N.txt` (`xtask/src/main.rs:save_test_logs`, QEMU `-serial stdio -serial file:`)
+4. Inspect `kernel/src/lib.rs:13` `MAX_CORES` vs `scripts/log_splitter.py:22`, QEMU `cores=` in `xtask/src/main.rs:run_iso`/`run_test_with_timeout`
 5. Follow conventions: lock order `CORE_POOL→PROCESS_MANAGER→SCHEDULER→FRAME_ALLOCATOR→SERIAL`, never hold lock across `jump_to_userspace`, push `PROCESS_MANAGER` before `SCHEDULER` enqueue, `HHDM_OFFSET` via `BootInfo`, XRGB via `rgba_to_xrgb`
 6. Code style: `docs/rust_coding_guidelines.md` — perf first, no `dyn`, slice APIs, `debug_assert`, `const` values, no emojis, no padded alignment, no `.` end comments
 7. Verification per item: QEMU boots no `#PF`/`#GP`, 4-core interleaves, `fs_test` passes `fsck.fat -n` clean, `clippy` zero, objdump `mov %rcx,%cr3` not `rax`, frame free count stable 1000 cycles

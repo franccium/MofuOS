@@ -8,22 +8,29 @@ Organized by subsystem.
 
 ## Memory
 
-### ISSUE-M1: No physical frame deallocation
+### ISSUE-M1: No physical frame deallocation [RESOLVED 2026-08-22]
 
-`MemoryMapFrameAllocator` is a pure bump allocator with no `deallocate_frame`.
-Physical memory consumed by processes is never reclaimed after process exit.
-File: `kernel/src/memory/memory.rs`
+`MemoryMapFrameAllocator` now has free-list reclamation (`free_list: Vec<PhysFrame>`,
+`deallocate_frame`, `allocate_frame` pops free first) and `free_frame_count` /
+`allocated_bump_frames` for tests. `UserMemoryManager` provides
+`unmap_all_user_pages_with_owned_set` + `reclaim_empty_user_tables` + `free_pml4_frame`,
+and `ProcessMemoryLayout::free_address_space` walks `mapped_regions`/`stack`/
+`allocated_ranges` to collect owned `PhysAddr` and free leaves + tables on
+`PROCESS_MANAGER::terminate_process`. File: `kernel/src/memory/memory.rs`,
+`kernel/src/memory/usermem.rs`, `kernel/src/process/process_mem.rs`.
 
-Impact: Memory usage grows monotonically. Enough process create/destroy cycles
-will exhaust all usable RAM.
+Impact before fix: monotonic OOM. After fix: `test_usermem_reclaim` (4×528384) asserts
+`free` returns to baseline (801 vs 0) after exit; `free_list: Vec::new()` before
+`init_heap` avoids heap-before-alloc fault.
 
 ### ISSUE-M2: User-space heap not implemented [RESOLVED]
 
-`sys_allocate` (syscall 5) is implemented. It calls `grow_heap` on the
-process's `ProcessMemoryLayout`, mapping new physical pages into the user
-address space starting at `heap_start = 0x0000_0000_6000_0000`.
-Returns the old `heap_end` as the allocation pointer (bump style).
-File: `kernel/src/process/syscall.rs`, `kernel/src/process/process_mem.rs`
+`sys_allocate` (syscall 5) now uses `ProcessMemoryLayout::allocate_heap(size)` single-lock
+bump (`heap_start == heap_end == 0x6000_0000` at `new()`; previously `heap_end` was
+`VIRT_END`). `allocate_heap` aligns to 4 KiB, calls `grow_heap(new)` which maps
+`PRESENT|WRITABLE|USER_ACCESSIBLE` and pushes `MappedMemoryRegion`. Syscall wrapper no
+longer duplicates `old+size` arithmetic (fixed double-lock). File:
+`kernel/src/process/syscall.rs`, `kernel/src/process/process_mem.rs`.
 
 ### ISSUE-M3: ACPI region mapping commented out
 
@@ -98,8 +105,8 @@ Implemented:
 
 | Number | Name                  | Notes                                              |
 |--------|-----------------------|----------------------------------------------------|
-| 2      | sys_write             | fd=1/2 -> COM2                                     |
-| 5      | sys_allocate          | bump heap growth, returns old heap_end ptr         |
+| 2      | sys_write             | fd=1/2 -> COM2 (now Option-safe; null backend in test) |
+| 5      | sys_allocate          | bump heap growth via `allocate_heap`, returns old heap_end |
 | 10     | sys_create_window     | creates compositor window, returns id              |
 | 11     | sys_destroy_window    | marks window invisible, recycles id                |
 | 12     | sys_map_window_buffer | maps back buffer pages into user space             |
@@ -117,7 +124,11 @@ Implemented:
 | 28     | sys_delete            | deletes file or empty directory via Sirius         |
 | 997    | sys_get_pid           | returns calling process PID                        |
 | 998    | sys_yield             | suspend + save context + re-enqueue                |
-| 999    | sys_exit              | terminate + return to scheduler                    |
+| 999    | sys_exit              | terminate + free_address_space + return to scheduler |
+
+Notes: `sys_write` COM2 now `Option<Uart>` to avoid `DeviceNotPresent` panic in
+QEMU test mode (`-serial null`). `sys_exit` now reclaims user frames/tables and
+releases core; `sys_allocate` no longer double-locks.
 
 Unimplemented: 0 (create_process), 1 (terminate_process), 3 (read), 4 (get_line),
 8 (load_file), 9 (unload_file), 996 (get_process_info).

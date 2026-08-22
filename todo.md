@@ -11,12 +11,6 @@ REAL TODO:
 
 - !! file caching
 
-- move to a normal rust workspace
-
-- automate some verification for userspace and kernel
-
-- exiting processes and reclaiming their resources
-
 - get rid of dynamic allocations in file reading
 
 - hash algorithms
@@ -31,6 +25,7 @@ REAL TODO:
 - less allocations in odys, scratch buffer arena
     figure out how to put a file editor in it
         read file into a buffer, edit that buffer in-odys
+            scrolling through a file - just change start and end of text to render indices
         when save file - flush to fs (fs cache but that only kernel knows)
         
 
@@ -38,6 +33,7 @@ REAL TODO:
     or research some real software rendering solutions
 
 - move windows
+    better: a tiling window manager, using the mouse is not comfortable
 
 - create and map an event buffer for each new process, in some global map of phys_addr, virt_addr for the event buffer for the given PID (outside of process manager so compositor doesnt have to lock the process manager to forward input), and read within each process from that
 
@@ -80,15 +76,6 @@ REAL TODO:
 
         tldr: what i have now is fine, each app can be monolythic like that, what happens in the app or its child process stays in the app or its child process, and if the app want to render that something (call it stdout or w/e) it can render text calling draw(line), no terminal and terminal renderer nonsense, each app is a window app with text, or gfx, rendering capabilities
 
-- file explorer in theophe
-    like terminal file explorers
-
-- text editor in theophe
-    like terminal text editors
-    integrated with the file explorer
-    i suppose text editor would be a part of that, like a module used by the file explorer
-    or better to think of it as an IDE
-
 - per-cpu scratch buffer
 
 - get rid of that DecodedKey to Keys translation, and pack events more, the keys can be u8 and i forgot why they are not right now
@@ -107,8 +94,6 @@ so maybe compositor detects mouse press --> checks rects for what is it within, 
     render mouse cursor - a 2x2 px square at mouse x mouse y; ps2-mouse inits at 0,0, so we add deltas and store current mouse pos from last poll
 
 - mouse support
-
-- !!! MAX_CORES set to the actual count of the cores causes a page fault on the (MAX_CORES-1) core after entering scheduler loop now, it used to work fine
 
 - validating user memory areas
     maybe at the granularity of the 64kB slabs of pages that i give each malloc
@@ -169,5 +154,6 @@ graphics:
 
 
 name vault:
-- Argo
+- Argo - could be something payload related
 - Arkad / Arcad
+- Chroma - the drawing thing

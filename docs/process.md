@@ -99,6 +99,16 @@ pub struct KernelThread {
 
 `ThreadGroup` holds a PID and a KernelThread (main thread). Matches 1:1 with a Process.
 
+### Userspace heap and virtual-range allocators
+
+File: `process/process_mem.rs`, `process/process.rs`
+
+- Heap: `PROCESS_HEAP_VIRT_START 0x6000_0000` .. `PROCESS_HEAP_VIRT_END 0x6020_0000` (2 MB window), `heap_start == heap_end == START` at creation (empty). `allocate_heap(size)` (used by `sys_allocate(5)`) aligns to 4 KiB, `grow_heap(new)` maps `PRESENT|WRITABLE` via `UserMemoryManager::map_virt_mem_region`, pushes `MappedMemoryRegion`, bumps `heap_end`. Single-lock bump; `syscall.rs` no longer duplicates `old+size` arithmetic. Before 2026-08-22 `heap_end` was `VIRT_END` (first alloc returned `0x6020_0000` outside window).
+
+- Virtual range: `PROCESS_USER_VADDR_ALLOC_START 0x1000_0000` .. `0x5000_0000` for `CircularBuffer` double-map and future `mmap`. `allocate_virtual_range` bumps `next_alloc_vaddr`, tracks `allocated_ranges` for reclaim; `find_free_gap` is TODO.
+
+Both are reclaimed by `free_address_space`.
+
 ## Process Manager (PROCESS_MANAGER)
 
 `lazy_static! PROCESS_MANAGER: Mutex<ProcessManager>`
@@ -126,11 +136,29 @@ The ordering in steps 8-9 is critical: the AP core scheduler loop calls
 pushed, it finds `ProcessNotFound` and the core jumps to userspace with an invalid
 context — memory corruption ensues.
 
-### terminate_process
+### terminate_process (with reclamation)
 
-Sets state to Terminated, terminates main KernelThread, releases core via `CORE_POOL`.
-If `cascade=true`, recursively terminates children.
-If `cascade=false`, orphans children to arche (PID 0).
+`PROCESS_MANAGER::terminate_process(pid, exit_code, cascade)` now reclaims **all**
+user resources before releasing the core:
+
+1. Snapshot `ProcessMemoryLayout` + `children` under `get_process_mut`, set
+   `Terminated`/`exit_code`, zero `top_page_table_phys` (guard double-free).
+2. If `top != 0`, call `memory_layout.free_address_space(&USER_MEMORY_MANAGER, &mut FRAME_ALLOCATOR)`:
+   - Collects owned `PhysFrame`s from `mapped_regions` (ELF + `allocate_heap` bumps),
+     `stack` (`stack_top - stack_size .. stack_top`), and `allocated_ranges`
+     (`0x1000_0000` virtual-range bump) via `translate_user_virt_to_phys`.
+   - `UserMemoryManager::unmap_all_user_pages_with_owned_set` walks PML4 0..255,
+     handles 2 MiB huge, `set_unused` + `tlb::flush(virt)` per leaf, `deallocate_frame`
+     owned (dedup `already_freed`), leaves non-owned (e.g. shared window buffers) unmapped but not freed.
+   - `reclaim_empty_user_tables` bottom-up frees empty PT/PD/PDPT frames (`is_unused` all entries).
+   - `free_pml4_frame` frees top table + `flush_all`.
+3. Lookup `core_id` via `thread_groups`, `thread.terminate`, `CORE_POOL.release_core`,
+   `SCHEDULER.remove_pid(pid)` (with `cli`+`SCHEDULER.lock`).
+4. Orphan vs cascade children to arche `PID 0`.
+
+`cleanup_dead()` (`retain Terminated` + `retain !all_terminated`) is called by
+`test_usermem_reclaim` harness to verify PID fully removed. `free_frame_count` +
+`allocated_bump_frames` in `MemoryMapFrameAllocator` expose reclamation for tests.
 
 ### get_process / get_process_mut
 

@@ -15,29 +15,27 @@ Priority definitions:
 
 ## P0 — Blockers (fix next)
 
-### A0-1: No physical frame reclamation — monotonic OOM (ISSUE-M1 + BUG-05)
+### A0-1: No physical frame reclamation — monotonic OOM (ISSUE-M1 + BUG-05) [RESOLVED 2026-08-22]
 
-**Files:** `kernel/src/memory/memory.rs: MemoryMapFrameAllocator`, `kernel/src/memory/usermem.rs: map_virt_mem_region`, `kernel/src/process/process.rs: Process::create_with_elf`, `kernel/src/process/process_mem.rs`, `kernel/src/process/syscall.rs: sys_exit/sys_allocate`
+**Files:** `kernel/src/memory/memory.rs: MemoryMapFrameAllocator`, `kernel/src/memory/usermem.rs: map_virt_mem_region` + `unmap_all_user_pages_with_owned_set`/`reclaim_empty_user_tables`/`free_pml4_frame`, `kernel/src/process/process.rs: Process::create_with_elf`, `kernel/src/process/process_mem.rs: free_address_space`/`allocate_heap`, `kernel/src/process/syscall.rs: sys_exit/sys_allocate`, `kernel/src/process/process_manager.rs: terminate_process`
 
-**Root cause:**
-`MemoryMapFrameAllocator` is a pure bump allocator over Limine `MEMMAP_USABLE` entries. No `deallocate_frame`, no free list. `map_virt_mem_region` allocates a frame *before* `map_to`; on `Err(PageAlreadyMapped)` the frame is leaked (`bugs.md: BUG-05`). `ProcessMemoryLayout::new` allocates a fresh PML4 frame per process plus one frame per 4 KiB page of every PT_LOAD segment and stack. None are freed on `terminate_process`. User heap `grow_heap` similarly never shrinks.
+**Root cause (before fix):**
+`MemoryMapFrameAllocator` was pure bump; no `deallocate_frame`. `map_virt_mem_region` leaked on `PageAlreadyMapped`. `ProcessMemoryLayout::new` set `heap_end = VIRT_END` (not `VIRT_START`). None freed on `terminate_process`.
 
-On x86_64 every user page table level (PML4, PDPT, PD, PT) also consumes frames via the `FrameAllocator` passed to `map_to` — those intermediate tables are also never reclaimed.
+**Fix implemented:**
+1. `MemoryMapFrameAllocator` now `free_list: Vec<PhysFrame>` + `deallocate_frame`/`free_frame_count`/`allocated_bump_frames`; `allocate_frame` pops free first. `Vec::new()` before `init_heap` to avoid heap-before-alloc.
+2. `map_virt_mem_region` on `PageAlreadyMapped` `deallocate_frame`s spare frame and merges flags.
+3. `UserMemoryManager::unmap_all_user_pages_with_owned_set` walks user PML4 0..255 (handles 2 MiB huge), `set_unused` + `flush` + `deallocate` owned leaves (dedup `already_freed`). `reclaim_empty_user_tables` frees empty PT/PD/PDPT bottom-up + `flush_all`. `free_pml4_frame` frees top.
+4. `ProcessMemoryLayout::free_address_space` collects owned `PhysAddr` from `mapped_regions` + `stack` + `allocated_ranges` via `translate_user_virt_to_phys`, calls the three walks. `allocate_heap` single-lock bump aligned to 4 KiB; `heap_end` init fixed to `VIRT_START`.
+5. `PROCESS_MANAGER::terminate_process` now: snapshot `memory_layout`, `free_address_space` on copy, `release_core`, `SCHEDULER.remove_pid`, orphan/cascade children. `sys_exit` does `Cr3::write(kernel)`, `terminate_process`, `cli; return_to_scheduler`. `SERIAL2` made `Option` to avoid `DeviceNotPresent` in QEMU `-serial null` test.
+6. `test_usermem_reclaim` `kernel/src/bin/test_usermem_reclaim.rs` + `memstress` `user/rustspace/src/bin/memstress.rs` (4×528384) verifies: `cargo xtask usertest` boots full kernel, waits APs, snapshots `free`, creates proc, polls `Terminated`, asserts `free 801 >= 0+?` and `cleanup_dead` removes PID. Logs saved to `test_logs/<test>/all.txt` + `core_N.txt` + `userspace_pid_N.txt` via `xtask/src/main.rs:save_test_logs` (QEMU `-serial stdio -serial file:` + ANSI strip, `MAX_CORES` from `lib.rs`).
 
-**Failure mode in QEMU:**
-With `-m 2G`, ~500 MB is usable after Limine + kernel image + heap (16 MB at `0xFFFF_8080_0000_0000`). One `ping` ELF (~50 pages) costs ~60 frames. 10k create/exit cycles exhaust RAM; allocator returns `None`, `create_with_elf` panics or returns `MapToError` which currently propagates as kernel panic → `exit_qemu(Failed)` port `0xF4`. Even without churn, `BUG-05` leaks 1–2 frames per multi-segment ELF (common when `.text` and `.rodata` share a page boundary) — low per process but unbounded over time.
+**Verification done:**
+- `cargo xtask usertest` → `test_usermem_reclaim ok (log: test_logs/test_usermem_reclaim/all.txt)` 801 frames reclaimed, `bump` unchanged 8216.
+- `cargo xtask test` → 3/3 ok (guard_pages, smp_boot, usermem_reclaim).
+- `cargo xtask usertest 2>&1 | cat` now prints serial even on ok (previously only on fail) + `test_logs/` per `initial_overview` update.
 
-**Fix sketch:**
-1. Add `fn deallocate_frame(&mut self, frame: PhysFrame)` to `MemoryMapFrameAllocator`. Simplest: intrusive free list of `PhysFrame` — push freed frames onto `Vec<PhysFrame>` or linked list via HHDM alias (`frame.start_address() + hhdm_offset` as `*mut FreeNode`). `allocate_frame` pops free list first, else bumps.
-2. Fix `BUG-05` leak: allocate lazily — call `map_to` with a closure that allocates, or on `PageAlreadyMapped` push `phys_frame` back via `deallocate_frame`.
-3. On `terminate_process(cascade)`: walk `ProcessMemoryLayout.mapped_regions` + stack range + PML4, unmap each page (`unmap` + `deallocate_frame` for data frame + `tlb flush`), then walk and free intermediate tables. Requires tracking which tables were allocated — easiest is to enumerate present entries recursively from the process PML4 and free leaf frames + tables.
-4. Add `Drop` or explicit `free_address_space(pml4_phys)` that walks 256 user PML4 entries.
-
-**Verification:**
-- Unit test with `MockDisk` + in-memory frame allocator: loop `create_with_elf` → `terminate_process` 1000x, assert `free_frame_count` returns to baseline.
-- QEMU log: print `FRAME_ALLOCATOR.lock().free_count()` periodically via `serial_println_core!`.
-
-**Effort:** 2–3 days. Prerequisite for any real multi-process or FS workload.
+**Remaining:** `find_free_gap` still TODO, TLB shootdown not needed (per-process PML4 private).
 
 ---
 
