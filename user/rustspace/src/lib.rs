@@ -627,8 +627,10 @@ impl Arena {
                 base as usize + SLAB_SIZE,
                 core::sync::atomic::Ordering::Release,
             );
+
             return true;
         }
+
         false
     }
 }
@@ -663,7 +665,7 @@ unsafe impl GlobalAlloc for Arena {
                 } {
                     return ptr;
                 }
-                
+
                 loop {
                     let cursor = self.cursor.load(Acquire);
                     let end = self.end.load(Acquire);
@@ -741,7 +743,7 @@ unsafe impl GlobalAlloc for Arena {
                     if base == INVALID_ALLOC {
                         return core::ptr::null_mut();
                     }
-                    
+
                     return base as *mut u8;
                 }
 

@@ -61,6 +61,8 @@ pub struct Terminal<D: DrawTarget<Color = Rgb888>> {
     pub font_metrics: FontMetrics,
     pub last_command_abs: Option<(u64, u64)>,
     pub last_command_buf: Vec<u8>,
+    pub command_mode: bool,
+    pub scroll_offset: usize,
 }
 
 impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
@@ -92,6 +94,8 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             font_metrics,
             last_command_abs: None,
             last_command_buf: Vec::new(),
+            command_mode: false,
+            scroll_offset: 0,
         }
     }
 
@@ -118,6 +122,23 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             1
         };
         self.viewport_rows = max(rows, 1);
+        self.clamp_scroll();
+    }
+
+    fn clamp_scroll(&mut self) {
+        let max_scroll = self.lines.count.saturating_sub(self.viewport_rows);
+        self.scroll_offset = min(scroll_offset, max_scroll);
+    }
+
+    fn scroll_up_lines(&mut self, n: usize) {
+        let max_scroll = self.lines.count.saturating_sub(self.viewport_rows);
+        self.scroll_offset = min(self.scroll_offset + n, max_scroll);
+        self.needs_redraw = true;
+    }
+
+    fn scroll_down_lines(&mut self, n: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+        self.needs_redraw = true;
     }
 
     pub fn render(&mut self) {
@@ -234,6 +255,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
     pub fn clear(&mut self) {
         let pos = self.scrollback.current_absolute();
         self.lines.clear(pos);
+        self.scroll_offset = 0;
         self.clear_screen();
         self.needs_redraw = true;
     }
@@ -248,7 +270,9 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         let rows = self.viewport_rows;
         let total = self.lines.count;
         let visible = core::cmp::min(rows, total);
-        let start_logical = total.saturating_sub(visible);
+        let max_scroll = total.saturating_sub(visible);
+        let offset = core::cmp::min(self.scroll_offset, max_scroll);
+        let start_logical = total.saturating_sub(visible + offset);
 
         for vis_idx in 0..visible {
             let logical_idx = start_logical + vis_idx;
@@ -454,10 +478,53 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         }
     }
 
-    fn handle_special_key(&mut self, key: crate::KeyCode, _key_state: crate::KeyState) {
+    fn handle_special_key(&mut self, key: crate::KeyCode, key_state: crate::KeyState) {
+        // Ctrl toggle command mode
+        if (key == crate::KeyCode::LControl || key == crate::KeyCode::RControl)
+            && key_state == crate::KeyState::Pressed
+        {
+            self.command_mode = !self.command_mode;
+            // optional feedback: keep silent to avoid polluting scrollback
+            self.needs_redraw = true;
+            return;
+        }
+        // In command mode, Q/E/A/D control scrolling via KeyEvent
+        if self.command_mode {
+            match key {
+                crate::KeyCode::Q => {
+                    if key_state == crate::KeyState::Pressed {
+                        let n = self.viewport_rows;
+                        self.scroll_up_lines(n);
+                    }
+                    return;
+                }
+                crate::KeyCode::E => {
+                    if key_state == crate::KeyState::Pressed {
+                        let n = self.viewport_rows;
+                        self.scroll_down_lines(n);
+                    }
+                    return;
+                }
+                crate::KeyCode::A => {
+                    if key_state == crate::KeyState::Pressed {
+                        self.scroll_up_lines(1);
+                    }
+                    return;
+                }
+                crate::KeyCode::D => {
+                    if key_state == crate::KeyState::Pressed {
+                        self.scroll_down_lines(1);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key {
             crate::KeyCode::ArrowUp => {
-                self.recall_last_command();
+                if !self.command_mode {
+                    self.recall_last_command();
+                }
             }
             crate::KeyCode::ArrowLeft => {}
             crate::KeyCode::ArrowDown => {}
@@ -470,6 +537,40 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         match event.event_type {
             crate::EventType::CharEvent => {
                 if let Some(c) = char::from_u32(v) {
+                    // In command mode, intercept Q/E/A/D as scroll (char path)
+                    if self.command_mode {
+                        let lower = c.to_ascii_lowercase();
+                        match lower {
+                            'q' => {
+                                self.scroll_up_page();
+                                self.needs_redraw = true;
+                                return;
+                            }
+                            'e' => {
+                                self.scroll_down_page();
+                                self.needs_redraw = true;
+                                return;
+                            }
+                            'a' => {
+                                self.scroll_up_lines(1);
+                                self.needs_redraw = true;
+                                return;
+                            }
+                            'd' => {
+                                self.scroll_down_lines(1);
+                                self.needs_redraw = true;
+                                return;
+                            }
+                            _ => {}
+                        }
+                        // Ctrl itself may come as char 0x11? Ignore
+                        if c == '\u{11}' || c == '\u{03}' {
+                            return;
+                        }
+                        // Block other typing in command mode
+                        self.needs_redraw = true;
+                        return;
+                    }
                     match c {
                         crate::AsciiChar::BACKSPACE => self.backspace(),
                         crate::AsciiChar::NEWLINE | crate::AsciiChar::CARRIAGE_RETURN => {
@@ -487,8 +588,16 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                                     _ => {}
                                 }
                             }
+                            // Keep at bottom after new command unless user is scrolled
+                            // If at bottom, stay bottom; otherwise keep offset
+                            // No auto-reset; clamp ensures valid
+                            self.clamp_scroll();
                         }
                         c if !c.is_control() => {
+                            // If scrolled, typing should jump to bottom
+                            if self.scroll_offset != 0 {
+                                self.scroll_offset = 0;
+                            }
                             let b = c as u8;
                             self.write_bytes_internal(&[b]);
                         }

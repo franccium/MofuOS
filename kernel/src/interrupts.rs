@@ -53,7 +53,7 @@ lazy_static! {
 }
 
 const TIMER_DEBUG_PRINT: bool = false;
-const KEYBOARD_DEBUG_PRINT: bool = true;
+const KEYBOARD_DEBUG_PRINT: bool = false;
 const MOUSE_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
 const PREEMPTION_ENABLED: bool = false;
