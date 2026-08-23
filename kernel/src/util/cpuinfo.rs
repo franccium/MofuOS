@@ -331,13 +331,6 @@ pub unsafe fn init_cpu_info_for_core(core_id: u8) {
     }
 }
 
-pub fn get_cpu_info() -> &'static CpuInfo {
-    unsafe {
-        let ptr = &raw const CPU_INFO;
-        &*ptr
-    }
-}
-
 pub fn get_cpu_info_for_core(core_id: u8) -> &'static CpuInfo {
     debug_assert!((core_id as usize) < MAX_CORES as usize);
 

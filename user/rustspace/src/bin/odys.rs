@@ -496,8 +496,6 @@ pub extern "C" fn main() -> ! {
 
     let mut event_reader = unsafe { EventReader::new(EVENT_BUFFER_ADDR) };
 
-    unsafe { rustspace::sys_yield() };
-
     let mut frame: u32 = 0;
     loop {
         loop {

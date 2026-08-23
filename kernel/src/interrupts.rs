@@ -17,7 +17,7 @@ use crate::{
     gdt, hlt_loop,
     memory::memory::{IdentityAcpiHandler, MemoryMapFrameAllocator},
     serial_print, serial_println,
-    util::cpuinfo::{CpuFeatureFlags, get_cpu_info, get_cpu_info_for_core},
+    util::cpuinfo::{CpuFeatureFlags, get_cpu_info_for_core},
 };
 use acpi::{
     AcpiTables, PhysicalMapping,
@@ -441,10 +441,6 @@ unsafe fn init_local_apic(
     let local_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
     LAPIC_ADDRESS.lock().address = local_apic_ptr;
-    //unsafe { map_local_apic_for_current_core(mapper, frame_allocator) };
-    // let virt_addr = LAPIC_VIRT_ADDR.lock();
-    // let virt_
-    // let local_apic_ptr = virt_addr.as_mut_ptr::<u32>();
 
     unsafe {
         // Set Task Priority Register to 0
@@ -699,18 +695,6 @@ pub fn get_lapic_base_addr_phys() -> u64 {
     }
 }
 
-// /// Get the virtual address of the Local APIC (after mapping)
-// pub fn get_lapic_base_addr() -> *mut u32 {
-//     if let Some(addr) = *LAPIC_VIRT_ADDR.lock() {
-//         addr.as_mut_ptr::<u32>()
-//     } else {
-//         panic!("Local APIC not mapped yet! Call map_local_apic_for_current_core first.");
-//     }
-//     // pub const LOCAL_APIC_PHYS_BASE: u64 = 0xFEE00000;
-//     // let hhdm_offset = crate::boot_info::boot_info().hhdm_offset;
-//     // let virt_addr = LOCAL_APIC_PHYS_BASE + hhdm_offset;
-//     // virt_addr as *mut u32
-// }
 /// Get the virtual address of the Local APIC (after mapping)
 pub fn get_lapic_base_addr() -> *mut u32 {
     let addr = LAPIC_ADDRESS.lock().address;
@@ -765,8 +749,8 @@ pub unsafe fn init_acpi(
                 unsafe { map_apic_mem_identity(io_apic_addr, mapper, frame_allocator) };
             let ioapic_ptr = ioapic_virt.as_mut_ptr::<u32>();
 
-            let mut keyboard_irq: u32 = 1; // Default IRQ 1 for keyboard
-            let mut mouse_irq: u32 = 12; // Default IRQ 12 for mouse
+            let mut keyboard_irq: u32 = 1;
+            let mut mouse_irq: u32 = 12;
 
             for iso in apic.interrupt_source_overrides.iter() {
                 match iso.isa_source {
@@ -781,7 +765,6 @@ pub unsafe fn init_acpi(
                 );
             }
 
-            // Later, use keyboard_irq and mouse_irq instead of hardcoded values
             unsafe {
                 set_ioapic_redirection(
                     ioapic_ptr,
@@ -791,88 +774,14 @@ pub unsafe fn init_acpi(
                 );
                 set_ioapic_redirection(ioapic_ptr, mouse_irq, InterruptIndex::Mouse as u8, false);
             }
-
-            /*
-               local_apic_nmi_lines: Vec<NmiLine, A>,
-               pub interrupt_source_overrides: Vec<InterruptSourceOverride, A>,
-               pub nmi_sources: Vec<NmiSource, A>,
-               pub also_has_legacy_pics: bool,
-            */
         }
         _ => {
             serial_println!("APIC not supported");
         }
     }
-
-    // let binding = acpi_platform
-    //     .tables
-    //     .find_table::<Madt>()
-    //     .expect("Cannot find MADT table");
-    // let madt_table = binding.get();
-
-    // let local_apic_addr = madt_table.local_apic_address;
-    // let flags = madt_table.flags;
-    // serial_println!(
-    //     "Found MADT table: local apic address: {:#x}, flags: {}",
-    //     local_apic_addr,
-    //     flags
-    // );
-
-    // for entry in madt_table.entries() {
-    //     match entry {
-    //         MadtEntry::LocalApic(local) => {
-    //             let apic_id = local.apic_id;
-    //             let processor_id = local.processor_id;
-
-    //             serial_println!("Local APIC ID {} for CPU {}", apic_id, processor_id);
-    //         }
-
-    //         MadtEntry::IoApic(io_apic) => {
-    //             io_apic_addr = io_apic.io_apic_address;
-    //             got_io_apic_addr = true;
-    //             let gsi_base = io_apic.global_system_interrupt_base;
-
-    //             serial_println!(
-    //                 "IOAPIC {} at addr: {:x}, GSI base {}",
-    //                 io_apic.io_apic_id,
-    //                 io_apic_addr,
-    //                 gsi_base
-    //             );
-    //         }
-
-    //         MadtEntry::InterruptSourceOverride(iso) => {
-    //             let irq = iso.irq;
-    //             let bus = iso.bus;
-    //             let global_system_interrupt = iso.global_system_interrupt;
-    //             serial_println!(
-    //                 "IRQ {} on bus {} overridden to GSI {}",
-    //                 irq,
-    //                 bus,
-    //                 global_system_interrupt
-    //             );
-    //         }
-
-    //         MadtEntry::PlatformInterruptSource(e) => {
-    //             // handle if needed
-    //         }
-
-    //         MadtEntry::NmiSource(nmi) => { /* handle NMI */ }
-
-    //         _ => {}
-    //     }
-    // }
-
     unsafe {
         init_local_apic(lapic_addr, mapper, frame_allocator);
     }
-
-    // if got_apic_addr {
-    //     unsafe {
-    //         init_io_apic(io_apic_addr, mapper, frame_allocator);
-    //     }
-    // } else {
-    //     serial_println!("ERROR: Cannot find IO apic");
-    // }
 
     disable_pic();
 
