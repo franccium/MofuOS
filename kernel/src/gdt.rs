@@ -229,9 +229,8 @@ pub unsafe fn init_core_gdt(core_id: u8) {
 
     gdt_ref.table.load();
 
-    // Reload segment registers
+    // Reload segments
     unsafe {
-        // Reload code segment with a far jump
         asm!(
             "push {sel}",
             "lea {tmp}, [2f + rip]",
@@ -243,12 +242,10 @@ pub unsafe fn init_core_gdt(core_id: u8) {
             options(nostack)
         );
 
-        // Reload data segments
         x86_64::registers::segmentation::DS::set_reg(gdt_ref.kernel_data_selector);
         x86_64::registers::segmentation::ES::set_reg(gdt_ref.kernel_data_selector);
         x86_64::registers::segmentation::SS::set_reg(gdt_ref.kernel_data_selector);
 
-        // Load TSS
         x86_64::instructions::tables::load_tss(gdt_ref.tss_selector);
     }
 }

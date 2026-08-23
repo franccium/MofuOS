@@ -10,7 +10,7 @@ use crate::{
     interrupts::map_local_apic_for_current_core,
     memory::memory::MemoryMapFrameAllocator,
     process::{CORE_POOL, CorePool, SCHEDULER},
-    util::cpuinfo::{self, init_cpu_infos, init_current_core},
+    util::cpuinfo::{self, init_cpu_infos, init_core},
 };
 use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker,
@@ -110,8 +110,8 @@ pub unsafe fn bsp_early_init() {
 
     unsafe {
         init_core_gdt(0);
-        interrupts::load_idt();
     }
+    interrupts::load_idt();
 
     let mut mapper = unsafe { memory::memory::init_offset_page_table(hhdm_offset) };
     serial_println!("Offset page table initialized");
@@ -203,17 +203,17 @@ pub unsafe fn bsp_early_init() {
             cpu.processor_id
         );
     }
-    unsafe { init_cpu_infos(&cpus) };
+    unsafe { init_core(0) };
 
     serial_println!("Mapping lapic for core 0");
-    unsafe { interrupts::init_lapic_for_current_core(0) };
-    let mut core_pool = CORE_POOL.lock();
-    core_pool.init_with_core_count(core_count as u8, cpus);
-    drop(core_pool);
-    unsafe { init_current_core() };
-    let mut scheduler = SCHEDULER.lock();
-    scheduler.init_with_core_count(core_count as u8);
-    drop(scheduler);
+    {
+        let mut core_pool = CORE_POOL.lock();
+        core_pool.init_with_core_count(core_count as u8, cpus);
+    }
+    {
+        let mut scheduler = SCHEDULER.lock();
+        scheduler.init_with_core_count(core_count as u8);
+    }
 
     interrupts::disable_interrupts();
 

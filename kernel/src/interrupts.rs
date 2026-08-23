@@ -382,7 +382,7 @@ pub unsafe fn init_lapic_for_current_core(core_id: u8) {
     // Mask all LVT entries initially
     lapic_ptr
         .offset(APICOffset::LvtT as isize / 4)
-        .write_volatile(0x10000); // Masked
+        .write_volatile(0x10000);
     lapic_ptr
         .offset(APICOffset::LvtLint0 as isize / 4)
         .write_volatile(0x10000);
@@ -419,13 +419,7 @@ pub unsafe fn init_lapic_for_current_core(core_id: u8) {
     // Set Logical Destination Register
     lapic_ptr
         .offset(APICOffset::Ldr as isize / 4)
-        .write_volatile(
-            (lapic_ptr
-                .offset(APICOffset::Ldr as isize / 4)
-                .read_volatile()
-                & 0xFFFFFF00)
-                | 1,
-        );
+        .write_volatile((core_id as u32) << 24);
 
     // Set Destination Format Register for flat model
     lapic_ptr
@@ -512,7 +506,7 @@ pub unsafe fn tsc_read() -> u64 {
 
 unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32, core_id: u8) {
     let tsc_freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
-    serial_println!("Core {}: Setting up TSC-Deadline mode", core_id);
+    serial_println!("Core {}: init_timer_periodic_mode", core_id);
     serial_println!("TSC Frequency: {} Hz", tsc_freq);
 
     unsafe {
@@ -701,7 +695,7 @@ pub fn get_lapic_base_addr_phys() -> u64 {
             options(nostack, preserves_flags)
         );
         let apic_base = ((high as u64) << 32) | (low as u64);
-        apic_base & 0xFFFFF000 // Page-aligned base address
+        apic_base & 0xFFFFF000
     }
 }
 
