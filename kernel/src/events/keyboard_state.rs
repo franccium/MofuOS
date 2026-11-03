@@ -1,10 +1,26 @@
-use pc_keyboard::KeyCode;
+use pc_keyboard::{KeyCode, Modifiers};
 
-use crate::events::event_buffer::KeyState;
+use crate::events::event_buffer::{KeyModifiers, KeyState};
 
 pub const KEY_COUNT: usize = 256;
 const BITS_PER_WORD: usize = 64;
-const BITSET_WORD_COUNT: usize = KEY_COUNT / BITS_PER_WORD;
+pub const BITSET_WORD_COUNT: usize = KEY_COUNT / BITS_PER_WORD;
+
+impl From<&Modifiers> for KeyModifiers {
+    fn from(modifiers: &Modifiers) -> Self {
+        let mut key_modifiers = KeyModifiers::empty();
+        key_modifiers.set(KeyModifiers::LSHIFT, modifiers.lshift);
+        key_modifiers.set(KeyModifiers::RSHIFT, modifiers.rshift);
+        key_modifiers.set(KeyModifiers::LCTRL, modifiers.lctrl);
+        key_modifiers.set(KeyModifiers::RCTRL, modifiers.rctrl);
+        key_modifiers.set(KeyModifiers::LALT, modifiers.lalt);
+        key_modifiers.set(KeyModifiers::RALT, modifiers.ralt);
+        key_modifiers.set(KeyModifiers::NUMLOCK, modifiers.numlock);
+        key_modifiers.set(KeyModifiers::CAPSLOCK, modifiers.capslock);
+
+        key_modifiers
+    }
+}
 
 impl KeyState {
     pub fn from_raw(raw: u32) -> Self {
@@ -19,7 +35,7 @@ impl KeyState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyBitset {
-    words: [u64; BITSET_WORD_COUNT],
+    pub words: [u64; BITSET_WORD_COUNT],
 }
 
 impl KeyBitset {
@@ -61,6 +77,7 @@ pub struct KeyboardState {
     pub key_pressed: KeyBitset,
     // keys that went up since the last compositor update
     pub key_released: KeyBitset,
+    pub modifiers: KeyModifiers,
 }
 
 impl KeyboardState {
@@ -69,6 +86,7 @@ impl KeyboardState {
             key_down: KeyBitset::new(),
             key_pressed: KeyBitset::new(),
             key_released: KeyBitset::new(),
+            modifiers: KeyModifiers::empty(),
         }
     }
 
@@ -87,7 +105,9 @@ impl KeyboardState {
         self.key_released.test(key as u8)
     }
 
-    pub fn update(&mut self, key: u8, state: KeyState) {
+    pub fn update(&mut self, key: u8, state: KeyState, modifiers: KeyModifiers) {
+        self.modifiers = modifiers;
+
         match state {
             KeyState::Pressed => {
                 if !self.key_down.test(key) {

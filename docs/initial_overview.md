@@ -471,7 +471,7 @@ Wire types (`kernel` ↔ `user/rustspace/src/lib.rs` must match, `FS_NAME_LEN=16
 - `CpuInfoFlat` `32B align(16)`: vendor, family, model, stepping, display_family:u16, display_model, cache_line_size, apic_id, features:u32, tsc_frequency_hz:u64, boot_tsc:u64, max_cpuid_leaf:u32, max_extended:u32, core_count:u8
 - `CircularBufferInfo` `24B`: `virtual_base:u64, view_size:u64, total_virtual_size:u64`
 - `CacheStatsFlat` `32B`: `total_files,total_bytes,max_bytes,dirty_files:u64`
-- `EventBuffer` `4KiB align(4096)`: `write_idx,read_idx,event_count:AtomicU32 + events[MAX_EVENT_COUNT]`
+- `EventBuffer` `4KiB align(4096)`: `write_idx,read_idx,event_count,modifiers:AtomicU32 + key_down:[AtomicU64;4] + events[MAX_EVENT_COUNT]`, `modifiers`+`key_down` current only while window focused
 
 Userspace wrappers: Rust `user/rustspace/src/lib.rs:223-547` `syscall6` (`r10` dance), typed `sys_*`, `Arena` `64KiB` slabs via `sys_allocate`; C `user/libc/syscall.h` + `syscall.c` + `crt0.c`.
 

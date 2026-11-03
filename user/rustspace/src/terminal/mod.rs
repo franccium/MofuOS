@@ -563,7 +563,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             _pad: [0; 3],
             value: key as u32,
             extra: key_state as u32,
-            reserved: 0,
+            modifiers: 0,
         };
         if let Some(action) = input::translate(tmp_event, &mut self.input_state) {
             self.apply_action(action);

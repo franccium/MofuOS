@@ -187,7 +187,7 @@ Wire types that must match kernel <-> `user/rustspace/src/lib.rs`:
 - `CpuInfoFlat` 32B `align(16)`: `vendor,family,model,stepping,display_family:u16,display_model,cache_line_size,apic_id,features:u32, tsc_frequency_hz:u64, boot_tsc:u64, max_cpuid_leaf:u32, max_extended_cpuid_leaf:u32, core_count:u8` (`cpuinfo.rs:49-65`, `rustspace:183-198`).
 - `CircularBufferInfo` 24B: `virtual_base:u64, view_size:u64, total_virtual_size:u64` (`circular_buffer.rs:29-33`, `rustspace:134-139`).
 - `CacheStatsFlat` 32B: `total_files,total_bytes,max_bytes,dirty_files:u64` (`syscall.rs:1159-1165`, `rustspace:860-863`).
-- `EventBuffer` 4KiB `align(4096)`: `write_idx,read_idx,event_count:AtomicU32 + events[MAX_EVENT_COUNT]` (`rustspace:728-733`), per-window `EventBuffer` mapped via `Window.event_buffer` (kernel heap phys → `WindowInfo.event_buffer_vaddr`).
+- `EventBuffer` 4KiB `align(4096)`: `write_idx,read_idx,event_count,modifiers:AtomicU32 + key_down:[AtomicU64;4] + events[MAX_EVENT_COUNT]`, `modifiers`+`key_down` current only while window focused (`rustspace:728-733`), per-window `EventBuffer` mapped via `Window.event_buffer` (kernel heap phys → `WindowInfo.event_buffer_vaddr`).
 
 ---
 ## 3. Context Switch Details (userspace ↔ kernel ↔ scheduler)

@@ -1,6 +1,10 @@
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::{memory::memory::PAGE_SIZE, serial_println};
+use crate::{
+    events::keyboard_state::{BITSET_WORD_COUNT, KeyBitset},
+    memory::memory::PAGE_SIZE,
+    serial_println,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -30,6 +34,20 @@ bitflags::bitflags! {
     }
 }
 
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct KeyModifiers: u32 {
+        const LSHIFT = 0b0000_0001;
+        const RSHIFT = 0b0000_0010;
+        const LCTRL = 0b0000_0100;
+        const RCTRL = 0b0000_1000;
+        const LALT = 0b0001_0000;
+        const RALT = 0b0010_0000;
+        const NUMLOCK = 0b0100_0000;
+        const CAPSLOCK = 0b1000_0000;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MouseEvent {
     pub x_delta: i16,
@@ -56,6 +74,8 @@ pub enum EventType {
     CharEvent = 1,
     KeyEvent = 2,
     MouseEvent = 3,
+    // physical key transition, unlike KeyEvent and CharEvent it reports every key and release
+    KeyStateEvent = 4,
 }
 
 pub type EventBufferResult<T> = Result<T, EventBufferError>;
@@ -72,7 +92,8 @@ pub struct InputEvent {
     pub _pad: [u8; 3],
     pub value: u32,
     pub extra: u32,
-    pub reserved: u32,
+    // modifiers held when a key event happened, KeyModifiers bits
+    pub modifiers: u32,
 }
 
 impl InputEvent {
@@ -82,16 +103,31 @@ impl InputEvent {
             _pad: [0; 3],
             value,
             extra,
-            reserved: 0,
+            modifiers: 0,
         }
     }
 
-    pub fn new_key(keycode: u32, state: KeyState) -> Self {
-        Self::new(EventType::KeyEvent, keycode, state as u32)
+    pub const fn with_modifiers(self, modifiers: KeyModifiers) -> Self {
+        Self {
+            modifiers: modifiers.bits(),
+            ..self
+        }
     }
 
-    pub fn new_char(keycode: u32, state: KeyState) -> Self {
-        Self::new(EventType::CharEvent, keycode, state as u32)
+    pub fn key_modifiers(&self) -> KeyModifiers {
+        KeyModifiers::from_bits_truncate(self.modifiers)
+    }
+
+    pub fn new_key(keycode: u32, state: KeyState, modifiers: KeyModifiers) -> Self {
+        Self::new(EventType::KeyEvent, keycode, state as u32).with_modifiers(modifiers)
+    }
+
+    pub fn new_key_state(keycode: u32, state: KeyState, modifiers: KeyModifiers) -> Self {
+        Self::new(EventType::KeyStateEvent, keycode, state as u32).with_modifiers(modifiers)
+    }
+
+    pub fn new_char(keycode: u32, state: KeyState, modifiers: KeyModifiers) -> Self {
+        Self::new(EventType::CharEvent, keycode, state as u32).with_modifiers(modifiers)
     }
 
     pub fn new_mouse(mouse_event: MouseEvent) -> Self {
@@ -125,7 +161,8 @@ impl InputEvent {
     }
 }
 
-const BUFFER_HEADER_SIZE: usize = core::mem::size_of::<AtomicU32>() * 3;
+const BUFFER_HEADER_SIZE: usize =
+    core::mem::size_of::<AtomicU32>() * 4 + core::mem::size_of::<AtomicU64>() * BITSET_WORD_COUNT;
 const MAX_EVENT_COUNT: usize =
     (PAGE_SIZE - BUFFER_HEADER_SIZE) / core::mem::size_of::<InputEvent>();
 
@@ -135,8 +172,14 @@ pub struct EventBuffer {
     pub read_idx: AtomicU32,
     pub event_count: AtomicU32,
 
+    // only kept current while the window is focused, userspace polls these without a syscall
+    pub modifiers: AtomicU32,
+    pub key_down: [AtomicU64; BITSET_WORD_COUNT],
+
     pub events: [InputEvent; MAX_EVENT_COUNT],
 }
+
+const _: () = assert!(core::mem::size_of::<EventBuffer>() == PAGE_SIZE);
 
 impl EventBuffer {
     pub const fn new() -> Self {
@@ -144,12 +187,21 @@ impl EventBuffer {
             write_idx: AtomicU32::new(0),
             read_idx: AtomicU32::new(0),
             event_count: AtomicU32::new(0),
+            modifiers: AtomicU32::new(0),
+            key_down: [const { AtomicU64::new(0) }; BITSET_WORD_COUNT],
             events: [InputEvent::new(EventType::None, 0, 0); MAX_EVENT_COUNT],
         }
     }
 
     pub fn is_empty(&self) -> bool {
         self.event_count.load(Ordering::Acquire) == 0
+    }
+
+    pub fn publish_keyboard_state(&self, key_down: &KeyBitset, modifiers: KeyModifiers) {
+        for (shared_word, word) in self.key_down.iter().zip(key_down.words) {
+            shared_word.store(word, Ordering::Relaxed);
+        }
+        self.modifiers.store(modifiers.bits(), Ordering::Release);
     }
 
     /// We assume only one event source can push at one time

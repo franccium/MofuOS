@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::events::event_buffer::{InputEvent, KeyState, Keys};
+use crate::events::event_buffer::{InputEvent, KeyModifiers, KeyState, Keys};
 use crate::graphics::compositor;
 use crate::io::serial;
 use crate::process::execution::jump_to_userspace;
@@ -1078,12 +1078,22 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
             PcKeyState::Down | PcKeyState::SingleShot => KeyState::Pressed,
             PcKeyState::Up => KeyState::Released,
         };
-        if let Some(decoded_key) = keyboard.process_keyevent(key_event) {
+
+        let key_code = key_event.code;
+        let decoded_key = keyboard.process_keyevent(key_event);
+        let modifiers = KeyModifiers::from(keyboard.get_modifiers());
+
+        // decoding returns None for every key release, so key state is reported separately.
+        // Pushed first so hotkeys see their modifier as held
+        let _ = compositor::get_input_event_buffer()
+            .push(InputEvent::new_key_state(key_code as u32, key_state, modifiers));
+
+        if let Some(decoded_key) = decoded_key {
             match decoded_key {
                 DecodedKey::Unicode(c) => {
                     unsafe {
                         compositor::get_input_event_buffer()
-                            .push(InputEvent::new_char(c as u32, key_state));
+                            .push(InputEvent::new_char(c as u32, key_state, modifiers));
                     };
                     if KEYBOARD_DEBUG_PRINT {
                         serial_println_core!("keyboard_handler: Pushed char: {}", c);
@@ -1092,7 +1102,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
                 DecodedKey::RawKey(k) => {
                     unsafe {
                         compositor::get_input_event_buffer()
-                            .push(InputEvent::new_key(k as u32, key_state));
+                            .push(InputEvent::new_key(k as u32, key_state, modifiers));
                     };
                     if KEYBOARD_DEBUG_PRINT {
                         serial_println_core!("keyboard_handler: Pushed key: {:?}", k);
@@ -1100,6 +1110,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
                 }
             };
         }
+        serial_println_core!("Keyboard scancode: {:#x}, key state: {:?}", scancode, key_state);
     }
 
     unsafe {

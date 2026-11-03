@@ -819,7 +819,7 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -828,10 +828,15 @@ pub struct InputEvent {
     pub _pad: [u8; 3],
     pub value: u32,
     pub extra: u32,
-    pub reserved: u32,
+    // modifiers held when a key event happened, KeyModifiers bits
+    pub modifiers: u32,
 }
 
 impl InputEvent {
+    pub fn key_modifiers(&self) -> KeyModifiers {
+        KeyModifiers::from_bits_truncate(self.modifiers)
+    }
+
     pub fn decode_mouse(&self) -> MouseEvent {
         let x_delta = self.value as i32 as i16;
         let y_delta = (self.extra & 0xFFFF) as i16 as i16;
@@ -858,6 +863,8 @@ pub enum EventType {
     CharEvent = 1,
     KeyEvent = 2,
     MouseEvent = 3,
+    // physical key transition, unlike KeyEvent and CharEvent it reports every key and release
+    KeyStateEvent = 4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -877,6 +884,23 @@ pub enum Keys {
     LeftAlt = 0x120000,
     Backspace = 0x080000,
     Tab = 0x090000,
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct KeyModifiers: u32 {
+        const LSHIFT = 0b0000_0001;
+        const RSHIFT = 0b0000_0010;
+        const LCTRL = 0b0000_0100;
+        const RCTRL = 0b0000_1000;
+        const LALT = 0b0001_0000;
+        const RALT = 0b0010_0000;
+        const NUMLOCK = 0b0100_0000;
+        const CAPSLOCK = 0b1000_0000;
+        const SHIFT = Self::LSHIFT.bits() | Self::RSHIFT.bits();
+        const CTRL = Self::LCTRL.bits() | Self::RCTRL.bits();
+        const ALT = Self::LALT.bits() | Self::RALT.bits();
+    }
 }
 
 bitflags::bitflags! {
@@ -910,7 +934,11 @@ impl AsciiChar {
 }
 
 const PAGE_SIZE: usize = 4096;
-const BUFFER_HEADER_SIZE: usize = core::mem::size_of::<AtomicU32>() * 3;
+const KEY_COUNT: usize = 256;
+const BITS_PER_WORD: usize = 64;
+const KEY_BITSET_WORD_COUNT: usize = KEY_COUNT / BITS_PER_WORD;
+const BUFFER_HEADER_SIZE: usize = core::mem::size_of::<AtomicU32>() * 4
+    + core::mem::size_of::<AtomicU64>() * KEY_BITSET_WORD_COUNT;
 const MAX_EVENT_COUNT: usize =
     (PAGE_SIZE - BUFFER_HEADER_SIZE) / core::mem::size_of::<InputEvent>();
 
@@ -919,8 +947,13 @@ pub struct EventBuffer {
     pub write_idx: AtomicU32,
     pub read_idx: AtomicU32,
     pub event_count: AtomicU32,
+    // only kept current while the window is focused
+    pub modifiers: AtomicU32,
+    pub key_down: [AtomicU64; KEY_BITSET_WORD_COUNT],
     pub events: [InputEvent; MAX_EVENT_COUNT],
 }
+
+const _: () = assert!(core::mem::size_of::<EventBuffer>() == PAGE_SIZE);
 
 pub struct EventReader {
     buffer: &'static EventBuffer,
@@ -935,6 +968,19 @@ impl EventReader {
     pub unsafe fn new(buffer_addr: usize) -> Self {
         let buffer = unsafe { &*(buffer_addr as *const EventBuffer) };
         Self { buffer }
+    }
+
+    /// Current state, not the state at the event being processed. For that use
+    /// InputEvent::key_modifiers. All keys read as up while the window is unfocused
+    pub fn is_key_down(&self, key: KeyCode) -> bool {
+        let index = key as usize;
+        let word = self.buffer.key_down[index / BITS_PER_WORD].load(Ordering::Acquire);
+
+        (word & (1u64 << (index % BITS_PER_WORD))) != 0
+    }
+
+    pub fn modifiers(&self) -> KeyModifiers {
+        KeyModifiers::from_bits_truncate(self.buffer.modifiers.load(Ordering::Acquire))
     }
 
     pub fn has_events(&self) -> bool {

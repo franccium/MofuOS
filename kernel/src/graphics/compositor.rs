@@ -1,7 +1,7 @@
 use crate::events::event_buffer::{
-    EventBuffer, EventType, InputEvent, KeyState, MouseButtons, MouseEvent,
+    EventBuffer, EventType, InputEvent, KeyModifiers, KeyState, MouseButtons, MouseEvent,
 };
-use crate::events::keyboard_state::{KEY_COUNT, KeyboardState};
+use crate::events::keyboard_state::{KEY_COUNT, KeyBitset, KeyboardState};
 use pc_keyboard::KeyCode;
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
@@ -267,6 +267,7 @@ impl Compositor {
                 match windows.get_mut(window_id as usize) {
                     Some(window) => {
                         window.z_index = max_z_index + 1;
+                        let new_event_buffer = window.event_buffer;
                         self.currently_focused_window
                             .store(window_id, Ordering::Release);
 
@@ -278,6 +279,17 @@ impl Compositor {
                             for (i, window) in visible.iter_mut().enumerate() {
                                 window.z_index = i as u8;
                             }
+                        }
+
+                        let old_window = windows.get(focused_window as usize);
+                        if let Some(event_buffer) = old_window.and_then(|w| w.event_buffer) {
+                            self.release_held_keys(event_buffer);
+                        }
+                        if let Some(event_buffer) = new_event_buffer {
+                            event_buffer.publish_keyboard_state(
+                                &self.keyboard_state.key_down,
+                                self.keyboard_state.modifiers,
+                            );
                         }
 
                         unsafe {
@@ -300,6 +312,23 @@ impl Compositor {
                 }
             }
         }
+    }
+
+    /// The real releases go to the newly focused window, we need to clear the old focued window state
+    /// so it doesnt see the held keys as stuck
+    fn release_held_keys(&self, event_buffer: &EventBuffer) {
+        for key in 0..KEY_COUNT {
+            if self.keyboard_state.key_down.test(key as u8) {
+                let release_event = InputEvent::new_key_state(
+                    key as u32,
+                    KeyState::Released,
+                    KeyModifiers::empty(),
+                );
+                let _ = event_buffer.push(release_event);
+            }
+        }
+
+        event_buffer.publish_keyboard_state(&KeyBitset::new(), KeyModifiers::empty());
     }
 
     //TODO: actually do something with the invalid window id markings
@@ -391,6 +420,9 @@ impl Compositor {
                 EventType::KeyEvent => {
                     self.handle_keyboard_event(event);
                 }
+                EventType::KeyStateEvent => {
+                    self.handle_key_state_event(event);
+                }
                 _ => {
                     if let Some(event_buffer) = self.get_focused_window_event_buffer() {
                         let _ = event_buffer.push(event);
@@ -412,11 +444,27 @@ impl Compositor {
             .and_then(|window| window.event_buffer)
     }
 
+    fn handle_key_state_event(&mut self, event: InputEvent) {
+        debug_assert!((event.value as usize) < KEY_COUNT);
+        self.keyboard_state.update(
+            event.value as u8,
+            KeyState::from_raw(event.extra),
+            event.key_modifiers(),
+        );
+
+        if let Some(event_buffer) = self.get_focused_window_event_buffer() {
+            event_buffer.publish_keyboard_state(
+                &self.keyboard_state.key_down,
+                self.keyboard_state.modifiers,
+            );
+            let _ = event_buffer.push(event);
+        }
+    }
+
     pub fn handle_keyboard_event(&mut self, event: InputEvent) {
         debug_assert!((event.value as usize) < KEY_COUNT);
         let key = event.value as u8;
         let state = KeyState::from_raw(event.extra);
-        self.keyboard_state.update(key, state);
 
         if self.keyboard_state.is_down(KeyCode::LAlt) && state == KeyState::Pressed {
             if key == KeyCode::ArrowLeft as u8 {
@@ -430,6 +478,14 @@ impl Compositor {
                 //TODO: focused_window_id.clamp(0, self.windows.len());
                 self.focus_window(new_focused_window_id);
             }
+        }
+        if self.keyboard_state.is_down(KeyCode::LAlt)
+        {
+            serial_println_core!(
+                "Compositor: LAlt is down, key {} state {:?}",
+                key,
+                state
+            );
         }
 
         if let Some(event_buffer) = self.get_focused_window_event_buffer() {
