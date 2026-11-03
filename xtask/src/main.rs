@@ -614,17 +614,6 @@ fn ensure_ata_disk(root: &Path) -> PathBuf {
     ata_path
 }
 
-fn fat32_image(root: &Path) {
-    let img = root.join("target/test_disk_image.fat32.img");
-    let script = root.join("scripts/create_fat32_image.sh");
-    if script.exists() {
-        run(Command::new(script).arg(&img).arg("16").current_dir(root));
-    } else {
-        eprintln!("scripts/create_fat32_image.sh not found - skipping");
-    }
-    let _ = fs::copy(&img, root.join("test_disk_image.fat32.img"));
-}
-
 fn qemu_flags() -> Vec<String> {
     env::var("QEMUFLAGS")
         .unwrap_or_else(|_| "-m 2G".to_string())
@@ -881,7 +870,7 @@ fn run_usertests(root: &Path, filters: &[String]) {
 
 fn print_usage() {
     eprintln!(
-        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO + ATA disk and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n   ata-disk     Create ATA disk image (storage/ata_disk.img)\n  test [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  usertest [filter…] Build and run userspace integration tests (kernel/src/bin/test_user*.rs, test_usermem*.rs)\n  fat32-image  Create test FAT32 disk image\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
+        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO + ATA disk and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n   ata-disk     Create ATA disk image (storage/ata_disk.img)\n  test [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  usertest [filter…] Build and run userspace integration tests (kernel/src/bin/test_user*.rs, test_usermem*.rs)\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
     );
 }
 
@@ -908,7 +897,6 @@ fn main() {
         }
         Some("test") => run_tests(&root, &extra),
         Some("usertest") => run_usertests(&root, &extra),
-        Some("fat32-image") => fat32_image(&root),
         Some("clean") => clean(&root),
         Some("fmt") => fmt(&root, &extra),
         Some("clippy") => clippy(&root, &extra),

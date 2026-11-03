@@ -8,7 +8,7 @@ use crate::memory::get_frame_allocator;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
 use crate::process::elf_loader::ODYS_ELF;
-use crate::process::process::{FileDescriptor, PROCESS_WINDOW_BUFFER_BASE};
+use crate::process::process::{ExecutionContext, FileDescriptor, PROCESS_WINDOW_BUFFER_BASE};
 use crate::process::{CORE_POOL, ElfLoadInfo};
 use crate::serial_println;
 use crate::util::cpuinfo::{CpuInfoFlat, get_cpu_info_for_core};
@@ -111,6 +111,8 @@ pub enum SyscallNumber {
 struct PerCoreSyscallData {
     stack_top: u64,
     _stack: [u8; SYSCALL_STACK_SIZE],
+    // placed above the stack top so pushes never touch it; keeps _stack at offset 8
+    user_rsp_scratch: u64,
 }
 
 impl PerCoreSyscallData {
@@ -118,9 +120,13 @@ impl PerCoreSyscallData {
         Self {
             stack_top: 0,
             _stack: [0u8; SYSCALL_STACK_SIZE],
+            user_rsp_scratch: 0,
         }
     }
 }
+
+const SYSCALL_USER_RSP_SCRATCH_OFFSET: usize =
+    core::mem::offset_of!(PerCoreSyscallData, user_rsp_scratch);
 
 #[repr(C, align(4096))]
 struct GuardedSyscallSlot {
@@ -197,6 +203,7 @@ const MSR_KERNEL_GS_BASE: u32 = 0xC0000102;
 
 #[repr(C)]
 pub struct SyscallFrame {
+    pub r15: u64,
     pub r14: u64,
     pub r13: u64,
     pub r12: u64,
@@ -213,7 +220,30 @@ pub struct SyscallFrame {
 
     pub rflags: u64,   // r11
     pub user_rip: u64, // rcx
-    pub user_rsp: u64, // r15
+    pub user_rsp: u64,
+}
+
+impl SyscallFrame {
+    /// Saves the user register state so a yielded process resumes with intact callee-saved registers
+    pub fn store_into_context(&self, context: &mut ExecutionContext) {
+        // syscall return value seen by the user after resume
+        context.rax = 0;
+        context.rbx = self.rbx;
+        context.rdx = self.arg3;
+        context.rsi = self.arg2;
+        context.rdi = self.arg1;
+        context.rbp = self.rbp;
+        context.rsp = self.user_rsp;
+        context.r8 = self.arg5;
+        context.r9 = self.arg6;
+        context.r10 = self.arg4;
+        context.r12 = self.r12;
+        context.r13 = self.r13;
+        context.r14 = self.r14;
+        context.r15 = self.r15;
+        context.rip = self.user_rip;
+        context.rflags = self.rflags;
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -221,11 +251,11 @@ pub struct SyscallFrame {
 pub unsafe extern "C" fn syscall_handler() -> ! {
     naked_asm!(
         "swapgs",
-        "mov r15, rsp",
+        "mov gs:[{user_rsp_offset}], rsp",
         "mov rsp, gs:0",
+        "push qword ptr gs:[{user_rsp_offset}]",
         "swapgs",
 
-        "push r15",
         "push rcx",
         "push r11",
 
@@ -241,11 +271,19 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
         "push r12",
         "push r13",
         "push r14",
+        "push r15",
 
         "mov rdi, rsp",
 
+        // stack top is 8 mod 16 and 16 regs were pushed, realign for the SysV call
+        "sub rsp, 8",
         "call {handle_syscall}",
+        "add rsp, 8",
 
+        // RSP will point at the user stack while still in ring 0, sysretq restores IF from r11
+        "cli",
+
+        "pop r15",
         "pop r14",
         "pop r13",
         "pop r12",
@@ -261,13 +299,12 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 
         "pop r11",
         "pop rcx",
-        "pop r15",
-
-        "mov rsp, r15",
+        "pop rsp",
 
         "sysretq",
 
         handle_syscall = sym handle_syscall_inner,
+        user_rsp_offset = const SYSCALL_USER_RSP_SCRATCH_OFFSET,
     )
 }
 
@@ -377,9 +414,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 {
                     let mut pm = PROCESS_MANAGER.lock();
                     if let Ok(proc) = pm.get_process_mut(caller_pid) {
-                        proc.execution_context.rip = frame.user_rip;
-                        proc.execution_context.rsp = frame.user_rsp;
-                        proc.execution_context.rflags = frame.rflags;
+                        frame.store_into_context(&mut proc.execution_context);
                     }
                 }
                 unsafe {
@@ -498,9 +533,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             {
                 let mut pm = PROCESS_MANAGER.lock();
                 if let Ok(proc) = pm.get_process_mut(pid) {
-                    proc.execution_context.rip = frame.user_rip;
-                    proc.execution_context.rsp = frame.user_rsp;
-                    proc.execution_context.rflags = frame.rflags;
+                    frame.store_into_context(&mut proc.execution_context);
                 }
             }
 
