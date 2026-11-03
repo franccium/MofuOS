@@ -1,4 +1,3 @@
-use crate::asm::ap_trampoline;
 use crate::interrupts::{
     self, get_lapic_base_addr, get_lapic_base_addr_phys, init_timer_for_core,
     map_local_apic_for_current_core, tsc_read,
@@ -17,6 +16,8 @@ use x86_64::instructions::hlt;
 use x86_64::structures::paging::{
     FrameAllocator, Mapper, OffsetPageTable, PageTable, Size4KiB, frame,
 };
+use core::sync::atomic::{AtomicU64, Ordering};
+use x86_64::VirtAddr;
 
 #[derive(Clone, Copy)]
 pub struct CpuInfo {
@@ -340,26 +341,6 @@ pub fn get_cpu_info_for_core(core_id: u8) -> &'static CpuInfo {
     }
 }
 
-// pub fn get_lapic_base_addr() -> *mut u32 {
-//     const IA32_APIC_BASE_MSR: u32 = 0x1B;
-//     unsafe {
-//         let low: u32;
-//         let high: u32;
-//         asm!(
-//             "msr_read",
-//             in("ecx") IA32_APIC_BASE_MSR,
-//             out("eax") low,
-//             out("edx") high,
-//             options(nostack, preserves_flags)
-//         );
-//         let apic_base = ((high as u64) << 32) | (low as u64);
-
-//         let base_addr = apic_base & 0xFFFFF000;
-//         base_addr as *mut u32
-//     }
-// }
-
-//TODO: For now assume APIC ID = core index
 pub fn get_current_core_id() -> u8 {
     unsafe {
         let lapic = get_lapic_base_addr();
@@ -374,31 +355,6 @@ pub fn get_current_cpu_info() -> &'static CpuInfo {
     let core_id = get_current_core_id();
     get_cpu_info_for_core(core_id)
 }
-
-unsafe extern "C" {
-    static ap_trampoline_start: u8;
-    static ap_trampoline_end: u8;
-}
-
-/// Start an AP core using INIT-SIPI-SIPI sequence
-const TRAMPOLINE_PHYS: u64 = 0x8000;
-const MAGIC_OFFSET: u64 = 0x8FF0; // AP writes "APST" here
-pub const SECRET_MESSAGE_OFFSET: u64 = 0x8F30; // AP writes "APST" here
-pub const AP_CORE_CR3_MESSAGE_OFFSET: u64 = 0x8F40;
-pub const AP_CORE_APIC_ID_MESSAGE_OFFSET: u64 = 0x8F48;
-pub const AP_CORE_FUNCTION_ACHIEVED: u64 = 0x1234CCCC;
-
-const ACK_OFFSET: u64 = MAGIC_OFFSET; // BSP writes 1 here
-const DONE_OFFSET: u64 = MAGIC_OFFSET; // AP writes 1 when leaving trampoline
-const GDT_OFFSET: u64 = 0x8FF8; // GDT descriptor
-const CR3_OFFSET: u64 = 0x9000;
-const STACK_OFFSET: u64 = 0x9008;
-const ENTRY_OFFSET: u64 = 0x9010;
-
-const WRITTEN_CR3_OFFSET: u64 = 0x9020;
-
-use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::VirtAddr;
 
 use alloc::string::String;
 impl CpuFeatureFlags {

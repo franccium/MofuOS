@@ -23,7 +23,6 @@ MofuOS/
   limine.conf / bootloader/limine.conf — bootloader config (timeout 0, protocol limine)
   kernel/              — kernel crate (the only binary)
     Cargo.toml         — kernel dependencies
-    build.rs           — assembles + links AP trampoline binary blob
     src/
       main.rs          — binary entry: panic handler, QemuExitCode, main()
       boot.rs          — Limine requests, kmain() entry point
@@ -38,7 +37,7 @@ MofuOS/
       filesystem/      — Sirius VFS, FAT32 driver
       io/              — serial (uart_16550), disk abstraction
       util/            — APIC registers, MSR helpers, cpuinfo/SMP
-      asm/             — AP trampoline assembly
+      asm/             — 
       data_structures/ — Vec, Dequeue (no-std replacements)
       programs/        — Theophe (terminal/text renderer), arche (empty stub)
       tests_exp/       — in-kernel test runners (graphics, process, filesystem)
@@ -70,7 +69,6 @@ cargo xtask run   # or cargo x run (alias); legacy: make run
 This invokes `xtask::run_iso` which:
 1. Builds the kernel: `cargo build -p kernel --target x86_64-unknown-none -Z build-std=core,alloc`
 2. Builds user programs via `clang`/`ld.lld` + `user/rustspace` cargo
-3. Assembles the AP trampoline via `kernel/build.rs` (uses `cc` + `ld` + `objcopy`)
 4. Creates `target/template-x86_64.iso` with xorriso (Limine + kernel binary, plus compat copy at `template-x86_64.iso`)
 5. Ensures ATA disk at `storage/ata_disk.img` (64M) and OVMF at `target/ovmf/`
 6. Runs `log_splitter.py` in background (listens on two UNIX sockets for COM1/COM2)

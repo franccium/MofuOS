@@ -9,6 +9,8 @@ architecture.md
 esp
 notes/
 
+storage/
+
 kernel/kernel
 logs
 test_logs

@@ -25,8 +25,6 @@ cargo xtask clean    # cargo clean + rm iso/hdd
 cargo build -p kernel --target x86_64-unknown-none -Z build-std=core,alloc
 ```
 
-`kernel/build.rs` assembles AP trampoline via `cc`/`ld`/`objcopy` → `$OUT_DIR/ap_trampoline.bin` (env `AP_TRAMPOLINE_BIN`).
-
 `xtask` builds user programs: `clang --target=x86_64-unknown-elf -ffreestanding -mno-red-zone` + `ld.lld -T linker.ld`; Rust userspace `user/rustspace` `cargo +nightly build -Z build-std=core,alloc -Z json-target-spec --target x86_64-user.json`.
 
 Custom target `x86_64-kernel.json`: `code-model=large`, `disable-redzone=true`, `features="-mmx"`, `linker=rust-lld`, `linker-flavor=lld-elf`. Linker script `linker-x86_64.ld`: base `0xffffffff80000000`, `ENTRY(kmain)`, sections `.text` / `.rodata` / `.data` + Limine requests + `.bss`, discard `.eh_frame*`, `.note*`.

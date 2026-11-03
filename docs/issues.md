@@ -255,20 +255,6 @@ QEMU/development but violates the FAT32 spec for robust operation.
 (no MMIO, uses MSRs) and scales better with many cores. Currently not used.
 File: `kernel/src/boot.rs`
 
-### ISSUE-H2: AP trampoline identity mapping may not be used
-
-`setup_ap_trampoline_mapping` in `memory.rs` sets up identity maps for 0x8000
-and 0x9000, but the current boot path uses Limine's native MP bootstrap
-(`cpus[N].bootstrap(...)`) which does not need a custom trampoline.
-The trampoline in `asm/ap_trampoline.S` may be unused dead code.
-File: `kernel/src/memory/memory.rs`, `kernel/src/boot.rs`
-
-### ISSUE-H3: No SMP scaling beyond 2 cores
-
-QEMU is launched with `-smp cores=2`. The code supports MAX_CORES=16 but
-this has never been tested with more than 2. Scheduler and core pool
-initialization may have untested edge cases at higher core counts.
-
 ---
 
 ## Code Quality
