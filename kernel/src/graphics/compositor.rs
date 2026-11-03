@@ -1,6 +1,8 @@
 use crate::events::event_buffer::{
-    EventBuffer, EventType, InputEvent, Keys, MouseButtons, MouseEvent,
+    EventBuffer, EventType, InputEvent, KeyState, MouseButtons, MouseEvent,
 };
+use crate::events::keyboard_state::{KEY_COUNT, KeyboardState};
+use pc_keyboard::KeyCode;
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use crate::graphics::framebuffer::FrameBufferTarget;
@@ -68,6 +70,8 @@ pub struct Compositor {
 
     mouse_last_drawn_x: i32,
     mouse_last_drawn_y: i32,
+
+    keyboard_state: KeyboardState,
 }
 
 impl Compositor {
@@ -84,7 +88,12 @@ impl Compositor {
             cursor_visible: AtomicBool::new(true),
             mouse_last_drawn_x: 0,
             mouse_last_drawn_y: 0,
+            keyboard_state: KeyboardState::new(),
         }
+    }
+
+    pub fn keyboard_state(&self) -> &KeyboardState {
+        &self.keyboard_state
     }
 
     pub fn framebuffer_width(&self) -> u32 {
@@ -300,6 +309,8 @@ impl Compositor {
     pub fn process_input_events(&mut self) {
         let buffer = get_input_event_buffer();
 
+        self.keyboard_state.clear_transient();
+
         while let Some(event) = buffer.read() {
             match event.event_type {
                 EventType::MouseEvent => {
@@ -330,31 +341,33 @@ impl Compositor {
     }
 
     pub fn handle_keyboard_event(&mut self, event: InputEvent) {
-        let v = event.value;
-        if v == Keys::LeftAlt as u32 {
-            serial_println_core!("Compositor intercepted Left Alt")
-        }
-        if v == Keys::ArrowLeft as u32 {
-            let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
-            let new_focused_window_id = focused_window_id.saturating_sub(1);
-            //TODO: focused_window_id.clamp(0, self.windows.len());
-            serial_println_core!(
-                "Switch focus from {} to {}",
-                focused_window_id,
-                new_focused_window_id
-            );
-            self.focus_window(new_focused_window_id);
-        }
-        if v == Keys::ArrowRight as u32 {
-            let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
-            let (new_focused_window_id, _) = focused_window_id.overflowing_add(1);
-            //TODO: focused_window_id.clamp(0, self.windows.len());
-            serial_println_core!(
-                "Switch focus from {} to {}",
-                focused_window_id,
-                new_focused_window_id
-            );
-            self.focus_window(new_focused_window_id);
+        debug_assert!((event.value as usize) < KEY_COUNT);
+        let key = event.value as u8;
+        let state = KeyState::from_raw(event.extra);
+        self.keyboard_state.update(key, state);
+
+        if self.keyboard_state.is_down(KeyCode::LAlt) && state == KeyState::Pressed {
+            if key == KeyCode::ArrowLeft as u8 {
+                let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
+                let new_focused_window_id = focused_window_id.saturating_sub(1);
+                //TODO: focused_window_id.clamp(0, self.windows.len());
+                serial_println_core!(
+                    "Switch focus from {} to {}",
+                    focused_window_id,
+                    new_focused_window_id
+                );
+                self.focus_window(new_focused_window_id);
+            } else if key == KeyCode::ArrowRight as u8 {
+                let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
+                let (new_focused_window_id, _) = focused_window_id.overflowing_add(1);
+                //TODO: focused_window_id.clamp(0, self.windows.len());
+                serial_println_core!(
+                    "Switch focus from {} to {}",
+                    focused_window_id,
+                    new_focused_window_id
+                );
+                self.focus_window(new_focused_window_id);
+            }
         }
 
         if let Some(event_buffer) = self.get_focused_window_event_buffer() {
