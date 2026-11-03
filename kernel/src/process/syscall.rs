@@ -724,7 +724,8 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                     out.event_buffer_vaddr = match w.event_buffer {
                         Some(buffer) => buffer as *const EventBuffer as u64,
                         None => 0,
-                    }
+                    };
+                    out.front_buffer_offset = compositor.max_window_buffer_bytes();
                 }
                 _ => {
                     return u64::MAX;

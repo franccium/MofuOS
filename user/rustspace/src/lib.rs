@@ -936,6 +936,10 @@ impl EventReader {
         }
 
         let idx = self.buffer.read_idx.load(Ordering::Acquire) as usize;
+        if idx >= MAX_EVENT_COUNT {
+            self.buffer.read_idx.store(0, Ordering::Release);
+            return None;
+        }
 
         //println!("read_idx: {}, window_id: {}", idx, _window_id);
 
@@ -1020,6 +1024,7 @@ pub struct WindowInfo {
     pub width: u32,
     pub height: u32,
     pub event_buffer_vaddr: u64,
+    pub front_buffer_offset: u64,
 }
 
 impl WindowInfo {
@@ -1028,6 +1033,7 @@ impl WindowInfo {
             width: 0,
             height: 0,
             event_buffer_vaddr: 0,
+            front_buffer_offset: 0,
         }
     }
 }

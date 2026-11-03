@@ -46,7 +46,9 @@ impl CircularBuffer {
         let data_size = align_up(size_bytes as u64, PAGE_SIZE as u64) as usize;
         let total_virt_size = 2 * data_size;
 
-        if let Some(virt_view_base) = proces_memory_layout.allocate_virtual_range(total_virt_size) {
+        if let Some(virt_view_base) =
+            proces_memory_layout.allocate_virtual_range(total_virt_size, page_flags)
+        {
             let virt_second_view_base = virt_view_base + data_size as u64;
 
             let page_table = proces_memory_layout.top_page_table_phys;

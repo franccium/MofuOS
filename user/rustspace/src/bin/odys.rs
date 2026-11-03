@@ -477,7 +477,12 @@ pub extern "C" fn main() -> ! {
         rustspace::println!("Odys: map_window_buffer failed");
         unsafe { rustspace::sys_exit(1) }
     }
-    let pixels_second = ((pixels as u64) + 8 * 1024 * 1024) as *mut u32;
+    let mut window_info = WindowInfo::zeroed();
+    if !unsafe { sys_get_window_info(window_id, &mut window_info) } {
+        rustspace::println!("Odys: get_window_info failed");
+        unsafe { rustspace::sys_exit(1) }
+    }
+    let pixels_second = ((pixels as u64) + window_info.front_buffer_offset) as *mut u32;
 
     let (width, height) = unsafe { rustspace::sys_get_window_size(window_id) };
     if width == 0 || height == 0 {
@@ -485,7 +490,14 @@ pub extern "C" fn main() -> ! {
         unsafe { rustspace::sys_exit(1) }
     }
 
-    rustspace::println!("Odys: window {}x{} id={}", width, height, window_id);
+    rustspace::println!(
+        "Odys: window {}x{} id={} mapped at {:p}, front: {:p}",
+        width,
+        height,
+        window_id,
+        pixels,
+        pixels_second
+    );
 
     unsafe { rustspace::syscall1(rustspace::SYS_FOCUS_WINDOW, window_id as u64) };
 
@@ -526,7 +538,10 @@ pub extern "C" fn main() -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    rustspace::println!("Odys: panic");
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    match info.location() {
+        Some(loc) => rustspace::println!("Odys: panic at {}: {}", loc, info.message()),
+        None => rustspace::println!("Odys: panic: {}", info.message()),
+    }
     unsafe { rustspace::sys_exit(1) }
 }

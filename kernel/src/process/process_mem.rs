@@ -2,7 +2,8 @@ use crate::memory::memory::{MemoryMapFrameAllocator, PAGE_SIZE};
 use crate::memory::usermem::UserMemoryManager;
 use crate::process::process::{
     PROCESS_HEAP_SIZE_BYTES, PROCESS_HEAP_VIRT_END, PROCESS_HEAP_VIRT_START,
-    PROCESS_USER_VADDR_ALLOC_END, PROCESS_USER_VADDR_ALLOC_START,
+    PROCESS_USER_VADDR_ALLOC_END, PROCESS_USER_VADDR_ALLOC_MAX_SIZE,
+    PROCESS_USER_VADDR_ALLOC_START,
 };
 use crate::{serial_println, serial_println_core};
 use alloc::vec::Vec;
@@ -18,9 +19,8 @@ pub struct ProcessMemoryLayout {
     pub stack_size: u64,
     pub heap_start: VirtAddr,
     pub heap_end: VirtAddr,
-    pub mapped_regions: Vec<MappedMemoryRegion>,
+    pub owned_regions: Vec<MappedMemoryRegion>,
     pub next_alloc_vaddr: VirtAddr,
-    pub allocated_ranges: Vec<(u64, u64)>, // (start, size)
 }
 
 #[derive(Debug, Clone)]
@@ -56,13 +56,12 @@ impl ProcessMemoryLayout {
 
         Ok(Self {
             top_page_table_phys,
-            mapped_regions: Vec::new(),
+            owned_regions: Vec::new(),
             stack_top: VirtAddr::new(0),
             stack_size: 0u64,
             heap_start: VirtAddr::new(PROCESS_HEAP_VIRT_START),
             heap_end: VirtAddr::new(PROCESS_HEAP_VIRT_START),
             next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
-            allocated_ranges: Vec::new(),
         })
     }
 
@@ -126,7 +125,7 @@ impl ProcessMemoryLayout {
             protection_flags,
             frame_allocator,
         )?;
-        self.mapped_regions.push(MappedMemoryRegion {
+        self.owned_regions.push(MappedMemoryRegion {
             start_virt: self.heap_end,
             size_bytes: grow_by,
             page_flags: protection_flags,
@@ -142,7 +141,14 @@ impl ProcessMemoryLayout {
         Ok(self.heap_end)
     }
 
-    pub fn allocate_virtual_range(&mut self, size_bytes: usize) -> Option<VirtAddr> {
+    pub fn allocate_virtual_range(
+        &mut self,
+        size_bytes: usize,
+        page_flags: PageTableFlags,
+    ) -> Option<VirtAddr> {
+        if size_bytes as u64 > PROCESS_USER_VADDR_ALLOC_MAX_SIZE {
+            return None;
+        }
         let aligned_size = align_to_page_size(size_bytes as u64);
 
         let alloc_vaddr = self.next_alloc_vaddr.as_u64();
@@ -153,17 +159,64 @@ impl ProcessMemoryLayout {
                 "allocate_virtual_range: range_end is over the user vaddr alloc end: {}, trying to find a free gap",
                 range_end
             );
-            return self.find_free_gap(aligned_size as usize);
+            let gap_vaddr = self.find_free_gap(aligned_size as usize)?;
+            self.owned_regions.push(MappedMemoryRegion {
+                start_virt: gap_vaddr,
+                size_bytes: aligned_size,
+                page_flags,
+            });
+            return Some(gap_vaddr);
         }
 
         self.next_alloc_vaddr = VirtAddr::new(range_end);
-        self.allocated_ranges.push((alloc_vaddr, aligned_size));
+        self.owned_regions.push(MappedMemoryRegion {
+            start_virt: VirtAddr::new(alloc_vaddr),
+            size_bytes: aligned_size,
+            page_flags,
+        });
 
         Some(VirtAddr::new(alloc_vaddr))
     }
 
     fn find_free_gap(&self, size_bytes: usize) -> Option<VirtAddr> {
-        //TODO:
+        let aligned_size = align_to_page_size(size_bytes as u64);
+        if aligned_size == 0 {
+            return None;
+        }
+
+        let window_start = PROCESS_USER_VADDR_ALLOC_START;
+        let window_end = PROCESS_USER_VADDR_ALLOC_END;
+
+        let mut window_regions: Vec<(u64, u64)> = Vec::new();
+        for region in self.owned_regions.iter() {
+            if region.size_bytes == 0 {
+                continue;
+            }
+            let region_start = region.start_virt.as_u64();
+            let region_end = region_start.saturating_add(region.size_bytes);
+            if region_end <= window_start || region_start >= window_end {
+                continue;
+            }
+            let clipped_start = align_to_page_size(region_start.max(window_start));
+            let clipped_end = align_to_page_size(region_end.min(window_end));
+            if clipped_start < clipped_end {
+                window_regions.push((clipped_start, clipped_end));
+            }
+        }
+        window_regions.sort_unstable_by_key(|region| region.0);
+
+        let mut cursor = window_start;
+        for (region_start, region_end) in window_regions {
+            if region_start >= cursor.saturating_add(aligned_size) {
+                return Some(VirtAddr::new(cursor));
+            }
+            cursor = cursor.max(region_end);
+        }
+
+        if cursor.saturating_add(aligned_size) <= window_end {
+            return Some(VirtAddr::new(cursor));
+        }
+
         None
     }
 
@@ -187,59 +240,24 @@ impl ProcessMemoryLayout {
             owned_phys.push(phys);
         };
 
-        for region in self.mapped_regions.iter() {
+        for region in self.owned_regions.iter() {
             let start = region.start_virt;
             let size = region.size_bytes;
-            if size != 0 {
-                let start_page =
-                    x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
-                let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
-                    start + size - 1u64,
-                );
-
-                for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page)
-                {
-                    if let Some(phys) =
-                        user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address())
-                    {
-                        push_owned(phys);
-                    }
-                }
+            if size == 0 {
+                continue;
             }
-        }
 
-        if self.stack_size > 0 {
-            let stack_bottom = self.stack_top - self.stack_size;
             let start_page =
-                x86_64::structures::paging::Page::<Size4KiB>::containing_address(stack_bottom);
+                x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
             let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
-                self.stack_top - 1u64,
+                start + size - 1u64,
             );
+
             for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
                 if let Some(phys) =
                     user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address())
                 {
                     push_owned(phys);
-                }
-            }
-        }
-
-        for &(start_u64, size_u64) in self.allocated_ranges.iter() {
-            if size_u64 != 0 {
-                let start = VirtAddr::new(start_u64);
-                let start_page =
-                    x86_64::structures::paging::Page::<Size4KiB>::containing_address(start);
-                let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
-                    start + size_u64 - 1u64,
-                );
-
-                for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page)
-                {
-                    if let Some(phys) =
-                        user_mgr.translate_user_virt_to_phys(pml4_phys, page.start_address())
-                    {
-                        push_owned(phys);
-                    }
                 }
             }
         }

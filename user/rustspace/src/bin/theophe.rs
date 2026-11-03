@@ -36,7 +36,12 @@ pub extern "C" fn main() -> ! {
         rustspace::println!("theophe: map_window_buffer failed");
         unsafe { rustspace::sys_exit(1) }
     }
-    let pixels_second = ((pixels as u64) + 8 * 1024 * 1024) as *mut u32;
+    let mut window_info = WindowInfo::zeroed();
+    if !unsafe { sys_get_window_info(window_id, &mut window_info) } {
+        rustspace::println!("theophe: get_window_info failed");
+        unsafe { rustspace::sys_exit(1) }
+    }
+    let pixels_second = ((pixels as u64) + window_info.front_buffer_offset) as *mut u32;
 
     let (width, height) = unsafe { rustspace::sys_get_window_size(window_id) };
     if width == 0 || height == 0 {
@@ -87,8 +92,6 @@ pub extern "C" fn main() -> ! {
 
     rustspace::init_programs();
 
-    let mut window_info = WindowInfo::zeroed();
-    let _ = unsafe { sys_get_window_info(window_id, &mut window_info) };
     rustspace::println!(
         "theophe: window info: {}x{} event_buffer_vaddr: {}",
         window_info.width,

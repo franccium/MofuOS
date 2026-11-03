@@ -35,6 +35,7 @@ pub struct WindowInfo {
     pub width: u32,
     pub height: u32,
     pub event_buffer_vaddr: u64,
+    pub front_buffer_offset: u64,
 }
 
 #[repr(C)]

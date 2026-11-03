@@ -5,7 +5,6 @@ use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
 use crate::process::kernel_thread::{KernelThread, ThreadGroup, ThreadState};
 use crate::process::process::{INVALID_PID, MAX_PRIORITY, PID, Process, ProcessState};
-use crate::process::process_mem::MappedMemoryRegion;
 use crate::process::scheduler::SCHEDULER;
 use crate::{serial_println, serial_println_core};
 use alloc::string::String;
@@ -146,9 +145,8 @@ impl ProcessManager {
                 stack_size: 0,
                 heap_start: VirtAddr::new(crate::process::process::PROCESS_HEAP_VIRT_START),
                 heap_end: VirtAddr::new(crate::process::process::PROCESS_HEAP_VIRT_START),
-                mapped_regions: alloc::vec::Vec::<MappedMemoryRegion>::new(),
+                owned_regions: alloc::vec::Vec::new(),
                 next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
-                allocated_ranges: alloc::vec::Vec::new(),
             },
         };
 

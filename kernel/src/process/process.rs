@@ -164,9 +164,8 @@ impl Process {
             stack_size: 0,
             heap_start: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_START),
             heap_end: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_START),
-            mapped_regions: alloc::vec::Vec::new(),
+            owned_regions: alloc::vec::Vec::new(),
             next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
-            allocated_ranges: alloc::vec::Vec::new(),
         };
 
         Ok(Self {
@@ -286,7 +285,7 @@ impl Process {
 
             // track mapped region
             memory_layout
-                .mapped_regions
+                .owned_regions
                 .push(crate::process::process_mem::MappedMemoryRegion {
                     start_virt: vaddr,
                     size_bytes: in_memory_size,
@@ -317,6 +316,15 @@ impl Process {
         };
         memory_layout.stack_top = stack_top;
         memory_layout.stack_size = stack_size;
+        memory_layout
+            .owned_regions
+            .push(crate::process::process_mem::MappedMemoryRegion {
+                start_virt: stack_top - stack_size,
+                size_bytes: stack_size,
+                page_flags: PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::NO_EXECUTE,
+            });
 
         let context = ExecutionContext::new(
             elf_info.entry_point,
