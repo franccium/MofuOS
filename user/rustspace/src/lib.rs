@@ -561,19 +561,25 @@ const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 const NUM_SIZES: usize = 10;
 
 struct FreeNode {
-    next: Option<*mut FreeNode>,
+    next: Option<core::ptr::NonNull<FreeNode>>,
 }
 
 unsafe impl Send for FreeNode {}
 unsafe impl Sync for FreeNode {}
 
 struct LargeNode {
-    next: Option<*mut LargeNode>,
+    next: Option<core::ptr::NonNull<LargeNode>>,
     size: usize,
 }
 
 unsafe impl Send for LargeNode {}
 unsafe impl Sync for LargeNode {}
+
+static_assertions::const_assert!(core::mem::size_of::<FreeNode>() <= BLOCK_SIZES[0]);
+
+const LARGE_NODE_SIZE: usize = core::mem::size_of::<LargeNode>();
+const LARGE_NODE_ALIGN: usize = core::mem::align_of::<LargeNode>();
+const LARGE_REMAINDER_MIN_BYTES: usize = 16;
 
 const fn list_index(requested: usize) -> Option<usize> {
     let mut i = 0;
@@ -589,8 +595,8 @@ const fn list_index(requested: usize) -> Option<usize> {
 pub struct Arena {
     cursor: core::sync::atomic::AtomicUsize,
     end: core::sync::atomic::AtomicUsize,
-    small_heads: spin::Mutex<[Option<*mut FreeNode>; NUM_SIZES]>,
-    large_head: spin::Mutex<Option<*mut LargeNode>>,
+    small_heads: spin::Mutex<[Option<core::ptr::NonNull<FreeNode>>; NUM_SIZES]>,
+    large_head: spin::Mutex<Option<core::ptr::NonNull<LargeNode>>>,
 }
 
 unsafe impl Send for Arena {}
@@ -656,9 +662,9 @@ unsafe impl GlobalAlloc for Arena {
                     let mut heads = self.small_heads.lock();
                     let node = heads[idx].take();
                     if let Some(n) = node {
-                        let next = unsafe { (*n).next };
+                        let next = unsafe { n.as_ref().next };
                         heads[idx] = next;
-                        Some(n as *mut u8)
+                        Some(n.as_ptr() as *mut u8)
                     } else {
                         None
                     }
@@ -686,33 +692,37 @@ unsafe impl GlobalAlloc for Arena {
         }
 
         if size > 4096 || align > 8 {
+            // the block must be able to hold a LargeNode once it is freed
+            let size = size.max(LARGE_NODE_SIZE);
+            let align = align.max(LARGE_NODE_ALIGN);
             let mut large = self.large_head.lock();
-            let mut prev: Option<*mut LargeNode> = None;
+            let mut prev: Option<core::ptr::NonNull<LargeNode>> = None;
             let mut cur = *large;
 
             while let Some(node) = cur {
-                let node_size = unsafe { (*node).size };
-                let node_ptr = node as usize;
+                let node_size = unsafe { node.as_ref().size };
+                let node_ptr = node.as_ptr() as usize;
                 let aligned_ptr = (node_ptr + align - 1) & !(align - 1);
                 let padding = aligned_ptr - node_ptr;
                 let needed = size + padding;
 
                 if node_size >= needed {
-                    let next = unsafe { (*node).next };
-                    if let Some(p) = prev {
-                        unsafe { (*p).next = next };
-                    } else {
-                        *large = next;
+                    let next = unsafe { node.as_ref().next };
+                    match prev {
+                        Some(mut p) => unsafe { p.as_mut().next = next },
+                        None => *large = next,
                     }
 
-                    let remainder_size = node_size - needed;
-                    if remainder_size >= core::mem::size_of::<LargeNode>() + 16 {
-                        let rem_ptr = (aligned_ptr + size) as *mut LargeNode;
+                    let node_end = node_ptr + node_size;
+                    let rem_start =
+                        (aligned_ptr + size + LARGE_NODE_ALIGN - 1) & !(LARGE_NODE_ALIGN - 1);
+                    if rem_start + LARGE_NODE_SIZE + LARGE_REMAINDER_MIN_BYTES <= node_end {
+                        let rem_ptr = rem_start as *mut LargeNode;
                         unsafe {
                             (*rem_ptr).next = *large;
-                            (*rem_ptr).size = remainder_size - core::mem::size_of::<LargeNode>();
+                            (*rem_ptr).size = node_end - rem_start;
                         }
-                        *large = Some(rem_ptr);
+                        *large = core::ptr::NonNull::new(rem_ptr);
                     }
                     core::mem::drop(large);
 
@@ -720,7 +730,7 @@ unsafe impl GlobalAlloc for Arena {
                 }
 
                 prev = cur;
-                cur = unsafe { (*node).next };
+                cur = unsafe { node.as_ref().next };
             }
 
             core::mem::drop(large);
@@ -786,18 +796,19 @@ unsafe impl GlobalAlloc for Arena {
                 unsafe {
                     (*node).next = heads[idx];
                 }
-                heads[idx] = Some(node);
+                heads[idx] = core::ptr::NonNull::new(node);
                 return;
             }
         }
 
+        debug_assert!(ptr as usize % LARGE_NODE_ALIGN == 0);
         let mut large = self.large_head.lock();
         let node = ptr as *mut LargeNode;
         unsafe {
             (*node).next = *large;
-            (*node).size = size;
+            (*node).size = size.max(LARGE_NODE_SIZE);
         }
-        *large = Some(node);
+        *large = core::ptr::NonNull::new(node);
     }
 }
 

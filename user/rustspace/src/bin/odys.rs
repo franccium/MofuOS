@@ -188,7 +188,7 @@ left arrow - exit current directory/current file\n
             let n = unsafe { sys_read_file(fd, &mut read_buf) };
             if n != usize::MAX {
                 let mut text = String::new();
-                for &byte in &read_buf {
+                for &byte in &read_buf[..n] {
                     if byte == b'\n'
                         || byte == b'\r'
                         || byte == b'\t'
