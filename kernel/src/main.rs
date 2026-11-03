@@ -122,7 +122,6 @@ fn main() -> ! {
             //serial_println_core!("Loop time: {} ns; {} ms", dt, dt as f32 / 1_000_000.0);
             hlt();
         }
-        }
     }
 
     exit_qemu(QemuExitCode::Success);

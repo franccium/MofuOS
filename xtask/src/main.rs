@@ -756,22 +756,7 @@ fn run_iso(root: &Path) {
     println!("SMP cores: {} (from kernel/src/lib.rs MAX_CORES)", kernel_max_cores(root));
     let mut cmd = Command::new("qemu-system-x86_64");
     
-    #[cfg(feature = "run-with-kvm")]
     cmd.args(["-M", "q35", "-accel", "kvm", "-smp", &smp, "-cpu", "host,+tsc-deadline,+apic"])
-        .args(["-drive", &format!("if=pflash,unit=0,format=raw,file={},readonly=on", code.display())])
-        .args(["-drive", &format!("if=pflash,unit=1,format=raw,file={}", vars.display())])
-        .args(["-cdrom", iso.to_str().unwrap()])
-        .args(["-device", "piix3-ide,id=ide"])
-        .args(["-device", "ide-hd,drive=ata0,bus=ide.0,unit=0"])
-        .args(["-drive", &format!("file={},format=raw,id=ata0,if=none", ata.display())])
-        .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
-        .args(["-serial", &format!("unix:{socket1},server")])
-        .args(["-serial", &format!("unix:{socket2},server,nowait")])
-        .args(["-no-reboot"])
-        .args(["-monitor", "telnet:127.0.0.1:1234,server,nowait"])
-        .args(qemu_flags());
-    #[cfg(not(feature = "run-with-kvm"))]
-    cmd.args(["-M", "q35", "-smp", &smp, "-cpu", "qemu64,+ssse3,+tsc-deadline,+apic"])
         .args(["-drive", &format!("if=pflash,unit=0,format=raw,file={},readonly=on", code.display())])
         .args(["-drive", &format!("if=pflash,unit=1,format=raw,file={}", vars.display())])
         .args(["-cdrom", iso.to_str().unwrap()])
