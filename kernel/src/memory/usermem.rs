@@ -1,19 +1,20 @@
 use crate::{
     HHDM_OFFSET,
     memory::memory::{MemoryMapFrameAllocator, PAGE_SIZE},
+    process::process_mem::{FrameOwnership, MappedMemoryRegion},
     serial_println, serial_println_core,
 };
-use spin::MutexGuard;
 use x86_64::{
     PhysAddr, VirtAddr,
     structures::paging::{
-        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, Size4KiB,
-        mapper::MapToError,
+        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
+        Size4KiB, mapper::MapToError, page_table::PageTableEntry,
     },
 };
 
 const LEVEL_4_KERNEL_ENTRIES_START: usize = 256;
 const LEVEL_4_KERNEL_ENTRIES_END: usize = 512;
+const ENTRIES_PER_TABLE: usize = 512;
 pub const USER_STACK_TOP: u64 = 0x7FFF_FFFF_F000;
 pub const USER_MEM_MAX_ADDRESS: usize = 0x0000_8000_0000_0000;
 
@@ -198,9 +199,16 @@ impl UserMemoryManager {
         let start_page = Page::containing_address(virt_addr);
         let end_page = Page::containing_address(virt_addr + size_bytes - 1u64);
         for page in Page::range_inclusive(start_page, end_page) {
-            let phys_frame = frame_allocator
-                .allocate_frame()
-                .ok_or(MapToError::FrameAllocationFailed)?;
+            let Some(phys_frame) = frame_allocator.allocate_frame() else {
+                self.rollback_partial_mapping(
+                    pml4_table_phys,
+                    start_page,
+                    page,
+                    protection_flags,
+                    frame_allocator,
+                );
+                return Err(MapToError::FrameAllocationFailed);
+            };
             // Freshly allocated frames may be recycled from terminated processes
             self.zero_frame(phys_frame);
             unsafe {
@@ -249,6 +257,13 @@ impl UserMemoryManager {
                     }
                     Err(e) => {
                         frame_allocator.deallocate_frame(phys_frame);
+                        self.rollback_partial_mapping(
+                            pml4_table_phys,
+                            start_page,
+                            page,
+                            protection_flags,
+                            frame_allocator,
+                        );
                         return Err(e);
                     }
                 }
@@ -256,6 +271,25 @@ impl UserMemoryManager {
         }
 
         Ok(())
+    }
+
+    /// Undoes the pages mapped by a failed map_virt_mem_region call, freeing their frames
+    fn rollback_partial_mapping(
+        &self,
+        pml4_table_phys: PhysAddr,
+        start_page: Page<Size4KiB>,
+        failed_page: Page<Size4KiB>,
+        protection_flags: PageTableFlags,
+        frame_allocator: &mut MemoryMapFrameAllocator,
+    ) {
+        let mapped_bytes = failed_page.start_address() - start_page.start_address();
+        let mapped_region = MappedMemoryRegion {
+            start_virt: start_page.start_address(),
+            size_bytes: mapped_bytes,
+            page_flags: protection_flags,
+            frame_ownership: FrameOwnership::Owned,
+        };
+        self.unmap_user_region(pml4_table_phys, &mapped_region, frame_allocator);
     }
 
     /// Map a specific alloated physical frame into a user address space
@@ -287,8 +321,16 @@ impl UserMemoryManager {
                     flush.flush();
                     Ok(())
                 }
-                Err(MapToError::PageAlreadyMapped(_existing)) => {
-                    //serial_println_core!("map_specific_frame: page already mapped");
+                Err(MapToError::PageAlreadyMapped(existing_frame)) => {
+                    debug_assert!(
+                        existing_frame == phys_frame,
+                        "map_specific_frame: page {:#x} already maps a different frame",
+                        page.start_address().as_u64()
+                    );
+                    if existing_frame != phys_frame {
+                        return Err(MapToError::PageAlreadyMapped(existing_frame));
+                    }
+
                     match user_page_mapper.update_flags(page, user_flags) {
                         Ok(flush) => {
                             flush.flush();
@@ -317,279 +359,100 @@ impl UserMemoryManager {
             .expect("translate_kernel_heap_virt_to_phys: address not mapped in kernel page table")
     }
 
-    pub fn create_main_stack(
+    /// Unmaps every page of the region, skipping pages that are already absent. Frames are freed
+    /// only for Owned regions, so a page shared by two regions is released once, by whichever
+    /// region clears its entry first
+    pub fn unmap_user_region(
         &self,
         pml4_table_phys: PhysAddr,
-        stack_size: u64,
-        frame_allocator: &mut MemoryMapFrameAllocator,
-    ) -> Result<VirtAddr, MapToError<Size4KiB>> {
-        let stack_top = VirtAddr::new(USER_STACK_TOP);
-        let stack_bottom = stack_top - stack_size;
-
-        let stack_protection_flags =
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
-
-        self.map_virt_mem_region(
-            pml4_table_phys,
-            stack_bottom,
-            stack_size,
-            stack_protection_flags,
-            frame_allocator,
-        )?;
-
-        Ok(stack_top)
-    }
-
-    pub fn unmap_all_user_pages_with_owned_set(
-        &self,
-        pml4_phys: PhysAddr,
-        owned_phys: &[PhysAddr],
+        region: &MappedMemoryRegion,
         frame_allocator: &mut MemoryMapFrameAllocator,
     ) {
-        let mut already_freed: alloc::vec::Vec<PhysAddr> = alloc::vec::Vec::new();
-        let pml4_virt = VirtAddr::new(pml4_phys.as_u64() + self.phys_offset);
-        let pml4 = unsafe { &mut *(pml4_virt.as_u64() as *mut PageTable) };
-
-        for pml4_idx in 0..256 {
-            let pml4_entry_present = {
-                let e = &pml4[pml4_idx];
-                !e.is_unused() && e.flags().contains(PageTableFlags::PRESENT)
-            };
-            if !pml4_entry_present {
-                continue;
-            }
-            if pml4[pml4_idx].flags().contains(PageTableFlags::HUGE_PAGE) {
-                continue;
-            }
-
-            let pdpt_phys = pml4[pml4_idx].addr();
-            let pdpt_virt = VirtAddr::new(pdpt_phys.as_u64() + self.phys_offset);
-            let pdpt = unsafe { &mut *(pdpt_virt.as_u64() as *mut PageTable) };
-
-            for pdpt_idx in 0..512 {
-                let pdpt_entry_present = {
-                    let e = &pdpt[pdpt_idx];
-                    !e.is_unused() && e.flags().contains(PageTableFlags::PRESENT)
-                };
-                if !pdpt_entry_present {
-                    continue;
-                }
-                if pdpt[pdpt_idx].flags().contains(PageTableFlags::HUGE_PAGE) {
-                    continue;
-                }
-
-                let pd_phys = pdpt[pdpt_idx].addr();
-                let pd_virt = VirtAddr::new(pd_phys.as_u64() + self.phys_offset);
-                let pd = unsafe { &mut *(pd_virt.as_u64() as *mut PageTable) };
-
-                for pd_idx in 0..512 {
-                    let pd_entry_present = {
-                        let e = &pd[pd_idx];
-                        !e.is_unused() && e.flags().contains(PageTableFlags::PRESENT)
-                    };
-                    if !pd_entry_present {
-                        continue;
-                    }
-
-                    if pd[pd_idx].flags().contains(PageTableFlags::HUGE_PAGE) {
-                        let leaf_phys = pd[pd_idx].addr();
-                        let vaddr = ((pml4_idx as u64) << 39)
-                            | ((pdpt_idx as u64) << 30)
-                            | ((pd_idx as u64) << 21);
-                        let virt = VirtAddr::new(vaddr);
-                        let mut is_owned = false;
-                        for &o in owned_phys {
-                            if o == leaf_phys {
-                                is_owned = true;
-                                break;
-                            }
-                        }
-                        pd[pd_idx].set_unused();
-                        unsafe {
-                            x86_64::instructions::tlb::flush(virt);
-                        }
-
-                        if is_owned {
-                            let mut already = false;
-                            for &f in already_freed.iter() {
-                                if f == leaf_phys {
-                                    already = true;
-                                    break;
-                                }
-                            }
-                            if !already {
-                                debug_assert!(leaf_phys.as_u64().is_multiple_of(PAGE_SIZE as u64));
-                                let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
-                                    leaf_phys,
-                                );
-                                frame_allocator.deallocate_frame(frame);
-                                already_freed.push(leaf_phys);
-                            }
-                        }
-                        continue;
-                    }
-
-                    let pt_phys = pd[pd_idx].addr();
-                    let pt_virt = VirtAddr::new(pt_phys.as_u64() + self.phys_offset);
-                    let pt = unsafe { &mut *(pt_virt.as_u64() as *mut PageTable) };
-
-                    for pt_idx in 0..512 {
-                        let pt_entry_present = {
-                            let e = &pt[pt_idx];
-                            !e.is_unused() && e.flags().contains(PageTableFlags::PRESENT)
-                        };
-                        if !pt_entry_present {
-                            continue;
-                        }
-
-                        let leaf_phys = pt[pt_idx].addr();
-                        let vaddr = ((pml4_idx as u64) << 39)
-                            | ((pdpt_idx as u64) << 30)
-                            | ((pd_idx as u64) << 21)
-                            | ((pt_idx as u64) << 12);
-                        let virt = VirtAddr::new(vaddr);
-                        let mut is_owned = false;
-                        for &o in owned_phys {
-                            if o == leaf_phys {
-                                is_owned = true;
-                                break;
-                            }
-                        }
-                        pt[pt_idx].set_unused();
-
-                        unsafe {
-                            x86_64::instructions::tlb::flush(virt);
-                        }
-
-                        if is_owned {
-                            let mut already = false;
-                            for &f in already_freed.iter() {
-                                if f == leaf_phys {
-                                    already = true;
-                                    break;
-                                }
-                            }
-                            if !already {
-                                let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
-                                    leaf_phys,
-                                );
-                                frame_allocator.deallocate_frame(frame);
-                                already_freed.push(leaf_phys);
-                            }
-                        }
-                    }
-                }
-            }
+        if region.size_bytes == 0 {
+            return;
         }
-        unsafe {
-            x86_64::instructions::tlb::flush_all();
-        }
-    }
 
-    pub fn reclaim_empty_user_tables(
-        &self,
-        pml4_phys: PhysAddr,
-        frame_allocator: &mut MemoryMapFrameAllocator,
-    ) {
-        let pml4_virt = VirtAddr::new(pml4_phys.as_u64() + self.phys_offset);
-        let pml4 = unsafe { &mut *(pml4_virt.as_u64() as *mut PageTable) };
+        let pml4_table_virt = VirtAddr::new(pml4_table_phys.as_u64() + self.phys_offset);
+        let pml4_table = unsafe { &mut *(pml4_table_virt.as_u64() as *mut PageTable) };
+        let mut user_page_mapper =
+            unsafe { OffsetPageTable::new(pml4_table, VirtAddr::new(self.phys_offset)) };
 
-        for pml4_idx in 0..256 {
-            let pdpt_phys_opt = {
-                let e = &pml4[pml4_idx];
-                if e.is_unused() || !e.flags().contains(PageTableFlags::PRESENT) {
-                    None
-                } else if e.flags().contains(PageTableFlags::HUGE_PAGE) {
-                    None
-                } else {
-                    Some(e.addr())
-                }
-            };
-            let Some(pdpt_phys) = pdpt_phys_opt else {
-                continue;
-            };
+        let start_page = Page::<Size4KiB>::containing_address(region.start_virt);
+        let end_page =
+            Page::<Size4KiB>::containing_address(region.start_virt + region.size_bytes - 1u64);
+        for page in Page::range_inclusive(start_page, end_page) {
+            if let Ok((frame, flush)) = user_page_mapper.unmap(page) {
+                flush.ignore();
 
-            let pdpt_virt = VirtAddr::new(pdpt_phys.as_u64() + self.phys_offset);
-            let pdpt = unsafe { &mut *(pdpt_virt.as_u64() as *mut PageTable) };
-
-            for pdpt_idx in 0..512 {
-                let pd_phys_opt = {
-                    let e = &pdpt[pdpt_idx];
-                    if e.is_unused() || !e.flags().contains(PageTableFlags::PRESENT) {
-                        None
-                    } else if e.flags().contains(PageTableFlags::HUGE_PAGE) {
-                        None
-                    } else {
-                        Some(e.addr())
-                    }
-                };
-                let Some(pd_phys) = pd_phys_opt else {
-                    continue;
-                };
-
-                let pd_virt = VirtAddr::new(pd_phys.as_u64() + self.phys_offset);
-                let pd = unsafe { &mut *(pd_virt.as_u64() as *mut PageTable) };
-
-                for pd_idx in 0..512 {
-                    let pt_phys_opt = {
-                        let e = &pd[pd_idx];
-                        if e.is_unused() || !e.flags().contains(PageTableFlags::PRESENT) {
-                            None
-                        } else if e.flags().contains(PageTableFlags::HUGE_PAGE) {
-                            None
-                        } else {
-                            Some(e.addr())
-                        }
-                    };
-                    let Some(pt_phys) = pt_phys_opt else {
-                        continue;
-                    };
-
-                    let pt_virt = VirtAddr::new(pt_phys.as_u64() + self.phys_offset);
-                    let pt_is_empty = unsafe {
-                        let pt_ref = &*(pt_virt.as_u64() as *const PageTable);
-                        pt_ref.iter().all(|e| e.is_unused())
-                    };
-                    if pt_is_empty {
-                        let frame =
-                            x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
-                                pt_phys,
-                            );
-                        pd[pd_idx].set_unused();
-                        frame_allocator.deallocate_frame(frame);
-                    }
-                }
-
-                let pd_is_empty = unsafe {
-                    let pd_ref = &*(pd_virt.as_u64() as *const PageTable);
-                    pd_ref.iter().all(|e| e.is_unused())
-                };
-                if pd_is_empty {
-                    let frame =
-                        x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
-                            pd_phys,
-                        );
-                    pdpt[pdpt_idx].set_unused();
+                if region.frame_ownership == FrameOwnership::Owned {
                     frame_allocator.deallocate_frame(frame);
                 }
             }
+        }
 
-            let pdpt_is_empty = unsafe {
-                let pdpt_ref = &*(pdpt_virt.as_u64() as *const PageTable);
-                pdpt_ref.iter().all(|e| e.is_unused())
-            };
-            if pdpt_is_empty {
-                let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
-                    pdpt_phys,
-                );
-                pml4[pml4_idx].set_unused();
-                frame_allocator.deallocate_frame(frame);
+        x86_64::instructions::tlb::flush_all();
+    }
+
+    /// Frees every page table of the user half. Run after all regions are unmapped, any leaf
+    /// entry still present means a mapping was never tracked
+    pub fn free_user_tables(
+        &self,
+        pml4_phys: PhysAddr,
+        frame_allocator: &mut MemoryMapFrameAllocator,
+    ) {
+        let pml4_virt = VirtAddr::new(pml4_phys.as_u64() + self.phys_offset);
+        let pml4 = unsafe { &mut *(pml4_virt.as_u64() as *mut PageTable) };
+
+        for pml4_idx in 0..LEVEL_4_KERNEL_ENTRIES_START {
+            if !Self::is_table_entry(&pml4[pml4_idx]) {
+                continue;
             }
+            let pdpt = self.table_at(pml4[pml4_idx].addr());
+
+            for pdpt_idx in 0..ENTRIES_PER_TABLE {
+                if !Self::is_table_entry(&pdpt[pdpt_idx]) {
+                    continue;
+                }
+                let pd = self.table_at(pdpt[pdpt_idx].addr());
+
+                for pd_idx in 0..ENTRIES_PER_TABLE {
+                    if !Self::is_table_entry(&pd[pd_idx]) {
+                        continue;
+                    }
+                    let pt_phys = pd[pd_idx].addr();
+                    let pt = self.table_at(pt_phys);
+                    debug_assert!(
+                        pt.iter().all(|entry| entry.is_unused()),
+                        "free_user_tables: untracked mapping in page table {:#x}",
+                        pt_phys.as_u64()
+                    );
+
+                    pd[pd_idx].set_unused();
+                    frame_allocator.deallocate_frame(PhysFrame::containing_address(pt_phys));
+                }
+
+                let pd_phys = pdpt[pdpt_idx].addr();
+                pdpt[pdpt_idx].set_unused();
+                frame_allocator.deallocate_frame(PhysFrame::containing_address(pd_phys));
+            }
+
+            let pdpt_phys = pml4[pml4_idx].addr();
+            pml4[pml4_idx].set_unused();
+            frame_allocator.deallocate_frame(PhysFrame::containing_address(pdpt_phys));
         }
 
-        unsafe {
-            x86_64::instructions::tlb::flush_all();
-        }
+        x86_64::instructions::tlb::flush_all();
+    }
+
+    /// Present entry that points to a lower level table
+    fn is_table_entry(entry: &PageTableEntry) -> bool {
+        entry.flags().contains(PageTableFlags::PRESENT)
+            && !entry.flags().contains(PageTableFlags::HUGE_PAGE)
+    }
+
+    fn table_at(&self, table_phys: PhysAddr) -> &'static mut PageTable {
+        let table_virt = VirtAddr::new(table_phys.as_u64() + self.phys_offset);
+        unsafe { &mut *(table_virt.as_u64() as *mut PageTable) }
     }
 
     pub fn free_pml4_frame(

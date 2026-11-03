@@ -103,11 +103,11 @@ pub struct KernelThread {
 
 File: `process/process_mem.rs`, `process/process.rs`
 
-- Heap: `PROCESS_HEAP_VIRT_START 0x6000_0000` .. `PROCESS_HEAP_VIRT_END 0x6020_0000` (2 MB window), `heap_start == heap_end == START` at creation (empty). `allocate_heap(size)` (used by `sys_allocate(5)`) aligns to 4 KiB, `grow_heap(new)` maps `PRESENT|WRITABLE` via `UserMemoryManager::map_virt_mem_region`, pushes `MappedMemoryRegion`, bumps `heap_end`. Single-lock bump; `syscall.rs` no longer duplicates `old+size` arithmetic. Before 2026-08-22 `heap_end` was `VIRT_END` (first alloc returned `0x6020_0000` outside window).
+- Heap: `PROCESS_HEAP_VIRT_START 0x6000_0000` up to `PROCESS_WINDOW_BUFFER_BASE`, `heap_end == START` at creation (empty). `allocate_heap(size)` (used by `sys_allocate(5)`) aligns to 4 KiB, `grow_heap(new)` calls `map_owned_region` with `PRESENT|WRITABLE|NO_EXECUTE`, which tracks the region (merging with the previous heap region, so the heap stays one entry) and then bumps `heap_end`. Both take `&UserMemoryManager`.
 
-- Virtual range: `PROCESS_USER_VADDR_ALLOC_START 0x1000_0000` .. `0x5000_0000` for `CircularBuffer` double-map and future `mmap`. `allocate_virtual_range` bumps `next_alloc_vaddr`, tracks `allocated_ranges` for reclaim; `find_free_gap` is TODO.
+- Virtual range: `PROCESS_USER_VADDR_ALLOC_START 0x1000_0000` .. `0x5000_0000` for `CircularBuffer` double-map and future `mmap`. `allocate_virtual_range` only reserves (bumps `next_alloc_vaddr`, or `find_free_gap` over the sorted `regions` once the window is exhausted), the caller maps the range right away with `map_frames`.
 
-Both are reclaimed by `free_address_space`.
+All of it lives in `ProcessMemoryLayout::regions` with explicit `FrameOwnership` and is reclaimed by `free_address_space`. See `docs/memory.md` for the layout API.
 
 ## Process Manager (PROCESS_MANAGER)
 
@@ -141,17 +141,12 @@ context — memory corruption ensues.
 `PROCESS_MANAGER::terminate_process(pid, exit_code, cascade)` now reclaims **all**
 user resources before releasing the core:
 
-1. Snapshot `ProcessMemoryLayout` + `children` under `get_process_mut`, set
-   `Terminated`/`exit_code`, zero `top_page_table_phys` (guard double-free).
-2. If `top != 0`, call `memory_layout.free_address_space(&USER_MEMORY_MANAGER, &mut FRAME_ALLOCATOR)`:
-   - Collects owned `PhysFrame`s from `mapped_regions` (ELF + `allocate_heap` bumps),
-     `stack` (`stack_top - stack_size .. stack_top`), and `allocated_ranges`
-     (`0x1000_0000` virtual-range bump) via `translate_user_virt_to_phys`.
-   - `UserMemoryManager::unmap_all_user_pages_with_owned_set` walks PML4 0..255,
-     handles 2 MiB huge, `set_unused` + `tlb::flush(virt)` per leaf, `deallocate_frame`
-     owned (dedup `already_freed`), leaves non-owned (e.g. shared window buffers) unmapped but not freed.
-   - `reclaim_empty_user_tables` bottom-up frees empty PT/PD/PDPT frames (`is_unused` all entries).
-   - `free_pml4_frame` frees top table + `flush_all`.
+1. Under `get_process_mut`, copy `children`, set `Terminated`/`exit_code`.
+2. If `top_page_table_phys != 0`, call `memory_layout.free_address_space(get_user_mem_mgr(), &mut frame_allocator)` directly on the process layout (no clone), then zero `top_page_table_phys` (guard against double free) and clear `regions`:
+   - `UserMemoryManager::unmap_user_region` for every region in `regions`: `Mapper::unmap` per page, absent pages skipped, frames freed only for `FrameOwnership::Owned`.
+   - `free_user_tables` frees all PT/PD/PDPT frames, with a `debug_assert` that they are empty.
+   - `free_pml4_frame` frees the top table and `flush_all`.
+   The windows of the process are destroyed before this, by the callers (`sys_exit`, `TerminateProcess`), because window cleanup locks the compositor and then `PROCESS_MANAGER`.
 3. Lookup `core_id` via `thread_groups`, `thread.terminate`, `CORE_POOL.release_core`,
    `SCHEDULER.remove_pid(pid)` (with `cli`+`SCHEDULER.lock`).
 4. Orphan vs cascade children to arche `PID 0`.
@@ -191,11 +186,10 @@ File: `process/process.rs`
 2. `ProcessMemoryLayout::new(...)` — allocates a new PML4 address space.
 3. For each `LoadSegment`:
    - Compute `PageTableFlags` from ELF flags (PRESENT | USER_ACCESSIBLE | optionally WRITABLE | NO_EXECUTE).
-   - `map_virt_mem_region(pml4_phys, vaddr, in_memory_size, flags, frame_alloc)`.
+   - `memory_layout.map_owned_region(vaddr, in_memory_size, flags, ..)`, which maps, rolls back on failure and tracks the region.
    - Copy file data via `translate_user_virt_to_phys` → HHDM pointer → `copy_nonoverlapping`.
    - Zero BSS (in_memory_size > in_file_size) via same translation path.
-   - Track region in `memory_layout.mapped_regions`.
-4. `create_main_stack(pml4_phys, stack_size, frame_alloc)` → stack top VirtAddr.
+4. Map the shared data page (`SharedState::map_into_process`, `Borrowed`) and the main stack (`map_owned_region` ending at `USER_STACK_TOP`).
 5. Build `ExecutionContext::new(entry_point, stack_top, pml4_phys)`.
 
 ## Scheduler

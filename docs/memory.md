@@ -22,7 +22,7 @@ All addresses are virtual (x86_64, 4-level paging).
 | LAPIC MMIO (kernel)         | 0xFFFF_FFFF_0000_0000       | LAPIC_VIRT_BASE in interrupts.rs |
 | IOAPIC MMIO (kernel)        | 0xFFFF_FFFF_FF00_0000       | IOAPIC_VIRT_BASE             |
 | User stack top              | 0x7FFF_FFFF_F000            | USER_STACK_TOP in usermem.rs |
-| User heap                   | 0x0000_0000_6000_0000       | heap_start in ProcessMemoryLayout |
+| User heap                   | 0x0000_0000_6000_0000       | PROCESS_HEAP_VIRT_START |
 
 PML4 split: indices 0-255 = user space, indices 256-511 = kernel space. When a new
 user address space is created, all kernel PML4 entries (256-511) are copied from the
@@ -109,8 +109,9 @@ pub struct UserMemoryManager {
 }
 ```
 
-Global: `USER_MEMORY_MANAGER: Once<Mutex<UserMemoryManager>>`.
-Access: `memory::get_user_mem_mgr()`.
+Global: `USER_MEMORY_MANAGER: Once<UserMemoryManager>`. It has only `&self` methods and write-once fields,
+so it needs no mutex.
+Access: `memory::get_user_mem_mgr()` returns `&'static UserMemoryManager`.
 
 ### allocate_new_address_space
 
@@ -126,16 +127,33 @@ address space creation; it is verified by checking pml4[lapic_pml4_idx].
 ### map_virt_mem_region
 
 Maps a virtual address range in a given user PML4. Each page:
-1. Allocates a physical frame.
+1. Allocates a zeroed physical frame.
 2. Calls `map_to` with `protection_flags | USER_ACCESSIBLE`.
 3. On `PageAlreadyMapped`: merges flags (OR capability bits, AND NO_EXECUTE).
    This handles overlapping ELF segments sharing a page boundary.
 
-### create_main_stack
+If a page cannot be mapped, the pages already mapped by the same call are unmapped again and
+their frames freed (`rollback_partial_mapping`), so a failed call leaves nothing behind.
 
-Maps `stack_size` bytes ending at `USER_STACK_TOP = 0x7FFF_FFFF_F000`.
-Flags: `PRESENT | WRITABLE` (no USER_ACCESSIBLE added explicitly here — added by
-`map_virt_mem_region`).
+### map_specific_frame
+
+Maps a caller supplied physical frame at a user page, no frame is allocated. If the page is
+already mapped to the same frame only the flags are updated. If it is mapped to a different
+frame it returns `PageAlreadyMapped` (with a `debug_assert`), so a stale mapping is never
+silently kept.
+
+### unmap_user_region
+
+Takes a `MappedMemoryRegion` and unmaps every page with `Mapper::unmap`. Absent pages are
+skipped, so a page shared by two regions (ELF segments) is released once, by whichever region
+clears its entry first. The frame is freed only if the region is `FrameOwnership::Owned`.
+Cost is O(pages) plus one `flush_all` per region.
+
+### free_user_tables
+
+Frees every PT, PD and PDPT of the user half after all regions are unmapped. It has a
+`debug_assert` that each page table is empty, so a mapping that was never tracked in a region
+shows up in debug builds.
 
 ### translate_user_virt_to_phys
 
@@ -152,62 +170,104 @@ Used for flag-merging on `PageAlreadyMapped`.
 File: `process/process_mem.rs`
 
 ```rust
+pub enum FrameOwnership {
+    Owned,    // freed when the region is unmapped
+    Borrowed, // kernel owned frames, or a second view of frames owned by another region
+}
+
+pub struct MappedMemoryRegion {
+    pub start_virt: VirtAddr,
+    pub size_bytes: u64,
+    pub page_flags: PageTableFlags,
+    pub frame_ownership: FrameOwnership,
+}
+
 pub struct ProcessMemoryLayout {
     pub top_page_table_phys: PhysAddr,
-    pub stack_top: VirtAddr,
-    pub stack_size: u64,
-    pub heap_start: VirtAddr,  // 0x0000_0000_6000_0000
-    pub heap_end: VirtAddr,    // bump cursor, starts == heap_start
-    pub mapped_regions: Vec<MappedMemoryRegion>,
-    pub next_alloc_vaddr: VirtAddr,       // 0x1000_0000 bump for CircularBuffer etc
-    pub allocated_ranges: Vec<(u64,u64)>, // tracked for reclaim
+    pub heap_end: VirtAddr,         // bump cursor, starts at PROCESS_HEAP_VIRT_START
+    pub next_alloc_vaddr: VirtAddr, // 0x1000_0000 bump for the reservation window
+    pub regions: Vec<MappedMemoryRegion>, // sorted by start_virt, page aligned
 }
 ```
 
-`ProcessMemoryLayout::new` allocates a new address space via `UserMemoryManager` and
-initializes `heap_start == heap_end == PROCESS_HEAP_VIRT_START` (empty heap). Before
-2026-08-22 `heap_end` was incorrectly `VIRT_END`; fixed to `VIRT_START` so first
-`sys_allocate` returns `0x6000_0000`.
+Every user mapping of a process lives in `regions`, with explicit frame ownership. There is one
+mapping path and one teardown path for all of it. `ProcessMemoryLayout::with_page_table` is the
+single constructor, `new` allocates an address space and calls it.
 
-### Heap growth and reclamation
+Mapping API, all taking `&UserMemoryManager` and `&mut MemoryMapFrameAllocator`:
 
-- `allocate_heap(size, umm, fa) -> VirtAddr` – single-lock bump API used by `sys_allocate(5)`.
-  Aligns `size` to 4 KiB, computes `new = heap_end + aligned`, calls `grow_heap(new)`,
-  returns old `heap_end`. Replaces previous double-lock `old/new` arithmetic in `syscall.rs`.
+- `map_owned_region(start, size, flags, ..)` – zeroed frames owned by the process. Used by ELF
+  segments, the stack and the heap. Rolls back on failure, tracks on success.
+- `map_frames(start, frames: &[PhysAddr], flags, ownership, ..)` – explicit frames. Used by circular
+  buffers, window buffers, event buffers and the shared data page. On failure the pages mapped by
+  the call are unmapped again and the frames are left to the caller.
+- `unmap_region(start, size, ..)` – unmaps a page aligned range inside one tracked region, frees
+  frames only for `Owned`, and splits the region if the range is in the middle.
+- `track_region` (private) – inserts sorted and merges with a touching or overlapping region of
+  equal flags and ownership. This keeps the heap a single region however often it grows.
+- `is_range_tracked(start, size)` – true if one region covers the range.
 
-- `grow_heap(new_heap_end, umm, fa)` – maps `heap_end..new_heap_end` via
-  `UserMemoryManager::map_virt_mem_region` (`PRESENT|WRITABLE|USER_ACCESSIBLE`,
-  per-page frame alloc, merges `PageAlreadyMapped` flags), pushes `MappedMemoryRegion`,
-  bumps `heap_end`. Shrink path only moves cursor (no unmap; heap never shrinks in
-  current `sys_allocate` path).
+### Heap growth
 
-- `allocate_virtual_range(size) -> VirtAddr` – bump at `0x1000_0000..0x5000_0000`
-  for `CircularBuffer` double-map and window buffers; `find_free_gap` is TODO.
+- `allocate_heap(size, umm, fa) -> VirtAddr` – used by `sys_allocate(5)`. Aligns `size` to 4 KiB,
+  calls `grow_heap(heap_end + aligned)`, returns the old `heap_end`.
+- `grow_heap(new_heap_end, umm, fa)` – `map_owned_region` for `heap_end..new_heap_end` with
+  `PRESENT|WRITABLE|NO_EXECUTE`, then bumps `heap_end`. A partial out of memory failure is rolled
+  back, nothing is leaked.
 
-- `free_address_space(user_mgr, frame_allocator)` – reclamation on `terminate_process`.
-  Collects owned `PhysAddr` from `mapped_regions` + `stack` + `allocated_ranges` via
-  `translate_user_virt_to_phys`, then:
-  1. `user_mgr.unmap_all_user_pages_with_owned_set(pml4, owned, fa)` – walks user
-     PML4 0..255 (handles 2 MiB huge), `set_unused` + `tlb::flush` per page,
-     `deallocate_frame` for owned leaves (dedup via `already_freed`).
-  2. `user_mgr.reclaim_empty_user_tables(pml4, fa)` – frees empty PT/PD/PDPT frames
-     bottom-up (`is_unused` all entries) + `deallocate_frame`.
-  3. `user_mgr.free_pml4_frame(pml4, fa)` – frees top-level table + `flush_all`.
+### Reservation window
 
-  Intermediate page tables allocated via `FrameAllocator` during `map_to` are thus
-  reclaimed. Verified by `test_usermem_reclaim` (`kernel/src/bin/test_usermem_reclaim.rs`)
-  which does 4×528384 (≈2.06 MB > 2 MB heap) allocations, exits, and asserts
-  `free_frame_count` returns to baseline (801 vs 0 before) and PID removed from
-  `PROCESS_MANAGER` + `SCHEDULER`.
+`allocate_virtual_range(size) -> Option<VirtAddr>` reserves a range in `0x1000_0000..0x5000_0000`
+(for circular buffers and later mmap) without mapping or tracking it, the caller maps it right
+away. When the bump cursor is exhausted `find_free_gap` scans the sorted regions linearly for a
+gap, without allocating.
 
-### UserMemoryManager helpers
+### Circular buffer
 
-- `unmap_all_user_pages_with_owned_set`, `reclaim_empty_user_tables`, `free_pml4_frame`
-  in `memory/usermem.rs` implement the walk. `get_page_flags` used for merge on
-  `PageAlreadyMapped`. `translate_kernel_heap_virt_to_phys` walks kernel PML4 (no
-  `vaddr - HHDM_OFFSET` for heap – bug BUG-11).
+`CircularBuffer::map_for_user` reserves `2 * data_size`, allocates the frames, maps them with
+`map_frames(base, Owned)` and `map_frames(base + data_size, Borrowed)`. The second view does not
+own the frames, so teardown needs no deduplication. User supplied flags are reduced to
+`PRESENT|USER_ACCESSIBLE|NO_EXECUTE`, plus `WRITABLE` if requested. A zero size, or a size whose
+two views do not fit the window, is rejected. Any failure frees the frames and undoes the mapping.
+
+### Windows, event buffers, shared data
+
+Window buffers, the per window event buffer page and the shared data page are tracked as
+`Borrowed`, since the kernel owns the frames. `Window.owner_pid` records the process that
+mapped them. `destroy_window` unmaps them from the owner and frees the event page, and process
+exit destroys the windows of the process (before `PROCESS_MANAGER` is locked). The event buffer of
+window `id` is mapped at `PROCESS_EVENT_BUFFER_BASE + id * PAGE_SIZE`, `GetWindowInfo` returns
+that address in `event_buffer_vaddr`.
+
+### Teardown
+
+`free_address_space(user_mgr, frame_allocator)` on `terminate_process`:
+
+```rust
+for region in self.regions.iter() {
+    user_mgr.unmap_user_region(pml4, region, frame_allocator);
+}
+user_mgr.free_user_tables(pml4, frame_allocator);
+user_mgr.free_pml4_frame(pml4, frame_allocator);
+```
+
+Cost is O(pages), there are no linear scans over the freed frames. `terminate_process` calls it
+directly on the process layout (no clone) and then clears `regions`.
+
+Verified by `test_usermem_reclaim`, `test_usermem_layout` and `test_usermem_windows`, see
+"Tests and logs".
+
+## UserMemoryManager helpers
+
+`unmap_user_region`, `free_user_tables` and `free_pml4_frame` in `memory/usermem.rs` implement
+the teardown. `get_page_flags` is used for the merge on `PageAlreadyMapped` in
+`map_virt_mem_region`. `translate_kernel_heap_virt_to_phys` walks the kernel PML4 (no
+`vaddr - HHDM_OFFSET` for the heap, bug BUG-11).
 
 ## Global Memory Accessors
+
+Lock order for the memory related locks is `PROCESS_MANAGER`, then `FRAME_ALLOCATOR`. The
+compositor lock, when needed, comes before `PROCESS_MANAGER`.
 
 ```rust
 // Call after boot:
@@ -215,7 +275,7 @@ memory::init_memory_globals(frame_allocator, user_mem_manager);
 
 // Use anywhere:
 memory::get_frame_allocator() -> MutexGuard<MemoryMapFrameAllocator>
-memory::get_user_mem_mgr()    -> MutexGuard<UserMemoryManager>
+memory::get_user_mem_mgr()    -> &'static UserMemoryManager
 ```
 
 ## Known Issues / TODOs
@@ -223,10 +283,10 @@ memory::get_user_mem_mgr()    -> MutexGuard<UserMemoryManager>
 - `map_virt_mem_region` overlap frame leak fixed: on `PageAlreadyMapped` the spare
   frame is now `deallocate_frame`'d and flags merged. Huge-page intermediate tables
   are still 4 KiB-only; no 2 MiB alloc path.
-- Process exit reclamation implemented (`free_address_space` + `unmap` + `reclaim`),
-  but `find_free_gap` for `allocate_virtual_range` is still TODO (returns `None` if
-  `next_alloc_vaddr` exceeds `0x5000_0000`). Reclaim is single-core; TLB shootdown
-  via IPI not needed (per-process PML4 private) but kernel global unmap will need it.
+- There is no unmap syscall or page fault path yet. `unmap_region` and the sorted `regions` vector
+  are the base for `munmap`. Killing a process that runs on another core has no TLB shootdown,
+  `TerminateProcess` only refuses when the target is currently running on another core and that
+  check is not atomic with the teardown.
 - ACPI region mapping helper (`map_acpi_regions`) is currently commented out in kmain.
 - `IdendtityAcpiHandler` (typo: should be "Identity") — most read/write methods are
   `todo!()` panics, only the mapping is implemented.
@@ -237,9 +297,20 @@ memory::get_user_mem_mgr()    -> MutexGuard<UserMemoryManager>
 
 - `cargo xtask usertest` (`kernel/src/bin/test_usermem_reclaim.rs`) exercises user heap
   reclamation: boots via `boot_common::bsp_early_init` + `init_shared_state`, waits for
-  APs, snapshots `free_frame_count`, creates `memstress` ELF (`user/rustspace/src/bin/memstress.rs`
-  4×528384), polls `PROCESS_MANAGER`/`SCHEDULER` for `Terminated`, asserts `free` reclaimed
-  and `cleanup_dead` removes PID. QEMU `-serial stdio -serial file:` captures COM1+COM2.
+  APs, snapshots `free_frame_count` and the frames in use (`allocated_bump_frames`, which is
+  frames handed out minus the free list), creates `memstress` ELF (`user/rustspace/src/bin/memstress.rs`
+  4×528384), polls `PROCESS_MANAGER`/`SCHEDULER` for `Terminated`, asserts `free` reclaimed,
+  the frames in use did not grow, the free list has no duplicate frame, and `cleanup_dead`
+  removes PID.
+- `kernel/src/bin/test_usermem_layout.rs` drives `ProcessMemoryLayout` directly: heap growths
+  coalesce into one region, circular buffer ownership and flag normalization, rejected
+  circular requests, `unmap_region` splitting, borrowed frames not being freed, and an exact
+  frames-in-use comparison after `free_address_space`.
+- `kernel/src/bin/test_usermem_windows.rs` runs the `winstress` ELF
+  (`user/rustspace/src/bin/winstress.rs`): two circular buffers with alias checks, many heap
+  growths, two windows with distinct working event buffers, window id reuse after destroy with a
+  pixel write to the new buffer, then an exit with two windows open. The kernel then checks
+  that the windows are gone, event pages released, no frames leaked and no duplicate free. QEMU `-serial stdio -serial file:` captures COM1+COM2.
 - `cargo xtask test` and `usertest` save split logs like `scripts/log_splitter.py` to
   `test_logs/<test>/all.txt` + `core_N.txt` + `userspace_pid_N.txt` via `xtask/src/main.rs:save_test_logs`
   (ANSI stripped, `MAX_CORES` from `kernel/src/lib.rs:21`). Also `cargo xtask usertest 2>&1 | cat`

@@ -7,7 +7,7 @@ extern crate rustspace;
 
 use core::arch::global_asm;
 use rustspace::{
-    EVENT_BUFFER_ADDR, EventReader, WindowInfo,
+    EventReader, WindowInfo,
     gfx::surface::UserSurface,
     sys_get_window_info,
     terminal::{Terminal, scrollback::Scrollback},
@@ -99,7 +99,7 @@ pub extern "C" fn main() -> ! {
         window_info.event_buffer_vaddr,
     );
 
-    let mut event_reader = unsafe { EventReader::new(EVENT_BUFFER_ADDR) };
+    let mut event_reader = unsafe { EventReader::new(window_info.event_buffer_vaddr as usize) };
 
     unsafe { rustspace::sys_yield() };
 

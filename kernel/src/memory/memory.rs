@@ -173,6 +173,18 @@ impl MemoryMapFrameAllocator {
         self.free_list.push(frame);
     }
 
+    /// A frame freed twice would be handed to two owners later, only meant for tests
+    pub fn free_list_has_duplicates(&self) -> bool {
+        let mut frame_addresses: alloc::vec::Vec<u64> = self
+            .free_list
+            .iter()
+            .map(|frame| frame.start_address().as_u64())
+            .collect();
+        frame_addresses.sort_unstable();
+
+        frame_addresses.windows(2).any(|pair| pair[0] == pair[1])
+    }
+
     pub fn free_frame_count(&self) -> usize {
         self.free_list.len()
     }

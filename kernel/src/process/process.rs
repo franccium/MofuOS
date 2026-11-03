@@ -1,3 +1,4 @@
+use crate::memory::usermem::USER_STACK_TOP;
 use crate::{
     data_structures::vector::Vec,
     process::{
@@ -29,6 +30,9 @@ pub const PROCESS_USER_VADDR_ALLOC_END: u64 =
 pub const PROCESS_WINDOW_BUFFER_BASE: u64 = 0x0000_0001_0000_0000;
 // Hard clamp in case, we derive this from framebuffer size normally
 pub const PROCESS_WINDOW_BUFFER_HARD_MAX_SIZE: u64 = 64 * 1024 * 1024;
+
+// One page per window, indexed by window id, above the window buffer slots
+pub const PROCESS_EVENT_BUFFER_BASE: u64 = 0x0000_0008_0000_0000;
 
 pub const PROCESS_HEAP_VIRT_START: u64 = 0x0000_0000_6000_0000;
 pub const PROCESS_HEAP_SIZE_BYTES: u64 = PROCESS_WINDOW_BUFFER_BASE - PROCESS_HEAP_VIRT_START;
@@ -158,15 +162,8 @@ impl Process {
         stack_top: u64,
         page_table_base_phys: u64,
     ) -> Result<Self, MapToError<Size4KiB>> {
-        let memory_layout = crate::process::process_mem::ProcessMemoryLayout {
-            top_page_table_phys: x86_64::PhysAddr::new(page_table_base_phys),
-            stack_top: x86_64::VirtAddr::new(stack_top),
-            stack_size: 0,
-            heap_start: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_START),
-            heap_end: x86_64::VirtAddr::new(PROCESS_HEAP_VIRT_START),
-            owned_regions: alloc::vec::Vec::new(),
-            next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
-        };
+        let memory_layout =
+            ProcessMemoryLayout::with_page_table(x86_64::PhysAddr::new(page_table_base_phys));
 
         Ok(Self {
             pid,
@@ -192,7 +189,7 @@ impl Process {
     ) -> Result<Self, MapToError<Size4KiB>> {
         serial_println!("Process::create_with_elf()");
         //TODO: safer
-        let address_space_manager = &crate::memory::get_user_mem_mgr();
+        let address_space_manager = crate::memory::get_user_mem_mgr();
         let mut frame_allocator = crate::memory::get_frame_allocator();
 
         let mut memory_layout =
@@ -217,14 +214,14 @@ impl Process {
                 segment.flags,
             );
 
-            if let Err(e) = address_space_manager.map_virt_mem_region(
-                memory_layout.top_page_table_phys,
+            if let Err(e) = memory_layout.map_owned_region(
                 vaddr,
                 in_memory_size,
                 flags,
+                address_space_manager,
                 &mut frame_allocator,
             ) {
-                memory_layout.free_address_space(&*address_space_manager, &mut *frame_allocator);
+                memory_layout.free_address_space(address_space_manager, &mut frame_allocator);
                 return Err(e);
             }
 
@@ -282,49 +279,31 @@ impl Process {
                     (vaddr + bss_offset).as_u64(),
                 );
             }
-
-            // track mapped region
-            memory_layout
-                .owned_regions
-                .push(crate::process::process_mem::MappedMemoryRegion {
-                    start_virt: vaddr,
-                    size_bytes: in_memory_size,
-                    page_flags: flags,
-                });
         }
 
         let shared_state = SHARED_STATE.get().unwrap().lock();
         shared_state
             .map_into_process(
                 address_space_manager,
-                memory_layout.top_page_table_phys,
+                &mut memory_layout,
                 &mut frame_allocator,
             )
             .unwrap();
 
         let stack_size = DEFAULT_NEW_PROCESS_STACK_SIZE;
-        let stack_top = match address_space_manager.create_main_stack(
-            memory_layout.top_page_table_phys,
+        let stack_top = VirtAddr::new(USER_STACK_TOP);
+        let stack_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+        if let Err(e) = memory_layout.map_owned_region(
+            stack_top - stack_size,
             stack_size,
+            stack_flags,
+            address_space_manager,
             &mut frame_allocator,
         ) {
-            Ok(top) => top,
-            Err(e) => {
-                memory_layout.free_address_space(&*address_space_manager, &mut *frame_allocator);
-                return Err(e);
-            }
-        };
-        memory_layout.stack_top = stack_top;
-        memory_layout.stack_size = stack_size;
-        memory_layout
-            .owned_regions
-            .push(crate::process::process_mem::MappedMemoryRegion {
-                start_virt: stack_top - stack_size,
-                size_bytes: stack_size,
-                page_flags: PageTableFlags::PRESENT
-                    | PageTableFlags::WRITABLE
-                    | PageTableFlags::NO_EXECUTE,
-            });
+            memory_layout.free_address_space(address_space_manager, &mut frame_allocator);
+            return Err(e);
+        }
 
         let context = ExecutionContext::new(
             elf_info.entry_point,

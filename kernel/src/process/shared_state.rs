@@ -6,7 +6,12 @@ use crate::{
         memory::{MemoryMapFrameAllocator, PAGE_SIZE},
         usermem::{self, UserMemoryManager},
     },
-    process::{PID, process::INVALID_PID, shared_state},
+    process::{
+        PID,
+        process::INVALID_PID,
+        process_mem::{FrameOwnership, ProcessMemoryLayout},
+        shared_state,
+    },
     serial_println, serial_println_core,
 };
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -21,7 +26,7 @@ const SHARED_REGION_COUNT: usize = 1;
 //const IO_EVENT_BUFFER_INDEX: usize = 0;
 const PROGRAM_SHARED_DATA_INDEX: usize = 0;
 
-//TODO: now, due to changes in event buffer being now per-process, this is just the virtual adress at which the userspace processes expect the event buffer to be, and in their page tables the buffer is mapped at that address
+// Event buffers are mapped per window, see event_buffer_user_vaddr. This address is now only the base from which the shared data page address is derived
 pub const EVENT_BUFFER_ADDR: usize = 0x0000_0007_0000_0000;
 pub const PROGRAM_SHARED_DATA_ADDR: usize = EVENT_BUFFER_ADDR + PAGE_SIZE;
 
@@ -84,8 +89,8 @@ impl SharedState {
     pub fn map_into_process(
         &self,
         user_memory_manager: &UserMemoryManager,
-        pml4_table_phys: PhysAddr,
-        frame_allocator: &mut MutexGuard<'_, MemoryMapFrameAllocator>,
+        memory_layout: &mut ProcessMemoryLayout,
+        frame_allocator: &mut MemoryMapFrameAllocator,
     ) -> Result<(), MapToError<Size4KiB>> {
         for i in 0..SHARED_REGION_COUNT {
             let region = self.regions[i];
@@ -95,11 +100,12 @@ impl SharedState {
                 region.default_user_vaddr.as_u64()
             );
 
-            user_memory_manager.map_specific_frame(
-                pml4_table_phys,
+            memory_layout.map_frames(
                 region.default_user_vaddr,
-                region.phys_addr,
+                &[region.phys_addr],
                 region.page_table_flags,
+                FrameOwnership::Borrowed,
+                user_memory_manager,
                 frame_allocator,
             )?;
         }
@@ -146,7 +152,8 @@ pub fn init_shared_state() {
                     _reserved: 0,
                     page_table_flags: PageTableFlags::PRESENT
                         | PageTableFlags::WRITABLE
-                        | PageTableFlags::USER_ACCESSIBLE,
+                        | PageTableFlags::USER_ACCESSIBLE
+                        | PageTableFlags::NO_EXECUTE,
                 },
             );
         }

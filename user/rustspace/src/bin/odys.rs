@@ -19,8 +19,8 @@ use embedded_graphics::{
     text::{Alignment, LineHeight, Text, TextStyle, TextStyleBuilder},
 };
 use rustspace::{
-    AsciiChar, DirEntryFlat, EVENT_BUFFER_ADDR, EventReader, EventType, FD_FLAG_READ, InputEvent,
-    KeyState, Keys, StatFlat,
+    AsciiChar, DirEntryFlat, EventReader, EventType, FD_FLAG_READ, InputEvent, KeyState, Keys,
+    StatFlat,
     gfx::{color::Rgba8888UNORM, surface::UserSurface},
 };
 use rustspace::{KeyCode, WindowInfo, sys_get_window_info};
@@ -506,7 +506,7 @@ pub extern "C" fn main() -> ! {
 
     rustspace::println!("Odys: starting");
 
-    let mut event_reader = unsafe { EventReader::new(EVENT_BUFFER_ADDR) };
+    let mut event_reader = unsafe { EventReader::new(window_info.event_buffer_vaddr as usize) };
 
     let mut frame: u32 = 0;
     loop {

@@ -1,14 +1,17 @@
 use crate::data_structures::circular_buffer::{CircularBuffer, CircularBufferInfo};
 use crate::events::event_buffer::EventBuffer;
 use crate::filesystem::sirius::{DirEntryFlat, FS_NAME_LEN, FilesystemDriver, StatFlat};
-use crate::graphics::window::WindowInfo;
+use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
+use crate::graphics::window::{WindowInfo, event_buffer_user_vaddr};
 use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
 use crate::io::serial;
 use crate::memory::get_frame_allocator;
+use crate::memory::memory::PAGE_SIZE;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
 use crate::process::elf_loader::ODYS_ELF;
-use crate::process::process::{ExecutionContext, FileDescriptor, PROCESS_WINDOW_BUFFER_BASE};
+use crate::process::process::{ExecutionContext, FileDescriptor};
+use crate::process::process_mem::FrameOwnership;
 use crate::process::{CORE_POOL, ElfLoadInfo};
 use crate::serial_println;
 use crate::util::cpuinfo::{CpuInfoFlat, get_cpu_info_for_core};
@@ -427,6 +430,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                         x86_64::registers::control::Cr3Flags::empty(),
                     );
                 }
+                crate::graphics::compositor::destroy_windows_of_process(target_pid);
                 {
                     let mut pm = PROCESS_MANAGER.lock();
                     if let Err(e) = pm.terminate_process(target_pid, exit_code, false) {
@@ -437,6 +441,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 x86_64::instructions::interrupts::disable();
                 scheduler::return_to_scheduler();
             } else {
+                crate::graphics::compositor::destroy_windows_of_process(target_pid);
                 let res = {
                     let mut pm = PROCESS_MANAGER.lock();
                     pm.terminate_process(target_pid, exit_code, false)
@@ -556,6 +561,8 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                     x86_64::registers::control::Cr3Flags::empty(),
                 );
             }
+            // window cleanup takes the process manager lock itself, so it runs first
+            crate::graphics::compositor::destroy_windows_of_process(pid);
             {
                 let mut pm = PROCESS_MANAGER.lock();
                 pm.terminate_process(pid, exit_code as i32, false);
@@ -569,8 +576,8 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
             let umm = crate::memory::get_user_mem_mgr();
-            let mut fa = crate::memory::get_frame_allocator();
             let mut pm = PROCESS_MANAGER.lock();
+            let mut fa = crate::memory::get_frame_allocator();
             match pm.get_process_mut(pid) {
                 Ok(proc) => match proc.memory_layout.allocate_heap(size, umm, &mut fa) {
                     Ok(old_ptr) => {
@@ -604,14 +611,16 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let pid = scheduler::get_current_process_for_core(core_id);
 
             // Retrieve the WindowBuffer Arc from the compositor, then release the compositor lock.
-            let (buffer_arc, max_window_buffer_size) = {
+            let (buffer_arc, max_window_buffer_size, user_base) = {
                 let compositor = crate::graphics::compositor::get_compositor();
                 let max_window_buffer_size = compositor.max_window_buffer_bytes();
+                let user_base = compositor.window_buffer_user_base(window_id);
                 let windows = compositor.windows.read();
                 match windows.get(window_id as usize) {
-                    Some(w) if w.is_visible => (
+                    Some(w) if w.is_visible && w.owner_pid == pid => (
                         alloc::sync::Arc::clone(&w.buffer),
                         max_window_buffer_size,
+                        user_base,
                     ),
                     _ => {
                         serial_println_core!(
@@ -625,8 +634,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
 
             let back_vaddr = buffer_arc.back_buffer_virt_addr();
             let front_vaddr = buffer_arc.front_buffer_virt_addr();
-            let pixel_count = buffer_arc.pixel_count();
-            let byte_count = pixel_count * 4;
+            let byte_count = buffer_arc.pixel_count() * FRAMEBUFFER_BYTES_PER_PIXEL as usize;
             if byte_count as u64 > max_window_buffer_size {
                 serial_println_core!(
                     "sys_map_window_buffer: window_id={} buffer size {} exceeds slot max {}",
@@ -636,69 +644,72 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 );
                 return u64::MAX;
             }
-            let page_count = (byte_count + 0xFFF) / 0x1000;
-
-            let slot_size = 2 * max_window_buffer_size;
-            let user_base = PROCESS_WINDOW_BUFFER_BASE + (window_id as u64) * slot_size;
-
-            let pml4_phys = {
-                let pm = PROCESS_MANAGER.lock();
-                match pm.get_process(pid) {
-                    Ok(p) => p.memory_layout.top_page_table_phys,
-                    Err(_) => {
-                        serial_println_core!("sys_map_window_buffer: pid={} not found", pid);
-                        return u64::MAX;
-                    }
-                }
-            };
+            let page_count = buffer_arc.page_count();
 
             let umm = crate::memory::get_user_mem_mgr();
             let flags = x86_64::structures::paging::PageTableFlags::PRESENT
                 | x86_64::structures::paging::PageTableFlags::WRITABLE
-                | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
                 | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
 
+            let mut back_frames: alloc::vec::Vec<x86_64::PhysAddr> =
+                alloc::vec::Vec::with_capacity(page_count);
+            let mut front_frames: alloc::vec::Vec<x86_64::PhysAddr> =
+                alloc::vec::Vec::with_capacity(page_count);
+            for i in 0..page_count {
+                let page_offset = (i * PAGE_SIZE) as u64;
+                back_frames.push(umm.translate_kernel_heap_virt_to_phys(back_vaddr + page_offset));
+                front_frames
+                    .push(umm.translate_kernel_heap_virt_to_phys(front_vaddr + page_offset));
+            }
+
+            let back_user_virt = x86_64::VirtAddr::new(user_base);
+            let front_user_virt = x86_64::VirtAddr::new(user_base + max_window_buffer_size);
+            let buffer_bytes = (page_count * PAGE_SIZE) as u64;
+
             {
+                let mut pm = PROCESS_MANAGER.lock();
                 let mut frame_allocator = get_frame_allocator();
+                let Ok(proc) = pm.get_process_mut(pid) else {
+                    serial_println_core!("sys_map_window_buffer: pid={} not found", pid);
+                    return u64::MAX;
+                };
+                let layout = &mut proc.memory_layout;
 
-                for i in 0..page_count {
-                    let page_vaddr = back_vaddr + (i * 0x1000) as u64;
-                    let front_page_vaddr = front_vaddr + (i * 0x1000) as u64;
-                    let phys = umm.translate_kernel_heap_virt_to_phys(page_vaddr);
-                    let front_phys = umm.translate_kernel_heap_virt_to_phys(front_page_vaddr);
-                    let user_virt = x86_64::VirtAddr::new(user_base + (i * 0x1000) as u64);
-                    let front_user_virt = x86_64::VirtAddr::new(
-                        user_base + max_window_buffer_size + (i * 0x1000) as u64,
+                // the kernel swaps its front and back buffers, so mapping again would not match
+                if layout.is_range_tracked(back_user_virt, buffer_bytes)
+                    && layout.is_range_tracked(front_user_virt, buffer_bytes)
+                {
+                    return user_base;
+                }
+
+                if let Err(e) = layout.map_frames(
+                    back_user_virt,
+                    &back_frames,
+                    flags,
+                    FrameOwnership::Borrowed,
+                    umm,
+                    &mut frame_allocator,
+                ) {
+                    serial_println_core!(
+                        "sys_map_window_buffer: mapping back buffer failed: {:?}",
+                        e
                     );
-
-                    if let Err(e) = umm.map_specific_frame(
-                        pml4_phys,
-                        user_virt,
-                        phys,
-                        flags,
-                        &mut frame_allocator,
-                    ) {
-                        serial_println_core!(
-                            "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
-                            i,
-                            e
-                        );
-                        return u64::MAX;
-                    }
-                    if let Err(e) = umm.map_specific_frame(
-                        pml4_phys,
-                        front_user_virt,
-                        front_phys,
-                        flags,
-                        &mut frame_allocator,
-                    ) {
-                        serial_println_core!(
-                            "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
-                            i,
-                            e
-                        );
-                        return u64::MAX;
-                    }
+                    return u64::MAX;
+                }
+                if let Err(e) = layout.map_frames(
+                    front_user_virt,
+                    &front_frames,
+                    flags,
+                    FrameOwnership::Borrowed,
+                    umm,
+                    &mut frame_allocator,
+                ) {
+                    serial_println_core!(
+                        "sys_map_window_buffer: mapping front buffer failed: {:?}",
+                        e
+                    );
+                    layout.unmap_region(back_user_virt, buffer_bytes, umm, &mut frame_allocator);
+                    return u64::MAX;
                 }
             }
 
@@ -755,7 +766,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                     out.width = w.buffer.width;
                     out.height = w.buffer.height;
                     out.event_buffer_vaddr = match w.event_buffer {
-                        Some(buffer) => buffer as *const EventBuffer as u64,
+                        Some(_) => event_buffer_user_vaddr(window_id),
                         None => 0,
                     };
                     out.front_buffer_offset = compositor.max_window_buffer_bytes();
@@ -1320,12 +1331,20 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let page_flags = PageTableFlags::from_bits_truncate(frame.arg2);
             let buffer_info_out = frame.arg3 as *mut CircularBufferInfo;
 
+            if !validate_user_ptr(
+                buffer_info_out as usize,
+                core::mem::size_of::<CircularBufferInfo>(),
+            ) {
+                serial_println_core!("CreateCircularBuffer: invalid buffer_info_out pointer");
+                return u64::MAX;
+            }
+
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
 
-            let mut frame_allocator = get_frame_allocator();
-            let user_memory_manager = &crate::memory::get_user_mem_mgr();
+            let user_memory_manager = crate::memory::get_user_mem_mgr();
             let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
+            let mut frame_allocator = get_frame_allocator();
 
             if let Ok(proc) = pm.get_process_mut(pid) {
                 serial_println_core!("CreateCircularBuffer: found process for pid: {}", pid);
@@ -1343,7 +1362,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                             buffer_info.virtual_base,
                             buffer_info.view_size
                         );
-                        *buffer_info_out = buffer_info;
+                        buffer_info_out.write_unaligned(buffer_info);
                         return 0;
                     }
                     None => {

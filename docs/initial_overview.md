@@ -209,7 +209,7 @@ QEMU exit device port `0xF4` size `4`: write `0x10` success (QEMU 33), `0x11` fa
 | LAPIC MMIO | `0xFFFF_FFFF_0000_0000` | `LAPIC_VIRT_BASE` |
 | IOAPIC MMIO | `0xFFFF_FFFF_FF00_0000` | `IOAPIC_VIRT_BASE` |
 | User stack top | `0x7FFF_FFFF_F000` | `USER_STACK_TOP` |
-| User heap | `0x0000_0000_6000_0000` | `heap_start` in `ProcessMemoryLayout` |
+| User heap | `0x0000_0000_6000_0000` | `PROCESS_HEAP_VIRT_START`, `heap_end` in `ProcessMemoryLayout` |
 | User window buffers | `0x0000_0001_0000_0000+` | per `window_id*8MB` |
 | User circular buffers | `0x1000_0000..0x5000_0000` | `allocate_virtual_range` |
 
@@ -234,40 +234,45 @@ pub struct UserMemoryManager {
 }
 ```
 
-Global `USER_MEMORY_MANAGER: Once<Mutex<UserMemoryManager>>`. Access `memory::get_user_mem_mgr()`.
+Global `USER_MEMORY_MANAGER: Once<UserMemoryManager>` (no mutex, only `&self` methods and write-once fields). Access `memory::get_user_mem_mgr()` returns `&'static UserMemoryManager`.
 
 - `allocate_new_address_space` — alloc 4KiB frame for new PML4, zero, copy kernel entries `256..511`, return phys.
-- `map_virt_mem_region` — per page alloc frame, `map_to` with `protection_flags | USER_ACCESSIBLE`, on `PageAlreadyMapped` merges flags (`OR` caps, `AND` `NO_EXECUTE`), **deallocates** spare frame.
-- `create_main_stack` — maps `stack_size` ending at `USER_STACK_TOP`, flags `PRESENT|WRITABLE`
+- `map_virt_mem_region` — per page alloc frame, `map_to` with `protection_flags | USER_ACCESSIBLE`, on `PageAlreadyMapped` merges flags (`OR` caps, `AND` `NO_EXECUTE`), **deallocates** spare frame. Pages mapped by a failed call are rolled back.
+- the main stack is mapped through `ProcessMemoryLayout::map_owned_region`, ending at `USER_STACK_TOP`
 - `translate_user_virt_to_phys` — walks `PML4→PDPT→PD→PT` (handles 2MiB huge), used ELF load + window buffer map + reclaim
 - `get_page_flags` — walk to read `PageTableFlags`
-- `map_specific_frame` — maps explicit `phys_addr` into user PML4 with `PRESENT|WRITABLE|USER_ACCESSIBLE|NO_EXECUTE` (no alloc), used window buffers + circular buffers
-- `unmap_all_user_pages_with_owned_set`/`reclaim_empty_user_tables`/`free_pml4_frame` — free leaves + tables on `terminate_process`
+- `map_specific_frame` — maps explicit `phys_addr` into user PML4 with the caller's flags `| USER_ACCESSIBLE` (no alloc), errors if the page already maps a different frame. Reached through `ProcessMemoryLayout::map_frames`, used for window buffers, event buffers, the shared data page and circular buffers
+- `unmap_user_region`/`free_user_tables`/`free_pml4_frame` — unmap region pages (free frames only for `Owned`), free page tables (`debug_assert` empty), free the PML4, on `terminate_process`
 - `translate_kernel_heap_virt_to_phys` removed — use page-table walk via `kernel_page_table_phys`, never `vaddr - HHDM_OFFSET` for heap (latter bug `BUG-11`)
 
 `ProcessMemoryLayout` in `process/process_mem.rs`:
 
 ```rust
+pub enum FrameOwnership { Owned, Borrowed }
+
+pub struct MappedMemoryRegion {
+    pub start_virt: VirtAddr,
+    pub size_bytes: u64,
+    pub page_flags: PageTableFlags,
+    pub frame_ownership: FrameOwnership,
+}
+
 pub struct ProcessMemoryLayout {
     pub top_page_table_phys: PhysAddr,
-    pub stack_top: VirtAddr,
-    pub stack_size: u64,
-    pub heap_start: VirtAddr, // 0x6000_0000
-    pub heap_end: VirtAddr,   // == heap_start initially, bump via allocate_heap
-    pub mapped_regions: Vec<MappedMemoryRegion>,
+    pub heap_end: VirtAddr, // starts at PROCESS_HEAP_VIRT_START 0x6000_0000, bump via allocate_heap
     pub next_alloc_vaddr: VirtAddr, // 0x1000_0000
-    pub allocated_ranges: Vec<(u64,u64)>,
+    pub regions: Vec<MappedMemoryRegion>, // sorted by start_virt, every user mapping is tracked here
 }
 ```
 
-`allocate_heap`/`grow_heap` bump at `0x6000_0000` via `sys_allocate(5)`, maps `PRESENT|WRITABLE|USER_ACCESSIBLE|NO_EXECUTE`; `free_address_space` reclaims on exit.
+`map_owned_region` (zeroed frames, ELF/stack/heap), `map_frames` (explicit frames, circular/window/event/shared pages), `unmap_region` and the private `track_region` (sorted insert, merges equal neighbours) are the only ways to change the mappings. `allocate_heap`/`grow_heap` bump at `0x6000_0000` via `sys_allocate(5)` with `PRESENT|WRITABLE|USER_ACCESSIBLE|NO_EXECUTE`; `free_address_space` unmaps every region and frees the tables on exit. Details in `docs/memory.md`.
 
 Globals accessor:
 
 ```rust
 memory::init_memory_globals(frame_allocator, user_mem_manager);
 memory::get_frame_allocator() -> MutexGuard<MemoryMapFrameAllocator>
-memory::get_user_mem_mgr()    -> MutexGuard<UserMemoryManager>
+memory::get_user_mem_mgr()    -> &'static UserMemoryManager
 ```
 
 ---
@@ -741,7 +746,7 @@ MSR helpers `util/msr.rs`: `msr_read(reg)->u64` `RDMSR`, `msr_write(reg,val)` `W
 - Naming: globals `UPPER_SNAKE_CASE` (`SCHEDULER`, `CORE_POOL`, `FRAME_ALLOCATOR`), constants `UPPER_SNAKE_CASE`, types `PascalCase`, funcs `snake_case`, per-core `PER_CORE_`, `Once<Mutex<T>>` singletons, sentinel `INVALID_PID = usize::MAX`, `INVALID_WINDOW_ID = u32::MAX`.
 - Data structures `data_structures/`: custom `Vec`, `Dequeue` (no-std), prefer over `alloc::vec::Vec` for consistency.
 - Error handling: no `std::error::Error`, enums `#[derive(Debug,Clone,Copy)]`, `Result<T,FooError>` (`FileSystemResult`, `DiskOpResult`, `ProcessError`, `ElfLoadError`, `MapToError`), no panics hot path, `assert!`/`debug_assert!` for invariants (`assert!(pid != INVALID_PID)`).
-- Lock ordering `CORE_POOL → PROCESS_MANAGER → SCHEDULER → FRAME_ALLOCATOR/USER_MEMORY_MANAGER → SERIAL1/SERIAL2` — never hold SCHEDULER while acquiring PROCESS_MANAGER. Compositor `RwLock<Vec<Window>>`.
+- Lock ordering `COMPOSITOR → CORE_POOL → PROCESS_MANAGER → SCHEDULER → FRAME_ALLOCATOR → SERIAL1/SERIAL2` (`USER_MEMORY_MANAGER` has no lock now) — never hold SCHEDULER while acquiring PROCESS_MANAGER. Compositor `RwLock<Vec<Window>>`.
 - File layout: new subsystems `kernel/src/<name>/mod.rs` with `pub use` re-exports, tests `kernel/src/tests_exp/test_<name>.rs`, userspace `user/programs/<name>/`.
 - Arch constraints: monolithic, `no_std`, base `0xffffffff80000000`, HHDM `0xFFFF_8000_0000_0000` (use runtime `BootInfo` value for new mapping), MMX disabled, red zone disabled, `large` code model, `4-level` `4KiB` paging, XAPIC only (`X2APIC` disabled), SMP `BSP core0` kernel/graphics/process creation, `AP core1+` scheduler loops, currently `2` cores QEMU.
 - Suppressed warnings known TODO.

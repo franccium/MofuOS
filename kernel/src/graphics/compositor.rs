@@ -6,13 +6,16 @@ use pc_keyboard::KeyCode;
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use crate::graphics::framebuffer::FrameBufferTarget;
-use crate::graphics::window::{INVALID_WINDOW_ID, Window, WindowBuffer, WindowID};
+use crate::graphics::window::{
+    INVALID_WINDOW_ID, Window, WindowBuffer, WindowID, event_buffer_user_vaddr,
+};
 use crate::memory::memory::{PAGE_SIZE, align_up};
 use crate::memory::{get_frame_allocator, usermem};
 use crate::process::PID;
-use crate::process::process::PROCESS_WINDOW_BUFFER_HARD_MAX_SIZE;
+use crate::process::process::{PROCESS_WINDOW_BUFFER_BASE, PROCESS_WINDOW_BUFFER_HARD_MAX_SIZE};
+use crate::process::process_mem::FrameOwnership;
 use crate::process::shared_state::{
-    EVENT_BUFFER_ADDR, get_shared_program_data_buffer, get_shared_program_data_buffer_mut,
+    get_shared_program_data_buffer, get_shared_program_data_buffer_mut,
 };
 use crate::{serial_println, serial_println_core};
 use alloc::collections::BTreeMap;
@@ -21,7 +24,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use embedded_graphics::pixelcolor::Rgb888;
 use spin::{Mutex, MutexGuard, Once, RwLock};
-use x86_64::structures::paging::PageTableFlags;
+use x86_64::structures::paging::{PageTableFlags, PhysFrame};
 use x86_64::{PhysAddr, VirtAddr};
 
 static COMPOSITOR: Once<Mutex<Compositor>> = Once::new();
@@ -32,6 +35,12 @@ pub fn init_compositor(width: u32, height: u32) {
 
 pub fn get_compositor() -> MutexGuard<'static, Compositor> {
     COMPOSITOR.get().expect("compositor not initialized").lock()
+}
+
+pub fn destroy_windows_of_process(pid: PID) {
+    if let Some(compositor) = COMPOSITOR.get() {
+        compositor.lock().destroy_windows_of_process(pid);
+    }
 }
 
 static INPUT_EVENT_BUFFER: Once<EventBuffer> = Once::new();
@@ -115,6 +124,13 @@ impl Compositor {
         align_up(framebuffer_bytes, PAGE_SIZE as u64).min(PROCESS_WINDOW_BUFFER_HARD_MAX_SIZE)
     }
 
+    /// User virtual address of the front and back buffer slot of a window, the front buffer
+    /// follows the back buffer by max_window_buffer_bytes
+    pub fn window_buffer_user_base(&self, window_id: WindowID) -> u64 {
+        let slot_size = 2 * self.max_window_buffer_bytes();
+        PROCESS_WINDOW_BUFFER_BASE + window_id as u64 * slot_size
+    }
+
     pub fn create_window(
         &self,
         width: u32,
@@ -137,6 +153,7 @@ impl Compositor {
         };
         let window = Window {
             id,
+            owner_pid: pid,
             x,
             y,
             z_index: 0,
@@ -167,6 +184,8 @@ impl Compositor {
     ) -> Option<(&'static EventBuffer, PhysAddr)> {
         serial_println_core!("allocate_event_buffer_for_window: window_id={}", window_id);
 
+        let user_memory_manager = crate::memory::get_user_mem_mgr();
+        let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
         let mut frame_allocator = get_frame_allocator();
         let (phys, kernel_vaddr) = match usermem::allocate_zeroed_page(&mut frame_allocator) {
             Some((phys, virt)) => (phys, virt),
@@ -192,44 +211,33 @@ impl Compositor {
             kernel_vaddr
         );
 
-        {
-            let user_memory_manager = &crate::memory::get_user_mem_mgr();
-            serial_println_core!("allocate_event_buffer_for_window: locked get_user_mem_mgr");
-            let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
-            serial_println_core!("allocate_event_buffer_for_window: locked PROCESS_MANAGER");
-
+        serial_println_core!(
+            "allocate_event_buffer_for_window: mapping EventBuffer for pid: {}",
+            pid
+        );
+        let Ok(proc) = pm.get_process_mut(pid) else {
             serial_println_core!(
-                "allocate_event_buffer_for_window: mapping EventBuffer for pid: {}",
+                "allocate_event_buffer_for_window: no process for pid: {}",
                 pid
             );
-            if let Ok(proc) = pm.get_process_mut(pid) {
-                serial_println_core!(
-                    "allocate_event_buffer_for_window: found process for pid: {}",
-                    pid
-                );
-                match user_memory_manager.map_specific_frame(
-                    proc.memory_layout.top_page_table_phys,
-                    //kernel_vaddr,
-                    VirtAddr::new(EVENT_BUFFER_ADDR as u64),
-                    phys,
-                    PageTableFlags::PRESENT
-                        | PageTableFlags::WRITABLE
-                        | PageTableFlags::USER_ACCESSIBLE,
-                    &mut frame_allocator,
-                ) {
-                    Ok(()) => {
-                        serial_println_core!(
-                            "allocate_event_buffer_for_window: EventBuffer mapped"
-                        );
-                    }
-                    Err(e) => {
-                        serial_println_core!(
-                            "allocate_event_buffer_for_window: EventBuffer mapping error: {:?}",
-                            e
-                        );
-                    }
-                }
-            }
+            frame_allocator.deallocate_frame(PhysFrame::containing_address(phys));
+            return None;
+        };
+
+        if let Err(e) = proc.memory_layout.map_frames(
+            VirtAddr::new(event_buffer_user_vaddr(window_id)),
+            &[phys],
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+            FrameOwnership::Borrowed,
+            user_memory_manager,
+            &mut frame_allocator,
+        ) {
+            serial_println_core!(
+                "allocate_event_buffer_for_window: EventBuffer mapping error: {:?}",
+                e
+            );
+            frame_allocator.deallocate_frame(PhysFrame::containing_address(phys));
+            return None;
         }
         serial_println_core!("allocate_event_buffer_for_window: end");
 
@@ -295,14 +303,78 @@ impl Compositor {
     }
 
     //TODO: actually do something with the invalid window id markings
+    /// Hides the window, unmaps its buffers and event page from the owning process and frees
+    /// the event page. The window slot is reused by a later create_window
     pub fn destroy_window(&self, window_id: WindowID) {
-        if window_id != INVALID_WINDOW_ID {
-            let mut windows = self.windows.write();
-            let window = windows.get_mut(window_id as usize).unwrap();
-            window.is_visible = false;
-            self.free_window_ids.lock().push(window_id);
-        } else {
+        if window_id == INVALID_WINDOW_ID {
             serial_println!("Attempted to destroy an invalid window ID: {}", window_id);
+            return;
+        }
+
+        let (owner_pid, event_buffer_phys, buffer_page_count) = {
+            let mut windows = self.windows.write();
+            let Some(window) = windows.get_mut(window_id as usize) else {
+                serial_println!("Attempted to destroy a nonexistent window: {}", window_id);
+                return;
+            };
+            if !window.is_visible {
+                return;
+            }
+
+            window.is_visible = false;
+            let event_buffer_phys = window.event_buffer_phys;
+            window.event_buffer = None;
+            window.event_buffer_phys = PhysAddr::zero();
+
+            (window.owner_pid, event_buffer_phys, window.buffer.page_count())
+        };
+        self.free_window_ids.lock().push(window_id);
+
+        let user_memory_manager = crate::memory::get_user_mem_mgr();
+        let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
+        let mut frame_allocator = get_frame_allocator();
+
+        if let Ok(proc) = pm.get_process_mut(owner_pid) {
+            let layout = &mut proc.memory_layout;
+            if layout.top_page_table_phys.as_u64() != 0 {
+                let buffer_bytes = (buffer_page_count * PAGE_SIZE) as u64;
+                let back_buffer_base = self.window_buffer_user_base(window_id);
+                let front_buffer_base = back_buffer_base + self.max_window_buffer_bytes();
+                let mut unmap_range = |range_start: u64, range_bytes: u64| {
+                    layout.unmap_region(
+                        VirtAddr::new(range_start),
+                        range_bytes,
+                        user_memory_manager,
+                        &mut frame_allocator,
+                    );
+                };
+
+                // buffers that were never mapped by the process are simply not found
+                unmap_range(back_buffer_base, buffer_bytes);
+                unmap_range(front_buffer_base, buffer_bytes);
+                if !event_buffer_phys.is_null() {
+                    unmap_range(event_buffer_user_vaddr(window_id), PAGE_SIZE as u64);
+                }
+            }
+        }
+
+        if !event_buffer_phys.is_null() {
+            frame_allocator.deallocate_frame(PhysFrame::containing_address(event_buffer_phys));
+        }
+    }
+
+    /// Run before the process manager lock is taken, window cleanup locks it itself
+    pub fn destroy_windows_of_process(&self, pid: PID) {
+        let owned_window_ids: Vec<WindowID> = self
+            .windows
+            .read()
+            .iter()
+            .filter(|window| window.is_visible && window.owner_pid == pid)
+            .map(|window| window.id)
+            .collect();
+
+        for window_id in owned_window_ids {
+            self.destroy_window(window_id);
         }
     }
 
@@ -351,21 +423,11 @@ impl Compositor {
                 let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
                 let new_focused_window_id = focused_window_id.saturating_sub(1);
                 //TODO: focused_window_id.clamp(0, self.windows.len());
-                serial_println_core!(
-                    "Switch focus from {} to {}",
-                    focused_window_id,
-                    new_focused_window_id
-                );
                 self.focus_window(new_focused_window_id);
             } else if key == KeyCode::ArrowRight as u8 {
                 let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
                 let (new_focused_window_id, _) = focused_window_id.overflowing_add(1);
                 //TODO: focused_window_id.clamp(0, self.windows.len());
-                serial_println_core!(
-                    "Switch focus from {} to {}",
-                    focused_window_id,
-                    new_focused_window_id
-                );
                 self.focus_window(new_focused_window_id);
             }
         }

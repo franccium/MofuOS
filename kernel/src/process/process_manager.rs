@@ -1,5 +1,5 @@
 use crate::data_structures::vector::Vec;
-use crate::process::process::{PROCESS_USER_VADDR_ALLOC_START, ProcessResources};
+use crate::process::process::ProcessResources;
 //use alloc::vec::Vec;
 use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
@@ -9,8 +9,8 @@ use crate::process::scheduler::SCHEDULER;
 use crate::{serial_println, serial_println_core};
 use alloc::string::String;
 use spin::Mutex;
+use x86_64::PhysAddr;
 use x86_64::instructions::interrupts;
-use x86_64::{PhysAddr, VirtAddr};
 
 pub const ARCHE_PID: usize = 0;
 
@@ -70,110 +70,6 @@ impl ProcessManager {
         serial_println!("Initialized arche process with PID 0");
         self.processes.push(arche.unwrap());
         0
-    }
-
-    pub fn create_process(
-        &mut self,
-        parent_pid: usize,
-        priority: u8,
-        name_ptr: *const u8,
-        name_len: u8,
-        is_out: bool,
-        entry_point: u64,
-        stack_top: u64,
-        page_table_base: u64,
-    ) -> Result<usize, ProcessError> {
-        assert!(
-            parent_pid != INVALID_PID,
-            "Parent PID cannot be INVALID_PID"
-        );
-
-        let _parent = self
-            .get_process(parent_pid)
-            .map_err(|_| ProcessError::ParentNotFound)?;
-
-        let new_pid = self.new_pid;
-        self.new_pid += 1;
-
-        // Extract process name
-        let name_str = unsafe {
-            let slice = core::slice::from_raw_parts(name_ptr, name_len as usize);
-            String::from_utf8_lossy(slice).into_owned()
-        };
-
-        // Allocate a CPU core for the new process from the core pool
-        let mut core_pool = CORE_POOL.lock();
-        let core_id = core_pool
-            .allocate_core(new_pid)
-            .ok_or(ProcessError::NoCoresAvailable)?;
-        drop(core_pool);
-
-        // Create kernel thread for this process (one-to-one model)
-        let mut kernel_thread = KernelThread::new(
-            new_pid,
-            priority,
-            String::from(&name_str),
-            entry_point,
-            stack_top,
-            page_table_base,
-        );
-        kernel_thread.assign_to_core(core_id);
-
-        // Create thread group
-        let thread_group = ThreadGroup::new(new_pid, kernel_thread);
-
-        // Create process structure
-        let new_process = Process {
-            pid: new_pid,
-            parent_pid,
-            priority,
-            state: ProcessState::Ready,
-            name: String::from(&name_str),
-            children: Vec::new(),
-            file_descriptors: Vec::new(),
-            resources: crate::process::process::ProcessResources::default(),
-            exit_code: None,
-            is_out,
-            execution_context: crate::process::process::ExecutionContext::new(
-                entry_point,
-                stack_top,
-                page_table_base,
-            ),
-            memory_layout: crate::process::process_mem::ProcessMemoryLayout {
-                top_page_table_phys: PhysAddr::new(page_table_base),
-                stack_top: VirtAddr::new(stack_top),
-                stack_size: 0,
-                heap_start: VirtAddr::new(crate::process::process::PROCESS_HEAP_VIRT_START),
-                heap_end: VirtAddr::new(crate::process::process::PROCESS_HEAP_VIRT_START),
-                owned_regions: alloc::vec::Vec::new(),
-                next_alloc_vaddr: VirtAddr::new(PROCESS_USER_VADDR_ALLOC_START),
-            },
-        };
-
-        // Store process and thread group BEFORE making the PID visible to the
-        // scheduler — same ordering guarantee as create_process_from_elf.
-        self.processes.push(new_process);
-        self.thread_groups.push(thread_group);
-
-        // Enqueue thread in scheduler for its assigned core only after the
-        // process is fully stored and visible via get_process().
-        {
-            x86_64::instructions::interrupts::disable();
-            let mut scheduler = SCHEDULER.lock();
-            scheduler.enqueue_on_core(core_id, new_pid, priority);
-            drop(scheduler);
-            x86_64::instructions::interrupts::enable();
-        }
-
-        serial_println!(
-            "Created process {} (PID {}) on core {} with priority {}",
-            name_str,
-            new_pid,
-            core_id,
-            priority
-        );
-
-        Ok(new_pid)
     }
 
     pub fn create_process_from_elf(
@@ -304,29 +200,26 @@ impl ProcessManager {
         }
 
         let children: Vec<PID>;
-        let layout_to_free: crate::process::process_mem::ProcessMemoryLayout;
-        let need_free: bool;
         {
             let process = self.get_process_mut(pid)?;
             children = process.children.clone();
             process.state = ProcessState::Terminated;
             process.exit_code = Some(exit_code);
-            layout_to_free = process.memory_layout.clone();
-            need_free = process.memory_layout.top_page_table_phys.as_u64() != 0;
-            if need_free {
-                process.memory_layout.top_page_table_phys = PhysAddr::new(0);
-            }
-        }
 
-        if need_free && layout_to_free.top_page_table_phys.as_u64() != 0 {
-            let user_mgr = crate::memory::get_user_mem_mgr();
-            let mut frame_allocator = crate::memory::get_frame_allocator();
-            layout_to_free.free_address_space(&user_mgr, &mut frame_allocator);
-            serial_println!(
-                "terminate_process: freed address space for PID {} (free frames: {})",
-                pid,
-                frame_allocator.free_frame_count()
-            );
+            if process.memory_layout.top_page_table_phys.as_u64() != 0 {
+                let user_mgr = crate::memory::get_user_mem_mgr();
+                let mut frame_allocator = crate::memory::get_frame_allocator();
+                process
+                    .memory_layout
+                    .free_address_space(user_mgr, &mut frame_allocator);
+                process.memory_layout.top_page_table_phys = PhysAddr::new(0);
+                process.memory_layout.regions.clear();
+                serial_println!(
+                    "terminate_process: freed address space for PID {} (free frames: {})",
+                    pid,
+                    frame_allocator.free_frame_count()
+                );
+            }
         }
 
         // Get the core assignment for cleanup

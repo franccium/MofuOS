@@ -2,6 +2,8 @@ use crate::events::event_buffer::EventBuffer;
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb, xrgb_to_rgba};
 use crate::memory::memory::{PAGE_SIZE, align_down, align_up};
+use crate::process::PID;
+use crate::process::process::PROCESS_EVENT_BUFFER_BASE;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -17,8 +19,15 @@ use x86_64::PhysAddr;
 pub type WindowID = u32;
 pub const INVALID_WINDOW_ID: WindowID = u32::MAX;
 
+/// User virtual address at which the owner of a window sees its event buffer
+pub fn event_buffer_user_vaddr(window_id: WindowID) -> u64 {
+    debug_assert!(window_id != INVALID_WINDOW_ID);
+    PROCESS_EVENT_BUFFER_BASE + window_id as u64 * PAGE_SIZE as u64
+}
+
 pub struct Window {
     pub id: WindowID,
+    pub owner_pid: PID,
     pub x: i32,
     pub y: i32,
     pub z_index: u8,
@@ -198,6 +207,10 @@ impl WindowBuffer {
 
     pub fn pixel_count(&self) -> usize {
         (self.width * self.height) as usize
+    }
+
+    pub fn page_count(&self) -> usize {
+        (self.pixel_count() * FRAMEBUFFER_BYTES_PER_PIXEL as usize).div_ceil(PAGE_SIZE)
     }
 
     pub fn get_bounding_rect(&self) -> Rect {

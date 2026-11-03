@@ -21,7 +21,7 @@ Facts about MofuOS that are not obvious from a first read and cost time when mis
 - The syscall entry is `syscall_handler` (naked asm) in `kernel/src/process/syscall.rs`. User rsp is stashed in a per-core scratch field (`PerCoreSyscallData.user_rsp_scratch`, after `_stack` so `test_guard_pages` layout checks still hold). The per-core syscall stack top is 8 mod 16
 - `jump_to_userspace` (`kernel/src/process/execution.rs`) restores only rip/rsp/rflags. GPRs saved into `ExecutionContext` on yield are not restored yet
 - The kernel is built for `x86_64-unknown-none` (soft-float). The kernel binary contains no XMM instructions, so it does not clobber user SSE state. Check with `objdump -d target/x86_64-unknown-none/debug/kernel | grep -c xmm`
-- ELF segments of user programs share pages (`.text`/`.rodata`/`.bss` are not page aligned by `user/rustspace/linker.ld`). `map_virt_mem_region` handles `PageAlreadyMapped` by merging flags, and `free_address_space` dedups frames
+- ELF segments of user programs share pages (`.text`/`.rodata`/`.bss` are not page aligned by `user/rustspace/linker.ld`). `map_virt_mem_region` handles `PageAlreadyMapped` by merging flags, and teardown (`unmap_user_region`) skips pages that are already absent so a shared page is freed once
 - The `sys_create_process` userspace wrapper passes `&[char]` (UTF-32) where the kernel expects UTF-8, so process names show up as `o   ` in logs
 
 ## Disk image

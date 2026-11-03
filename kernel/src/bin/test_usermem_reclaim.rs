@@ -188,6 +188,25 @@ fn test_main() -> ! {
         serial_println_core!("ok: free frames reclaimed");
     }
 
+    // allocated_bump_frames is frames handed out minus frames on the free list
+    if after_bump > before_bump {
+        serial_println_core!(
+            "FAIL: frames leaked, in use before={} after={}",
+            before_bump,
+            after_bump
+        );
+        success = false;
+    } else {
+        serial_println_core!("ok: no frames in use beyond the baseline");
+    }
+
+    if kernel::memory::get_frame_allocator().free_list_has_duplicates() {
+        serial_println_core!("FAIL: a frame was freed more than once");
+        success = false;
+    } else {
+        serial_println_core!("ok: no duplicate frames on the free list");
+    }
+
     // Ensure PID not still queued and process removed after cleanup
     {
         let mut pm = PROCESS_MANAGER.lock();

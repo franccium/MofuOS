@@ -96,11 +96,15 @@ process management (e.g., `assert!(pid != INVALID_PID)`).
 
 Lock hierarchy (acquire in this order to avoid deadlock):
 
-1. `CORE_POOL`
-2. `PROCESS_MANAGER`
-3. `SCHEDULER`
-4. `FRAME_ALLOCATOR` / `USER_MEMORY_MANAGER`
-5. `SERIAL1` / `SERIAL2` (grabbed briefly, interrupts disabled)
+1. Compositor (when needed)
+2. `CORE_POOL`
+3. `PROCESS_MANAGER`
+4. `SCHEDULER`
+5. `FRAME_ALLOCATOR` (`USER_MEMORY_MANAGER` has no lock, it is a `&'static` from a `Once`)
+6. `SERIAL1` / `SERIAL2` (grabbed briefly, interrupts disabled)
+
+Window cleanup on process exit (`destroy_windows_of_process`) takes the compositor and then
+`PROCESS_MANAGER`, so it runs before `PROCESS_MANAGER` is locked by the exit and kill paths.
 
 Never hold SCHEDULER while acquiring PROCESS_MANAGER (reverse would deadlock during
 `terminate_process` which acquires PM, called from scheduler context).
