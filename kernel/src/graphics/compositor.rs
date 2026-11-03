@@ -5,8 +5,10 @@ use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use crate::graphics::framebuffer::FrameBufferTarget;
 use crate::graphics::window::{INVALID_WINDOW_ID, Window, WindowBuffer, WindowID};
+use crate::memory::memory::{PAGE_SIZE, align_up};
 use crate::memory::{get_frame_allocator, usermem};
 use crate::process::PID;
+use crate::process::process::PROCESS_WINDOW_BUFFER_HARD_MAX_SIZE;
 use crate::process::shared_state::{
     EVENT_BUFFER_ADDR, get_shared_program_data_buffer, get_shared_program_data_buffer_mut,
 };
@@ -83,6 +85,25 @@ impl Compositor {
             mouse_last_drawn_x: 0,
             mouse_last_drawn_y: 0,
         }
+    }
+
+    pub fn framebuffer_width(&self) -> u32 {
+        self.framebuffer_width
+    }
+
+    pub fn framebuffer_height(&self) -> u32 {
+        self.framebuffer_height
+    }
+
+    /// Max bytes a single window buffer may occupy, bounded by the framebuffer
+    /// resolution and a hard clamp. One framebuffer-sized surface is the
+    /// largest window that can contribute visible pixels.
+    pub fn max_window_buffer_bytes(&self) -> u64 {
+        let framebuffer_bytes = self.framebuffer_width as u64
+            * self.framebuffer_height as u64
+            * FRAMEBUFFER_BYTES_PER_PIXEL as u64;
+
+        align_up(framebuffer_bytes, PAGE_SIZE as u64).min(PROCESS_WINDOW_BUFFER_HARD_MAX_SIZE)
     }
 
     pub fn create_window(

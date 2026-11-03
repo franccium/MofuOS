@@ -54,6 +54,7 @@ impl CircularBuffer {
             let frame_count = data_size / PAGE_SIZE;
             for i in 0..frame_count {
                 let frame = frame_allocator.allocate_frame()?;
+                user_memory_manager.zero_frame(frame);
 
                 user_memory_manager
                     .map_specific_frame(

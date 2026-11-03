@@ -8,7 +8,7 @@ use crate::memory::get_frame_allocator;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
 use crate::process::elf_loader::ODYS_ELF;
-use crate::process::process::FileDescriptor;
+use crate::process::process::{FileDescriptor, PROCESS_WINDOW_BUFFER_BASE};
 use crate::process::{CORE_POOL, ElfLoadInfo};
 use crate::serial_println;
 use crate::util::cpuinfo::{CpuInfoFlat, get_cpu_info_for_core};
@@ -448,7 +448,22 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
 
-            let mut compositor = crate::graphics::compositor::get_compositor();
+            let compositor = crate::graphics::compositor::get_compositor();
+            if width == 0
+                || height == 0
+                || width > compositor.framebuffer_width()
+                || height > compositor.framebuffer_height()
+            {
+                serial_println_core!(
+                    "sys_create_window: {}x{} exceeds framebuffer {}x{}",
+                    width,
+                    height,
+                    compositor.framebuffer_width(),
+                    compositor.framebuffer_height()
+                );
+                return u64::MAX;
+            }
+
             let (window_id, _buffer, _event_buffer) =
                 compositor.create_window(width, height, x, y, pid);
             serial_println_core!(
@@ -555,19 +570,16 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
 
-            // User virtual base for window pixel buffers.
-            // Chosen to be above the heap and well below the stack.
-            const USER_WINDOW_BUFFER_BASE: u64 = 0x0000_0001_0000_0000;
-            const MAX_WINDOW_BUFFER_SIZE: u64 = 8 * 1024 * 1024; // 8 MB per window slot
-
-            let user_base = USER_WINDOW_BUFFER_BASE + (window_id as u64) * MAX_WINDOW_BUFFER_SIZE;
-
             // Retrieve the WindowBuffer Arc from the compositor, then release the compositor lock.
-            let buffer_arc = {
+            let (buffer_arc, max_window_buffer_size) = {
                 let compositor = crate::graphics::compositor::get_compositor();
+                let max_window_buffer_size = compositor.max_window_buffer_bytes();
                 let windows = compositor.windows.read();
                 match windows.get(window_id as usize) {
-                    Some(w) if w.is_visible => alloc::sync::Arc::clone(&w.buffer),
+                    Some(w) if w.is_visible => (
+                        alloc::sync::Arc::clone(&w.buffer),
+                        max_window_buffer_size,
+                    ),
                     _ => {
                         serial_println_core!(
                             "sys_map_window_buffer: window_id={} not found",
@@ -582,7 +594,19 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let front_vaddr = buffer_arc.front_buffer_virt_addr();
             let pixel_count = buffer_arc.pixel_count();
             let byte_count = pixel_count * 4;
+            if byte_count as u64 > max_window_buffer_size {
+                serial_println_core!(
+                    "sys_map_window_buffer: window_id={} buffer size {} exceeds slot max {}",
+                    window_id,
+                    byte_count,
+                    max_window_buffer_size
+                );
+                return u64::MAX;
+            }
             let page_count = (byte_count + 0xFFF) / 0x1000;
+
+            let slot_size = 2 * max_window_buffer_size;
+            let user_base = PROCESS_WINDOW_BUFFER_BASE + (window_id as u64) * slot_size;
 
             let pml4_phys = {
                 let pm = PROCESS_MANAGER.lock();
@@ -611,7 +635,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                     let front_phys = umm.translate_kernel_heap_virt_to_phys(front_page_vaddr);
                     let user_virt = x86_64::VirtAddr::new(user_base + (i * 0x1000) as u64);
                     let front_user_virt = x86_64::VirtAddr::new(
-                        user_base + MAX_WINDOW_BUFFER_SIZE + (i * 0x1000) as u64,
+                        user_base + max_window_buffer_size + (i * 0x1000) as u64,
                     );
 
                     if let Err(e) = umm.map_specific_frame(

@@ -70,6 +70,13 @@ impl UserMemoryManager {
         Ok(new_table_pml4_phys)
     }
 
+    pub fn zero_frame(&self, frame: x86_64::structures::paging::PhysFrame<Size4KiB>) {
+        let frame_virt = VirtAddr::new(frame.start_address().as_u64() + self.phys_offset);
+        unsafe {
+            core::ptr::write_bytes(frame_virt.as_mut_ptr::<u8>(), 0, PAGE_SIZE);
+        }
+    }
+
     pub fn translate_user_virt_to_phys(
         &self,
         user_page_table_phys: PhysAddr,
@@ -194,6 +201,8 @@ impl UserMemoryManager {
             let phys_frame = frame_allocator
                 .allocate_frame()
                 .ok_or(MapToError::FrameAllocationFailed)?;
+            // Freshly allocated frames may be recycled from terminated processes
+            self.zero_frame(phys_frame);
             unsafe {
                 match user_page_mapper.map_to(page, phys_frame, user_flags, frame_allocator) {
                     Ok(flush) => {
@@ -317,7 +326,8 @@ impl UserMemoryManager {
         let stack_top = VirtAddr::new(USER_STACK_TOP);
         let stack_bottom = stack_top - stack_size;
 
-        let stack_protection_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        let stack_protection_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
         self.map_virt_mem_region(
             pml4_table_phys,

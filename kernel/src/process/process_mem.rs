@@ -1,8 +1,8 @@
 use crate::memory::memory::{MemoryMapFrameAllocator, PAGE_SIZE};
 use crate::memory::usermem::UserMemoryManager;
 use crate::process::process::{
-    PROCESS_HEAP_VIRT_END, PROCESS_HEAP_VIRT_START, PROCESS_USER_VADDR_ALLOC_END,
-    PROCESS_USER_VADDR_ALLOC_START,
+    PROCESS_HEAP_SIZE_BYTES, PROCESS_HEAP_VIRT_END, PROCESS_HEAP_VIRT_START,
+    PROCESS_USER_VADDR_ALLOC_END, PROCESS_USER_VADDR_ALLOC_START,
 };
 use crate::{serial_println, serial_println_core};
 use alloc::vec::Vec;
@@ -28,6 +28,18 @@ pub struct MappedMemoryRegion {
     pub start_virt: VirtAddr,
     pub size_bytes: u64,
     pub page_flags: PageTableFlags,
+}
+
+#[derive(Debug)]
+pub enum ProcessMemoryError {
+    OutOfVirtualRange,
+    MapTo(MapToError<Size4KiB>),
+}
+
+impl From<MapToError<Size4KiB>> for ProcessMemoryError {
+    fn from(error: MapToError<Size4KiB>) -> Self {
+        Self::MapTo(error)
+    }
 }
 
 const fn align_to_page_size(size: u64) -> u64 {
@@ -59,10 +71,20 @@ impl ProcessMemoryLayout {
         size_bytes: usize,
         address_space_manager: MutexGuard<'_, UserMemoryManager>,
         frame_allocator: &mut MemoryMapFrameAllocator,
-    ) -> Result<VirtAddr, MapToError<Size4KiB>> {
+    ) -> Result<VirtAddr, ProcessMemoryError> {
         if size_bytes == 0 {
             return Ok(self.heap_end);
         }
+
+        if size_bytes as u64 > PROCESS_HEAP_SIZE_BYTES {
+            serial_println!(
+                "ProcessMemoryLayout: allocate_heap: size {} exceeds heap capacity {}",
+                size_bytes,
+                PROCESS_HEAP_SIZE_BYTES
+            );
+            return Err(ProcessMemoryError::OutOfVirtualRange);
+        }
+
         let aligned_size = align_to_page_size(size_bytes as u64);
         let old_heap_end = self.heap_end;
         let new_heap_end = old_heap_end + aligned_size;
@@ -75,51 +97,47 @@ impl ProcessMemoryLayout {
         new_heap_end: VirtAddr,
         address_space_manager: MutexGuard<'_, UserMemoryManager>,
         frame_allocator: &mut MemoryMapFrameAllocator,
-    ) -> Result<VirtAddr, MapToError<Size4KiB>> {
-        if new_heap_end < self.heap_start {
-            serial_println!(
-                "ProcessMemoryLayout: grow_heap: new_heap_end ({}) < current heap_start ({})",
-                new_heap_end.as_u64(),
-                self.heap_start.as_u64()
-            );
+    ) -> Result<VirtAddr, ProcessMemoryError> {
+        if new_heap_end <= self.heap_end {
             return Ok(self.heap_end);
         }
 
-        if new_heap_end > self.heap_end {
-            let grow_by = align_to_page_size(new_heap_end - self.heap_end);
-            if grow_by > 0 {
-                let protection_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-
-                address_space_manager.map_virt_mem_region(
-                    self.top_page_table_phys,
-                    self.heap_end,
-                    grow_by as u64,
-                    protection_flags,
-                    frame_allocator,
-                )?;
-                self.mapped_regions.push(MappedMemoryRegion {
-                    start_virt: self.heap_end,
-                    size_bytes: grow_by,
-                    page_flags: protection_flags,
-                });
-                self.heap_end += grow_by;
-
-                serial_println!(
-                    "ProcessMemoryLayout: grow_heap: Grew heap by {} bytes (new heap_end: {})",
-                    grow_by,
-                    self.heap_end.as_u64()
-                );
-            }
-        } else if new_heap_end < self.heap_end {
-            let shrink_by = self.heap_end - new_heap_end;
-            self.heap_end = new_heap_end;
-
+        if new_heap_end > VirtAddr::new(PROCESS_HEAP_VIRT_END) {
             serial_println!(
-                "ProcessMemoryLayout: grow_heap: Shrunk heap by {} bytes (new heap_end: {})",
-                shrink_by,
-                self.heap_end.as_u64()
+                "ProcessMemoryLayout: grow_heap: new_heap_end ({}) exceeds heap limit ({})",
+                new_heap_end.as_u64(),
+                PROCESS_HEAP_VIRT_END
             );
+            return Err(ProcessMemoryError::OutOfVirtualRange);
         }
+
+        let grow_by = align_to_page_size(new_heap_end - self.heap_end);
+        if grow_by == 0 {
+            return Ok(self.heap_end);
+        }
+
+        let protection_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+
+        address_space_manager.map_virt_mem_region(
+            self.top_page_table_phys,
+            self.heap_end,
+            grow_by,
+            protection_flags,
+            frame_allocator,
+        )?;
+        self.mapped_regions.push(MappedMemoryRegion {
+            start_virt: self.heap_end,
+            size_bytes: grow_by,
+            page_flags: protection_flags,
+        });
+        self.heap_end += grow_by;
+
+        serial_println!(
+            "ProcessMemoryLayout: grow_heap: Grew heap by {} bytes (new heap_end: {})",
+            grow_by,
+            self.heap_end.as_u64()
+        );
 
         Ok(self.heap_end)
     }
