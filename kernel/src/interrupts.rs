@@ -36,6 +36,7 @@ use core::arch::x86_64::__rdtscp;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use pc_keyboard::KeyCode;
+#[cfg(feature = "ps2_mouse")]
 use ps2_mouse::{Mouse, MouseState};
 use spin::{Mutex, Once, lazy};
 use x86_64::instructions::port::Port;
@@ -48,12 +49,14 @@ use x86_64::{
         paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB},
     },
 };
+#[cfg(feature = "ps2_mouse")]
 lazy_static! {
     static ref MOUSE: Mutex<Mouse> = Mutex::new(Mouse::new());
 }
 
 const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
+#[cfg(feature = "ps2_mouse")]
 const MOUSE_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
 const PREEMPTION_ENABLED: bool = false;
@@ -85,6 +88,7 @@ const PIT_PC_SPEAKER: u16 = 0x61;
 const PIT_BASE_HZ: u64 = 1_193_182;
 
 const KEYBOARD_IRQ: u32 = 1;
+#[cfg(feature = "ps2_mouse")]
 const MOUSE_IRQ: u32 = 12;
 
 /// Measure the TSC frequency by counting cycles over a PIT-timed interval
@@ -320,6 +324,7 @@ unsafe fn init_io_apic(
             false,
         );
 
+        #[cfg(feature = "ps2_mouse")]
         set_ioapic_redirection(io_apic_ptr, MOUSE_IRQ, InterruptIndex::Mouse as u8, false);
     }
 }
@@ -750,11 +755,13 @@ pub unsafe fn init_acpi(
             let ioapic_ptr = ioapic_virt.as_mut_ptr::<u32>();
 
             let mut keyboard_irq: u32 = 1;
+            #[cfg(feature = "ps2_mouse")]
             let mut mouse_irq: u32 = 12;
 
             for iso in apic.interrupt_source_overrides.iter() {
                 match iso.isa_source {
                     1 => keyboard_irq = iso.global_system_interrupt,
+                    #[cfg(feature = "ps2_mouse")]
                     12 => mouse_irq = iso.global_system_interrupt,
                     _ => {}
                 }
@@ -772,6 +779,7 @@ pub unsafe fn init_acpi(
                     InterruptIndex::Keyboard as u8,
                     false,
                 );
+                #[cfg(feature = "ps2_mouse")]
                 set_ioapic_redirection(ioapic_ptr, mouse_irq, InterruptIndex::Mouse as u8, false);
             }
         }
@@ -785,9 +793,12 @@ pub unsafe fn init_acpi(
 
     disable_pic();
 
-    MOUSE.lock().init().unwrap();
-    MOUSE.lock().set_on_complete(mouse_on_packed_processed);
-    serial_println_core!("Mouse initialized");
+    #[cfg(feature = "ps2_mouse")]
+    {
+        MOUSE.lock().init().unwrap();
+        MOUSE.lock().set_on_complete(mouse_on_packed_processed);
+        serial_println_core!("Mouse initialized");
+    }
 }
 
 lazy_static! {
@@ -818,6 +829,7 @@ lazy_static! {
         // Hardware interrupts
         idt[InterruptIndex::Timer as u8].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard as u8].set_handler_fn(keyboard_interrupt_handler);
+        #[cfg(feature = "ps2_mouse")]
         idt[InterruptIndex::Mouse as u8].set_handler_fn(mouse_interrupt_handler);
 
         //unsafe {idt[0x80].set_handler_fn(syscall_int80_handler).set_stack_index(1)};
@@ -1095,6 +1107,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     }
 }
 
+#[cfg(feature = "ps2_mouse")]
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     if MOUSE_DEBUG_PRINT {
         serial_println_core!("Mouse interrupt received");
@@ -1110,6 +1123,7 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(feature = "ps2_mouse")]
 fn mouse_on_packed_processed(mouse_state: MouseState) {
     use crate::events::event_buffer::{MouseButtons, MouseEvent};
     if MOUSE_DEBUG_PRINT {

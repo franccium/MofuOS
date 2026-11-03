@@ -31,9 +31,6 @@ use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, TEST_ELF};
 use kernel::process::shared_state::{
     get_shared_program_data_buffer, get_shared_program_data_buffer_mut,
 };
-use kernel::util::cpuinfo::{
-    AP_CORE_APIC_ID_MESSAGE_OFFSET, AP_CORE_CR3_MESSAGE_OFFSET, SECRET_MESSAGE_OFFSET,
-};
 use kernel::{
     filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
     programs::theophe::Theophe, serial_println_core,
@@ -261,6 +258,7 @@ fn main() -> ! {
         serial_println_core!("Compositor initialized");
 
         wait_for_ap_cores_blocking();
+        serial_println_core!("AP cores ready, creating userspace processes");
         kernel::process_start::create_userspace_processes();
 
         serial_println_core!("Created initial userspace processes");
