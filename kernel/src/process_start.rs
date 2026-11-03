@@ -2,42 +2,13 @@ use alloc::format;
 use alloc::string::String;
 
 use crate::process::elf_loader::{
-    FS_CACHED_TEST_ELF, FS_TEST_ELF, GAME_ELF, ODYS_ELF, PING_ELF, RUST_FIRST_ELF, SMALL_ELF,
-    TEST_ELF, THEOPHE_ELF,
+    FS_CACHED_TEST_ELF, FS_TEST_ELF, GAME_ELF, ODYS_ELF, RUST_FIRST_ELF, THEOPHE_ELF,
 };
 use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
 use crate::{
     RUN_FS_CACHED_TEST, RUN_FS_TEST, RUN_ODYS, RUN_THEOPHE, USE_GAME_PROGRAM,
     USE_RUST_USER_PROGRAMS, serial_println,
 };
-
-pub fn create_init_process() {
-    serial_println!("Creating init process from ELF");
-
-    let elf_info = match ElfLoadInfo::from_elf_data(&TEST_ELF) {
-        Ok(info) => {
-            serial_println!("  Parsed ELF: entry_point={:#x}", info.entry_point);
-            info
-        }
-        Err(e) => {
-            serial_println!("  ERROR: Failed to parse ELF: {:?}", e);
-            return;
-        }
-    };
-
-    let mut pm = PROCESS_MANAGER.lock();
-    match pm.create_process_from_elf(0, &elf_info, "proc1", 5) {
-        Ok(init_pid) => {
-            serial_println!(
-                "Init process created (PID {}), added to scheduler",
-                init_pid
-            );
-        }
-        Err(e) => {
-            serial_println!("ERROR: Failed to create init process: {:?}", e);
-        }
-    }
-}
 
 pub fn create_userspace_process(
     elf_data: &[u8],

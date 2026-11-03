@@ -3,42 +3,12 @@
 
 mod boot;
 
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use core::fmt::Write;
-use embedded_graphics::Drawable;
-use embedded_graphics::geometry::{Point, Size};
-use embedded_graphics::pixelcolor::{Rgb888, RgbColor};
-use embedded_graphics::primitives::{
-    Circle, Primitive, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle,
-};
 use kernel::bsp_init::{
     init_filesystem_on_bsp, init_shared_state_on_bsp, wait_for_ap_cores_blocking,
 };
-use kernel::data_structures::vector::Vec;
-use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
-use kernel::graphics::compositor::{self, Compositor};
-use kernel::graphics::pipeline::{
-    BlendState, PipelineState, RasterizerState, RenderMode, Vertex3D, VertexLayout,
-};
-use kernel::graphics::renderer::RenderContext;
-use kernel::graphics::resources::{ConstantBuffer, Texture};
-use kernel::graphics::shaders::{PassThroughVS, TextureSamplePS};
-use kernel::graphics::window::{self, Window, WindowBuffer};
-use kernel::interrupts;
-use kernel::process::CORE_POOL;
-use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, TEST_ELF};
-use kernel::process::shared_state::{
-    get_shared_program_data_buffer, get_shared_program_data_buffer_mut,
-};
-use kernel::{
-    filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
-    programs::theophe::Theophe, serial_println_core,
-};
-use x86_64::PhysAddr;
+use kernel::{serial_println_core, interrupts, tests_exp::test_graphics};
 use x86_64::instructions::hlt;
 extern crate alloc;
-use kernel::tests_exp::{test_filesystem::test_filesystem, test_graphics, test_process};
 
 #[repr(u32)]
 pub enum QemuExitCode {

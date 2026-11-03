@@ -87,21 +87,6 @@ fn cc() -> String {
 fn ld() -> String {
     find_tool("LD", "ld.lld")
 }
-fn ar() -> String {
-    if let Ok(v) = env::var("AR") {
-        return v;
-    }
-    if which("llvm-ar") {
-        return "llvm-ar".to_string();
-    }
-    for ver in (10u32..=30).rev() {
-        let p = format!("/usr/lib/llvm{ver}/bin/llvm-ar");
-        if Path::new(&p).exists() {
-            return p;
-        }
-    }
-    "ar".to_string()
-}
 
 fn ensure_limine(root: &Path) {
     let limine_dir = root.join("target/limine");
@@ -525,45 +510,9 @@ fn build_user(root: &Path) {
     println!("Building user programs…");
     let user_dir = root.join("user");
     let build_dir = root.join("target/user");
-    fs::create_dir_all(build_dir.join("libc")).unwrap();
-    let crt0_o = build_dir.join("crt0.o");
-    compile_c(&user_dir.join("crt0.c"), &crt0_o, &[]);
-    let syscall_o = build_dir.join("libc/syscall.o");
-    compile_c(&user_dir.join("libc/syscall.c"), &syscall_o, &[]);
-    let libc_a = build_dir.join("libc.a");
-    run(Command::new(ar()).args(["rcs"]).arg(&libc_a).arg(&syscall_o));
-    let programs_dir = user_dir.join("programs");
-    let entries = fs::read_dir(&programs_dir)
-        .unwrap_or_else(|e| panic!("can't read {}: {e}", programs_dir.display()));
-    for entry in entries {
-        let entry = entry.unwrap();
-        if !entry.file_type().unwrap().is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        let name = name.to_str().unwrap();
-        let src = entry.path().join(format!("{name}.c"));
-        if !src.exists() {
-            continue;
-        }
-        let out_dir = build_dir.join("programs").join(name);
-        fs::create_dir_all(&out_dir).unwrap();
-        let obj = out_dir.join(format!("{name}.o"));
-        compile_c(&src, &obj, &[]);
-        run(Command::new(ld())
-            .args(["-T", "linker.ld", "-nostdlib", "-static", "-no-pie"])
-            .arg("-o")
-            .arg(out_dir.join(name))
-            .arg(&crt0_o)
-            .arg(&obj)
-            .arg(&libc_a)
-            .current_dir(&user_dir));
-    }
-    // Rust userspace (user/rustspace) - optional, skip if no toolchain
     let rustspace_dir = user_dir.join("rustspace");
     if rustspace_dir.join("Cargo.toml").exists() {
         println!("Building Rust userspace…");
-        // cargo fmt is best-effort
         let _ = Command::new("cargo").args(["fmt"]).current_dir(&rustspace_dir).status();
         let status = Command::new("cargo")
             .args(["+nightly", "build", "-Z", "build-std=core,alloc", "-Z", "json-target-spec", "--target", "x86_64-user.json"])
