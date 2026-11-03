@@ -6,6 +6,7 @@ mod boot;
 use kernel::bsp_init::{
     init_filesystem_on_bsp, init_shared_state_on_bsp, wait_for_ap_cores_blocking,
 };
+use kernel::graphics::compositor::{get_compositor, init_compositor};
 use kernel::{serial_println_core, interrupts, tests_exp::test_graphics};
 use x86_64::instructions::hlt;
 extern crate alloc;
@@ -41,12 +42,6 @@ fn main() -> ! {
     let _ = init_filesystem_on_bsp();
     kernel::tests_exp::test_ata::test_ata_filesystem();
 
-    //test_process_system();
-
-    //test_filesystem_system();
-
-    //test_process::test_process_system();
-
     {
         let mut framebuffer_target = kernel::graphics::framebuffer::get_framebuffer();
         let fb = &mut *framebuffer_target;
@@ -56,17 +51,12 @@ fn main() -> ! {
 
         test_graphics::draw_shapes(fb);
 
-        //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
         serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
         init_shared_state_on_bsp();
 
         serial_println_core!("Shared state initialized");
-        
-        use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
-        use kernel::graphics::compositor::{get_compositor, init_compositor};
-        use kernel::graphics::window::{Window, WindowBuffer};
-        //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
+
         serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
         init_compositor(fb_width as u32, fb_height as u32);

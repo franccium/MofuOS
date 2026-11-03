@@ -406,6 +406,9 @@ pub fn run_on_core_loop(core_id: u8) -> ! {
         let exec_ctx = {
             let pm = PROCESS_MANAGER.lock();
             pm.get_process(pid).ok().map(|p| {
+                // the kernel has no xmm code, so this state stays live until iretq
+                unsafe { p.fpu_state.restore_to_cpu() };
+
                 (
                     p.execution_context.rip,
                     p.execution_context.rsp,

@@ -470,12 +470,10 @@ impl Compositor {
             if key == KeyCode::ArrowLeft as u8 {
                 let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
                 let new_focused_window_id = focused_window_id.saturating_sub(1);
-                //TODO: focused_window_id.clamp(0, self.windows.len());
                 self.focus_window(new_focused_window_id);
             } else if key == KeyCode::ArrowRight as u8 {
                 let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
                 let (new_focused_window_id, _) = focused_window_id.overflowing_add(1);
-                //TODO: focused_window_id.clamp(0, self.windows.len());
                 self.focus_window(new_focused_window_id);
             }
         }

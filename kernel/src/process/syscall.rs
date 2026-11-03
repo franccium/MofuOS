@@ -539,6 +539,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 let mut pm = PROCESS_MANAGER.lock();
                 if let Ok(proc) = pm.get_process_mut(pid) {
                     frame.store_into_context(&mut proc.execution_context);
+                    unsafe { proc.fpu_state.save_from_cpu() };
                 }
             }
 

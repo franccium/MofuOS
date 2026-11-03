@@ -84,11 +84,65 @@ pub struct ExecutionContext {
     pub r14: u64,
     pub r15: u64,
 
-    //TODO: sse? maybe somewhere seperate because aint storing the whole avx
     pub rip: u64,
     pub rflags: u64,
 
     pub page_table_base_phys: u64,
+}
+
+const FPU_STATE_SIZE_BYTES: usize = 512;
+const FXSAVE_FCW_OFFSET: usize = 0;
+const FXSAVE_MXCSR_OFFSET: usize = 24;
+
+// reset values, every FP exception masked
+const FCW_DEFAULT: u16 = 0x37F;
+const MXCSR_DEFAULT: u32 = 0x1F80;
+
+/// FXSAVE image: x87, xmm0-15 and MXCSR
+/// Holds no ymm state because CR4.OSXSAVE is off, so AVX instructions #UD
+#[repr(C, align(16))]
+pub struct FpuState {
+    pub fxsave_area: [u8; FPU_STATE_SIZE_BYTES],
+}
+
+const _: () = assert!(core::mem::size_of::<FpuState>() == FPU_STATE_SIZE_BYTES);
+
+impl FpuState {
+    pub const fn new() -> Self {
+        let mut fxsave_area = [0u8; FPU_STATE_SIZE_BYTES];
+        let fcw_bytes = FCW_DEFAULT.to_le_bytes();
+        let mxcsr_bytes = MXCSR_DEFAULT.to_le_bytes();
+
+        fxsave_area[FXSAVE_FCW_OFFSET] = fcw_bytes[0];
+        fxsave_area[FXSAVE_FCW_OFFSET + 1] = fcw_bytes[1];
+
+        fxsave_area[FXSAVE_MXCSR_OFFSET] = mxcsr_bytes[0];
+        fxsave_area[FXSAVE_MXCSR_OFFSET + 1] = mxcsr_bytes[1];
+        fxsave_area[FXSAVE_MXCSR_OFFSET + 2] = mxcsr_bytes[2];
+        fxsave_area[FXSAVE_MXCSR_OFFSET + 3] = mxcsr_bytes[3];
+
+        Self { fxsave_area }
+    }
+
+    pub unsafe fn save_from_cpu(&mut self) {
+        unsafe {
+            asm!(
+                "fxsave64 [{}]",
+                in(reg) self.fxsave_area.as_mut_ptr(),
+                options(nostack),
+            );
+        }
+    }
+
+    pub unsafe fn restore_to_cpu(&self) {
+        unsafe {
+            asm!(
+                "fxrstor64 [{}]",
+                in(reg) self.fxsave_area.as_ptr(),
+                options(nostack, readonly),
+            );
+        }
+    }
 }
 
 pub const FD_FLAG_READ: u8 = 0x01;
@@ -119,6 +173,7 @@ pub struct Process {
     pub is_out: bool,
 
     pub execution_context: ExecutionContext,
+    pub fpu_state: FpuState,
     pub memory_layout: ProcessMemoryLayout,
 }
 
@@ -177,6 +232,7 @@ impl Process {
             exit_code: None,
             is_out,
             execution_context: ExecutionContext::new(entry_point, stack_top, page_table_base_phys),
+            fpu_state: FpuState::new(),
             memory_layout,
         })
     }
@@ -323,6 +379,7 @@ impl Process {
             exit_code: None,
             is_out: true,
             execution_context: context,
+            fpu_state: FpuState::new(),
             memory_layout,
         })
     }

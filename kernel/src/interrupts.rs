@@ -1032,6 +1032,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
                         proc.execution_context.rip = stack_frame.instruction_pointer.as_u64();
                         proc.execution_context.rsp = stack_frame.stack_pointer.as_u64();
                         proc.execution_context.rflags = stack_frame.cpu_flags.bits();
+                        proc.fpu_state.save_from_cpu();
                     }
                 }
                 interrupt_over();
@@ -1110,7 +1111,6 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
                 }
             };
         }
-        serial_println_core!("Keyboard scancode: {:#x}, key state: {:?}", scancode, key_state);
     }
 
     unsafe {

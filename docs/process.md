@@ -65,6 +65,7 @@ pub struct Process {
     pub exit_code: Option<i32>,
     pub is_out: bool,                  // true = independent top-level process
     pub execution_context: ExecutionContext,
+    pub fpu_state: FpuState,
     pub memory_layout: ProcessMemoryLayout,
 }
 ```
@@ -83,6 +84,13 @@ pub struct ExecutionContext {
     page_table_base_phys: u64,  // CR3 value
 }
 ```
+
+### FpuState
+
+512-byte, 16-aligned FXSAVE image (x87, xmm0-15, MXCSR), stored in `Process` and
+not in `ExecutionContext`. Saved eagerly on sys_yield and timer preemption, restored
+in `run_on_core_loop` before the jump to userspace. New processes start with
+FCW=0x37F and MXCSR=0x1F80. There is no ymm state because CR4.OSXSAVE is off.
 
 ### KernelThread
 
