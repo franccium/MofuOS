@@ -1,11 +1,18 @@
+use crate::data_structures::circular_buffer::{CircularBuffer, CircularBufferInfo};
+use crate::events::event_buffer::EventBuffer;
 use crate::filesystem::sirius::{DirEntryFlat, FS_NAME_LEN, FilesystemDriver, StatFlat};
+use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
+use crate::graphics::window::{WindowInfo, event_buffer_user_vaddr};
 use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
 use crate::io::serial;
 use crate::memory::get_frame_allocator;
+use crate::memory::memory::PAGE_SIZE;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
-use crate::process::CORE_POOL;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
+use crate::process::elf_loader::ODYS_ELF;
 use crate::process::process::FileDescriptor;
+use crate::process::process_mem::FrameOwnership;
+use crate::process::{CORE_POOL, ElfLoadInfo};
 use crate::serial_println;
 use crate::util::cpuinfo::{CpuInfoFlat, get_cpu_info_for_core};
 use crate::util::msr::msr_write;
@@ -23,11 +30,12 @@ use alloc::vec::Vec;
 use core::arch::naked_asm;
 use core::sync::atomic::Ordering;
 use x86_64::registers::model_specific::{Efer, EferFlags};
+use x86_64::structures::paging::{Mapper, PageTableFlags};
 
 #[cfg(feature = "use_cached_fs")]
 use crate::filesystem::file_cache::CacheImportance;
 
-const SYSCALL_STACK_SIZE: usize = 4096 * 16; // 64 KiB per core
+const SYSCALL_DEBUG_PRINT: bool = false;
 
 #[inline]
 fn validate_user_ptr(ptr: usize, len: usize) -> bool {
@@ -74,6 +82,7 @@ pub enum SyscallNumber {
     PresentWindow = 13,
     GetWindowSize = 14,
     FocusWindow = 15,
+    GetWindowInfo = 16,
     // Filesystem syscalls
     OpenFile = 20,
     CloseFile = 21,
@@ -91,6 +100,14 @@ pub enum SyscallNumber {
     EvictDirectory = 33,
     GetCacheStats = 34,
     FlushFileCache = 35,
+
+    CreateCircularBuffer = 600,
+
+    SleepMs = 990,
+    WaitForInput = 991,
+    FutexWait = 992,
+    FutexWake = 993,
+
     GetCpuInfo = 970,
     GetProcessInfo = 996,
     GetPID = 997,
@@ -98,30 +115,39 @@ pub enum SyscallNumber {
     Exit = 999,
 }
 
+/// Reached through GS after swapgs, the offsets are used by syscall_handler
 #[repr(C, align(64))]
 struct PerCoreSyscallData {
+    /// Kernel stack top of the task running on this core, set on every dispatch
     stack_top: u64,
-    _stack: [u8; SYSCALL_STACK_SIZE],
+    user_rsp_scratch: u64,
 }
 
 impl PerCoreSyscallData {
     const fn zeroed() -> Self {
         Self {
             stack_top: 0,
-            _stack: [0u8; SYSCALL_STACK_SIZE],
+            user_rsp_scratch: 0,
         }
     }
 }
 
-static mut PER_CORE_SYSCALL: [PerCoreSyscallData; crate::MAX_CORES as usize] = {
-    const EMPTY: PerCoreSyscallData = PerCoreSyscallData::zeroed();
-    [EMPTY; crate::MAX_CORES as usize]
-};
+const SYSCALL_USER_RSP_SCRATCH_OFFSET: usize =
+    core::mem::offset_of!(PerCoreSyscallData, user_rsp_scratch);
+
+static mut SYSCALL_DATA: [PerCoreSyscallData; crate::MAX_CORES as usize] =
+    [const { PerCoreSyscallData::zeroed() }; crate::MAX_CORES as usize];
+
+pub fn set_syscall_stack_top(core_id: u8, stack_top: u64) {
+    // SAFETY: only the owning core writes its entry, with interrupts off
+    unsafe { SYSCALL_DATA[core_id as usize].stack_top = stack_top };
+}
 
 const MSR_KERNEL_GS_BASE: u32 = 0xC0000102;
 
 #[repr(C)]
 pub struct SyscallFrame {
+    pub r15: u64,
     pub r14: u64,
     pub r13: u64,
     pub r12: u64,
@@ -138,7 +164,7 @@ pub struct SyscallFrame {
 
     pub rflags: u64,   // r11
     pub user_rip: u64, // rcx
-    pub user_rsp: u64, // r15
+    pub user_rsp: u64,
 }
 
 #[unsafe(no_mangle)]
@@ -146,11 +172,11 @@ pub struct SyscallFrame {
 pub unsafe extern "C" fn syscall_handler() -> ! {
     naked_asm!(
         "swapgs",
-        "mov r15, rsp",
+        "mov gs:[{user_rsp_offset}], rsp",
         "mov rsp, gs:0",
+        "push qword ptr gs:[{user_rsp_offset}]",
         "swapgs",
 
-        "push r15",
         "push rcx",
         "push r11",
 
@@ -166,11 +192,17 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
         "push r12",
         "push r13",
         "push r14",
+        "push r15",
 
         "mov rdi, rsp",
 
+        // the task stack top is 16 aligned and 16 regs were pushed, so rsp is aligned for the call
         "call {handle_syscall}",
 
+        // RSP will point at the user stack while still in ring 0, sysretq restores IF from r11
+        "cli",
+
+        "pop r15",
         "pop r14",
         "pop r13",
         "pop r12",
@@ -186,24 +218,132 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 
         "pop r11",
         "pop rcx",
-        "pop r15",
-
-        "mov rsp, r15",
+        "pop rsp",
 
         "sysretq",
 
         handle_syscall = sym handle_syscall_inner,
+        user_rsp_offset = const SYSCALL_USER_RSP_SCRATCH_OFFSET,
     )
 }
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
+    debug_assert!(frame as usize % 16 == 0);
     let frame = unsafe { &mut *frame };
     x86_64::instructions::interrupts::enable();
+    {
+        let core_id = get_current_core_id();
+        crate::gdt::assert_rsp_in_task_stack(core_id);
+    }
 
+    let result = unsafe { dispatch_syscall(frame) };
+
+    x86_64::instructions::interrupts::disable();
+    scheduler::exit_to_user();
+
+    result
+}
+
+unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
     let syscall = unsafe { core::mem::transmute::<u64, SyscallNumber>(frame.syscall_num) };
 
     match syscall {
+        SyscallNumber::CreateProcess => {
+            let elf_path_ptr = frame.arg1 as u64;
+            let elf_path_len = frame.arg2 as u64;
+            let name_ptr = frame.arg3 as u64;
+            let name_len = frame.arg4 as u64;
+
+            let elf_path =
+                core::str::from_raw_parts(elf_path_ptr as *const u8, elf_path_len as usize);
+            let name = core::str::from_raw_parts(name_ptr as *const u8, name_len as usize);
+
+            serial_println_core!("CreateProcess called");
+            serial_println_core!("CreateProcess creating process {} from: {}", name, elf_path);
+
+            match ElfLoadInfo::from_elf_data(&ODYS_ELF) {
+                Ok(info) => {
+                    serial_println!("  Parsed ELF: entry_point={:#x}", info.entry_point);
+                    let mut pm = PROCESS_MANAGER.lock();
+                    match pm.create_process_from_elf(0, &info, "proc1", 5) {
+                        Ok(init_pid) => {
+                            serial_println!(
+                                "Init process created (PID {}), added to scheduler",
+                                init_pid
+                            );
+                        }
+                        Err(e) => {
+                            serial_println!("ERROR: Failed to create init process: {:?}", e);
+                            drop(pm);
+                            return u64::MAX;
+                        }
+                    }
+                    drop(pm);
+                }
+                Err(e) => {
+                    serial_println!("  ERROR: Failed to parse ELF: {:?}", e);
+                    return u64::MAX;
+                }
+            };
+
+            0u64
+        }
+        SyscallNumber::TerminateProcess => {
+            let target_pid = frame.arg1 as usize;
+            let exit_code = frame.arg2 as i32;
+            let caller_core = get_current_core_id();
+            let caller_pid = scheduler::get_current_process_for_core(caller_core);
+
+            if target_pid == INVALID_PID || target_pid == ARCHE_PID {
+                serial_println_core!("TerminateProcess: invalid target pid {}", target_pid);
+                return u64::MAX;
+            }
+
+            let target_parent = {
+                let pm = PROCESS_MANAGER.lock();
+                match pm.get_process(target_pid) {
+                    Ok(p) => p.parent_pid,
+                    Err(_) => {
+                        serial_println_core!(
+                            "TerminateProcess: target pid {} not found",
+                            target_pid
+                        );
+                        return u64::MAX;
+                    }
+                }
+            };
+
+            let allowed =
+                target_pid == caller_pid || target_parent == caller_pid || caller_pid == ARCHE_PID;
+            if !allowed {
+                serial_println_core!(
+                    "TerminateProcess: pid {} denied to kill {} (parent {})",
+                    caller_pid,
+                    target_pid,
+                    target_parent
+                );
+                return u64::MAX;
+            }
+
+            if target_pid == caller_pid {
+                crate::process::task::exit_current(exit_code);
+            }
+
+            // the target tears itself down once it is back at the edge of ring 3
+            if !crate::process::task::request_kill(target_pid, exit_code) {
+                serial_println_core!("TerminateProcess: target {} has no task", target_pid);
+                return u64::MAX;
+            }
+
+            serial_println_core!(
+                "TerminateProcess: pid {} asked {} to exit with code {}",
+                caller_pid,
+                target_pid,
+                exit_code
+            );
+            0
+        }
         SyscallNumber::Write => {
             let fd = frame.arg1;
             let buf = frame.arg2 as *const u8;
@@ -226,8 +366,27 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let x = frame.arg3 as i32;
             let y = frame.arg4 as i32;
 
-            let mut compositor = crate::graphics::compositor::get_compositor();
-            let (window_id, _buffer) = compositor.create_window(width, height, x, y);
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+
+            let compositor = crate::graphics::compositor::get_compositor();
+            if width == 0
+                || height == 0
+                || width > compositor.framebuffer_width()
+                || height > compositor.framebuffer_height()
+            {
+                serial_println_core!(
+                    "sys_create_window: {}x{} exceeds framebuffer {}x{}",
+                    width,
+                    height,
+                    compositor.framebuffer_width(),
+                    compositor.framebuffer_height()
+                );
+                return u64::MAX;
+            }
+
+            let (window_id, _buffer, _event_buffer) =
+                compositor.create_window(width, height, x, y, pid);
             serial_println_core!(
                 "sys_create_window: {}x{} at ({},{}) -> id={}",
                 width,
@@ -253,21 +412,14 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             pid as u64
         }
         SyscallNumber::Yield => {
-            let core_id = get_current_core_id();
-            let pid = scheduler::get_current_process_for_core(core_id);
-            serial_println_core!("sys_yield: PID {} yielding", pid);
-
-            {
-                let mut pm = PROCESS_MANAGER.lock();
-                if let Ok(proc) = pm.get_process_mut(pid) {
-                    proc.execution_context.rip = frame.user_rip;
-                    proc.execution_context.rsp = frame.user_rsp;
-                    proc.execution_context.rflags = frame.rflags;
-                }
+            if SYSCALL_DEBUG_PRINT {
+                let core_id = get_current_core_id();
+                let pid = scheduler::get_current_process_for_core(core_id);
+                serial_println_core!("sys_yield: PID {} yielding", pid);
             }
 
-            x86_64::instructions::interrupts::disable();
-            scheduler::return_to_scheduler();
+            scheduler::core_yield_executing_tasks(get_current_core_id());
+            0
         }
         SyscallNumber::Exit => {
             let exit_code = frame.arg1;
@@ -275,80 +427,59 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let pid = scheduler::get_current_process_for_core(core_id);
             serial_println_core!("sys_exit: PID {} exiting with code {}", pid, exit_code);
 
-            {
-                let mut pm = PROCESS_MANAGER.lock();
-                pm.terminate_process(pid, exit_code as i32, false);
-            }
-
-            x86_64::instructions::interrupts::disable();
-            scheduler::return_to_scheduler();
+            crate::process::task::exit_current(exit_code as i32);
         }
         SyscallNumber::Allocate => {
             let size = frame.arg1 as usize;
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
-
-            let old_heap_end = {
-                let pm = PROCESS_MANAGER.lock();
-                match pm.get_process(pid) {
-                    Ok(proc) => proc.memory_layout.heap_end,
-                    Err(_) => {
-                        serial_println_core!("sys_allocate: pid={} not found", pid);
-                        return u64::MAX;
-                    }
-                }
-            };
-
-            let new_heap_end = old_heap_end + size as u64;
             let umm = crate::memory::get_user_mem_mgr();
+            let mut pm = PROCESS_MANAGER.lock();
             let mut fa = crate::memory::get_frame_allocator();
-
-            let result = {
-                let mut pm = PROCESS_MANAGER.lock();
-                match pm.get_process_mut(pid) {
-                    Ok(proc) => match proc.memory_layout.grow_heap(new_heap_end, umm, &mut fa) {
-                        Ok(_) => {
-                            serial_println_core!(
-                                "sys_allocate: pid={} size={} -> ptr={:#x}",
-                                pid,
-                                size,
-                                old_heap_end.as_u64()
-                            );
-                            old_heap_end.as_u64()
-                        }
-                        Err(e) => {
-                            serial_println_core!(
-                                "sys_allocate: pid={} size={} grow_heap failed: {:?}",
-                                pid,
-                                size,
-                                e
-                            );
-                            u64::MAX
-                        }
-                    },
-                    Err(_) => u64::MAX,
+            match pm.get_process_mut(pid) {
+                Ok(proc) => match proc.memory_layout.allocate_heap(size, umm, &mut fa) {
+                    Ok(old_ptr) => {
+                        serial_println_core!(
+                            "sys_allocate: pid={} size={} -> ptr={:#x}",
+                            pid,
+                            size,
+                            old_ptr.as_u64()
+                        );
+                        old_ptr.as_u64()
+                    }
+                    Err(e) => {
+                        serial_println_core!(
+                            "sys_allocate: pid={} size={} allocate_heap failed: {:?}",
+                            pid,
+                            size,
+                            e
+                        );
+                        u64::MAX
+                    }
+                },
+                Err(_) => {
+                    serial_println_core!("sys_allocate: pid={} not found", pid);
+                    u64::MAX
                 }
-            };
-            result
+            }
         }
         SyscallNumber::MapWindowBuffer => {
             let window_id = frame.arg1 as u32;
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
 
-            // User virtual base for window pixel buffers.
-            // Chosen to be above the heap and well below the stack.
-            const USER_WINDOW_BUFFER_BASE: u64 = 0x0000_0001_0000_0000;
-            const MAX_WINDOW_BUFFER_SIZE: u64 = 8 * 1024 * 1024; // 8 MB per window slot
-
-            let user_base = USER_WINDOW_BUFFER_BASE + (window_id as u64) * MAX_WINDOW_BUFFER_SIZE;
-
             // Retrieve the WindowBuffer Arc from the compositor, then release the compositor lock.
-            let buffer_arc = {
+            let (buffer_arc, max_window_buffer_size, user_base) = {
                 let compositor = crate::graphics::compositor::get_compositor();
+                let max_window_buffer_size = compositor.max_window_buffer_bytes();
+                let user_base = compositor.window_buffer_user_base(window_id);
                 let windows = compositor.windows.read();
                 match windows.get(window_id as usize) {
-                    Some(w) if w.is_visible => alloc::sync::Arc::clone(&w.buffer),
+                    Some(w) if w.is_visible && w.owner_pid == pid => (
+                        alloc::sync::Arc::clone(&w.buffer),
+                        max_window_buffer_size,
+                        user_base,
+                    ),
                     _ => {
                         serial_println_core!(
                             "sys_map_window_buffer: window_id={} not found",
@@ -361,68 +492,82 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
 
             let back_vaddr = buffer_arc.back_buffer_virt_addr();
             let front_vaddr = buffer_arc.front_buffer_virt_addr();
-            let pixel_count = buffer_arc.pixel_count();
-            let byte_count = pixel_count * 4;
-            let page_count = (byte_count + 0xFFF) / 0x1000;
-
-            let pml4_phys = {
-                let pm = PROCESS_MANAGER.lock();
-                match pm.get_process(pid) {
-                    Ok(p) => p.memory_layout.top_page_table_phys,
-                    Err(_) => {
-                        serial_println_core!("sys_map_window_buffer: pid={} not found", pid);
-                        return u64::MAX;
-                    }
-                }
-            };
+            let byte_count = buffer_arc.pixel_count() * FRAMEBUFFER_BYTES_PER_PIXEL as usize;
+            if byte_count as u64 > max_window_buffer_size {
+                serial_println_core!(
+                    "sys_map_window_buffer: window_id={} buffer size {} exceeds slot max {}",
+                    window_id,
+                    byte_count,
+                    max_window_buffer_size
+                );
+                return u64::MAX;
+            }
+            let page_count = buffer_arc.page_count();
 
             let umm = crate::memory::get_user_mem_mgr();
             let flags = x86_64::structures::paging::PageTableFlags::PRESENT
                 | x86_64::structures::paging::PageTableFlags::WRITABLE
-                | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
                 | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
 
+            let mut back_frames: alloc::vec::Vec<x86_64::PhysAddr> =
+                alloc::vec::Vec::with_capacity(page_count);
+            let mut front_frames: alloc::vec::Vec<x86_64::PhysAddr> =
+                alloc::vec::Vec::with_capacity(page_count);
+            for i in 0..page_count {
+                let page_offset = (i * PAGE_SIZE) as u64;
+                back_frames.push(umm.translate_kernel_heap_virt_to_phys(back_vaddr + page_offset));
+                front_frames
+                    .push(umm.translate_kernel_heap_virt_to_phys(front_vaddr + page_offset));
+            }
+
+            let back_user_virt = x86_64::VirtAddr::new(user_base);
+            let front_user_virt = x86_64::VirtAddr::new(user_base + max_window_buffer_size);
+            let buffer_bytes = (page_count * PAGE_SIZE) as u64;
+
             {
+                let mut pm = PROCESS_MANAGER.lock();
                 let mut frame_allocator = get_frame_allocator();
+                let Ok(proc) = pm.get_process_mut(pid) else {
+                    serial_println_core!("sys_map_window_buffer: pid={} not found", pid);
+                    return u64::MAX;
+                };
+                let layout = &mut proc.memory_layout;
 
-                for i in 0..page_count {
-                    let page_vaddr = back_vaddr + (i * 0x1000) as u64;
-                    let front_page_vaddr = front_vaddr + (i * 0x1000) as u64;
-                    let phys = umm.translate_kernel_heap_virt_to_phys(page_vaddr);
-                    let front_phys = umm.translate_kernel_heap_virt_to_phys(front_page_vaddr);
-                    let user_virt = x86_64::VirtAddr::new(user_base + (i * 0x1000) as u64);
-                    let front_user_virt = x86_64::VirtAddr::new(
-                        user_base + MAX_WINDOW_BUFFER_SIZE + (i * 0x1000) as u64,
+                // the kernel swaps its front and back buffers, so mapping again would not match
+                if layout.is_range_tracked(back_user_virt, buffer_bytes)
+                    && layout.is_range_tracked(front_user_virt, buffer_bytes)
+                {
+                    return user_base;
+                }
+
+                if let Err(e) = layout.map_frames(
+                    back_user_virt,
+                    &back_frames,
+                    flags,
+                    FrameOwnership::Borrowed,
+                    umm,
+                    &mut frame_allocator,
+                ) {
+                    serial_println_core!(
+                        "sys_map_window_buffer: mapping back buffer failed: {:?}",
+                        e
                     );
-
-                    if let Err(e) = umm.map_specific_frame(
-                        pml4_phys,
-                        user_virt,
-                        phys,
-                        flags,
-                        &mut frame_allocator,
-                    ) {
-                        serial_println_core!(
-                            "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
-                            i,
-                            e
-                        );
-                        return u64::MAX;
-                    }
-                    if let Err(e) = umm.map_specific_frame(
-                        pml4_phys,
-                        front_user_virt,
-                        front_phys,
-                        flags,
-                        &mut frame_allocator,
-                    ) {
-                        serial_println_core!(
-                            "sys_map_window_buffer: map_specific_frame failed at page {}: {:?}",
-                            i,
-                            e
-                        );
-                        return u64::MAX;
-                    }
+                    return u64::MAX;
+                }
+                if let Err(e) = layout.map_frames(
+                    front_user_virt,
+                    &front_frames,
+                    flags,
+                    FrameOwnership::Borrowed,
+                    umm,
+                    &mut frame_allocator,
+                ) {
+                    serial_println_core!(
+                        "sys_map_window_buffer: mapping front buffer failed: {:?}",
+                        e
+                    );
+                    layout.unmap_region(back_user_virt, buffer_bytes, umm, &mut frame_allocator);
+                    return u64::MAX;
                 }
             }
 
@@ -460,6 +605,36 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 }
                 _ => u64::MAX,
             }
+        }
+        SyscallNumber::GetWindowInfo => {
+            let window_id = frame.arg1 as u32;
+            let info_ptr = frame.arg2 as usize;
+
+            serial_println_core!("syscall: GetWindowInfo: window_id={}", window_id);
+
+            if !validate_user_ptr(info_ptr, core::mem::size_of::<WindowInfo>()) {
+                return FileDescriptor::INVALID_FD;
+            }
+
+            let compositor = crate::graphics::compositor::get_compositor();
+            let windows = compositor.windows.read();
+            match windows.get(window_id as usize) {
+                Some(w) => {
+                    let out = unsafe { &mut *(info_ptr as *mut WindowInfo) };
+                    out.width = w.buffer.width;
+                    out.height = w.buffer.height;
+                    out.event_buffer_vaddr = match w.event_buffer {
+                        Some(_) => event_buffer_user_vaddr(window_id),
+                        None => 0,
+                    };
+                    out.front_buffer_offset = compositor.max_window_buffer_bytes();
+                }
+                _ => {
+                    return u64::MAX;
+                }
+            }
+
+            0
         }
         SyscallNumber::FocusWindow => {
             let window_id = frame.arg1 as u32;
@@ -570,7 +745,6 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
 
             let buffer = unsafe { core::slice::from_raw_parts_mut(buffer_ptr as *mut u8, count) };
 
-            // Use cached read path when available
             let bytes_read = {
                 let mut sirius = crate::filesystem::sirius::get_sirius();
 
@@ -1010,6 +1184,55 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             }
         }
 
+        SyscallNumber::CreateCircularBuffer => {
+            let size_bytes = frame.arg1 as usize;
+            let page_flags = PageTableFlags::from_bits_truncate(frame.arg2);
+            let buffer_info_out = frame.arg3 as *mut CircularBufferInfo;
+
+            if !validate_user_ptr(
+                buffer_info_out as usize,
+                core::mem::size_of::<CircularBufferInfo>(),
+            ) {
+                serial_println_core!("CreateCircularBuffer: invalid buffer_info_out pointer");
+                return u64::MAX;
+            }
+
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+
+            let user_memory_manager = crate::memory::get_user_mem_mgr();
+            let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
+            let mut frame_allocator = get_frame_allocator();
+
+            if let Ok(proc) = pm.get_process_mut(pid) {
+                serial_println_core!("CreateCircularBuffer: found process for pid: {}", pid);
+
+                match CircularBuffer::map_for_user(
+                    size_bytes,
+                    page_flags as PageTableFlags,
+                    user_memory_manager,
+                    &mut proc.memory_layout,
+                    &mut frame_allocator,
+                ) {
+                    Some(buffer_info) => {
+                        serial_println_core!(
+                            "CreateCircularBuffer: buffer created, virt_base: {}, view_size: {}",
+                            buffer_info.virtual_base,
+                            buffer_info.view_size
+                        );
+                        buffer_info_out.write_unaligned(buffer_info);
+                        return 0;
+                    }
+                    None => {
+                        serial_println_core!("CreateCircularBuffer: cant create the buffer");
+                        return u64::MAX;
+                    }
+                }
+            }
+
+            u64::MAX
+        }
+
         SyscallNumber::GetCpuInfo => {
             let buffer_ptr = frame.arg1 as usize;
             let buffer_len = frame.arg2 as usize;
@@ -1035,6 +1258,38 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             0
         }
 
+        SyscallNumber::SleepMs => {
+            crate::process::wait::sleep_current_task_ms(frame.arg1);
+            0
+        }
+        SyscallNumber::WaitForInput => {
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+            crate::process::wait::block_current_task_until_event(
+                &crate::process::wait::INPUT_WAIT_QUEUE,
+                || crate::graphics::compositor::get_compositor().process_has_pending_input(pid),
+            );
+            0
+        }
+        SyscallNumber::FutexWait => {
+            let word_ptr = frame.arg1 as usize;
+            let expected = frame.arg2 as u32;
+            if !validate_user_ptr(word_ptr, core::mem::size_of::<u32>()) {
+                return u64::MAX;
+            }
+
+            // blocks while the word still holds the expected value
+            crate::process::wait::block_current_task_until_event(
+                &crate::process::wait::FUTEX_WAIT_QUEUE,
+                || core::ptr::read_volatile(word_ptr as *const u32) != expected,
+            );
+            0
+        }
+        SyscallNumber::FutexWake => {
+            crate::process::wait::FUTEX_WAIT_QUEUE.wake_all();
+            0
+        }
+
         _ => u64::MAX,
     }
 }
@@ -1052,20 +1307,10 @@ pub fn init_syscall() {
     let core_id = get_current_core_id() as usize;
     debug_assert!(core_id < crate::MAX_CORES as usize);
 
-    let stack_top = unsafe {
-        let slot = &mut PER_CORE_SYSCALL[core_id];
-        let stack_end_ptr = slot._stack.as_ptr().add(SYSCALL_STACK_SIZE);
-        let top = stack_end_ptr as u64;
-        slot.stack_top = top;
-        top
-    };
-
-    let slot_addr = unsafe { &PER_CORE_SYSCALL[core_id] as *const _ as u64 };
+    let slot_addr = unsafe { core::ptr::addr_of!(SYSCALL_DATA[core_id]) as u64 };
     unsafe {
         msr_write(MSR_KERNEL_GS_BASE, slot_addr);
     }
-
-    serial_println_core!("Syscall stack top (core {}): {:#x}", core_id, stack_top);
 
     unsafe {
         Efer::update(|flags| {

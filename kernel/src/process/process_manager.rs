@@ -1,15 +1,16 @@
 use crate::data_structures::vector::Vec;
 use crate::process::process::ProcessResources;
 //use alloc::vec::Vec;
+use crate::memory::usermem::USER_STACK_TOP;
 use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
-use crate::process::kernel_thread::{KernelThread, ThreadGroup, ThreadState};
-use crate::process::process::{INVALID_PID, MAX_PRIORITY, Process, ProcessState};
-use crate::process::process_mem::MappedMemoryRegion;
-use crate::process::scheduler::SCHEDULER;
+use crate::process::process::{INVALID_PID, MAX_PRIORITY, PID, Process, ProcessState};
+use crate::process::scheduler;
+use crate::process::task::{self, TaskState};
 use crate::{serial_println, serial_println_core};
 use alloc::string::String;
 use spin::Mutex;
+use x86_64::PhysAddr;
 use x86_64::instructions::interrupts;
 
 pub const ARCHE_PID: usize = 0;
@@ -30,13 +31,13 @@ pub enum ProcessError {
     ElfLoadError(ElfLoadError),
     NoCoresAvailable,
     SchedulerError,
+    OutOfTaskSlots,
 }
 
 /// Manages processes and their associated kernel threads
 /// Implements task parallelism using a one-to-one threading model
 pub struct ProcessManager {
     processes: Vec<Process>,
-    thread_groups: Vec<ThreadGroup>,
     new_pid: usize,
 }
 
@@ -46,7 +47,6 @@ impl ProcessManager {
     pub fn new() -> Self {
         Self {
             processes: Vec::with_capacity(16),
-            thread_groups: Vec::with_capacity(16),
             new_pid: 1,
         }
     }
@@ -64,115 +64,10 @@ impl ProcessManager {
                 cpu_time_slice: 0,
             },
             0,
-            0,
-            0,
         );
         serial_println!("Initialized arche process with PID 0");
         self.processes.push(arche.unwrap());
         0
-    }
-
-    pub fn create_process(
-        &mut self,
-        parent_pid: usize,
-        priority: u8,
-        name_ptr: *const u8,
-        name_len: u8,
-        is_out: bool,
-        entry_point: u64,
-        stack_top: u64,
-        page_table_base: u64,
-    ) -> Result<usize, ProcessError> {
-        assert!(
-            parent_pid != INVALID_PID,
-            "Parent PID cannot be INVALID_PID"
-        );
-
-        let _parent = self
-            .get_process(parent_pid)
-            .map_err(|_| ProcessError::ParentNotFound)?;
-
-        let new_pid = self.new_pid;
-        self.new_pid += 1;
-
-        // Extract process name
-        let name_str = unsafe {
-            let slice = core::slice::from_raw_parts(name_ptr, name_len as usize);
-            String::from_utf8_lossy(slice).into_owned()
-        };
-
-        // Allocate a CPU core for the new process from the core pool
-        let mut core_pool = CORE_POOL.lock();
-        let core_id = core_pool
-            .allocate_core(new_pid)
-            .ok_or(ProcessError::NoCoresAvailable)?;
-        drop(core_pool);
-
-        // Create kernel thread for this process (one-to-one model)
-        let mut kernel_thread = KernelThread::new(
-            new_pid,
-            priority,
-            String::from(&name_str),
-            entry_point,
-            stack_top,
-            page_table_base,
-        );
-        kernel_thread.assign_to_core(core_id);
-
-        // Create thread group
-        let thread_group = ThreadGroup::new(new_pid, kernel_thread);
-
-        // Create process structure
-        let new_process = Process {
-            pid: new_pid,
-            parent_pid,
-            priority,
-            state: ProcessState::Ready,
-            name: String::from(&name_str),
-            children: Vec::new(),
-            file_descriptors: Vec::new(),
-            resources: crate::process::process::ProcessResources::default(),
-            exit_code: None,
-            is_out,
-            execution_context: crate::process::process::ExecutionContext::new(
-                entry_point,
-                stack_top,
-                page_table_base,
-            ),
-            memory_layout: crate::process::process_mem::ProcessMemoryLayout {
-                top_page_table_phys: x86_64::PhysAddr::new(page_table_base),
-                stack_top: x86_64::VirtAddr::new(stack_top),
-                stack_size: 0,
-                heap_start: x86_64::VirtAddr::new(0),
-                heap_end: x86_64::VirtAddr::new(0),
-                mapped_regions: alloc::vec::Vec::<MappedMemoryRegion>::new(),
-            },
-        };
-
-        // Store process and thread group BEFORE making the PID visible to the
-        // scheduler — same ordering guarantee as create_process_from_elf.
-        self.processes.push(new_process);
-        self.thread_groups.push(thread_group);
-
-        // Enqueue thread in scheduler for its assigned core only after the
-        // process is fully stored and visible via get_process().
-        {
-            x86_64::instructions::interrupts::disable();
-            let mut scheduler = SCHEDULER.lock();
-            scheduler.enqueue_on_core(core_id, new_pid, priority);
-            drop(scheduler);
-            x86_64::instructions::interrupts::enable();
-        }
-
-        serial_println!(
-            "Created process {} (PID {}) on core {} with priority {}",
-            name_str,
-            new_pid,
-            core_id,
-            priority
-        );
-
-        Ok(new_pid)
     }
 
     pub fn create_process_from_elf(
@@ -183,7 +78,9 @@ impl ProcessManager {
         priority: u8,
     ) -> Result<usize, ProcessError> {
         // Verify parent exists
-        serial_println!("create_process_from_elf");
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!("create_process_from_elf");
+        }
 
         let _parent = self
             .get_process(parent_pid)
@@ -192,28 +89,17 @@ impl ProcessManager {
         let new_pid = self.new_pid;
         self.new_pid += 1;
 
-        serial_println!("create_process_from_elf: assigned pid: {}", new_pid);
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!("create_process_from_elf: assigned pid: {}", new_pid);
+        }
 
         let total_cores = CORE_POOL.lock().total_cores() as usize;
         let core_id = {
-            let scheduler = SCHEDULER.lock();
             let mut best_core = 1u8;
             let mut best_count = usize::MAX;
             for c in 1..total_cores {
-                let queued = scheduler.ready_count_on_core(c as u8)
-                    + scheduler.running_count_on_core(c as u8)
-                    + scheduler.blocked_count_on_core(c as u8);
-                serial_println_core!(
-                    "create_process_from_elf: core {} has {} queued processes",
-                    c,
-                    queued
-                );
+                let queued = scheduler::core_runnable_tasks_count(c as u8);
                 if queued < best_count {
-                    serial_println_core!(
-                        "create_process_from_elf: core {} is the new best candidate with {} queued processes",
-                        c,
-                        queued
-                    );
                     best_count = queued;
                     best_core = c as u8;
                 }
@@ -221,7 +107,9 @@ impl ProcessManager {
             best_core
         };
 
-        serial_println!("create_process_from_elf: assigned Core ID: {}", core_id);
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!("create_process_from_elf: assigned Core ID: {}", core_id);
+        }
 
         // Create process structure with ELF-loaded memory
         let mut process = Process::create_with_elf(elf_info, name, new_pid, parent_pid)
@@ -231,63 +119,42 @@ impl ProcessManager {
         process.priority = priority;
         process.state = ProcessState::Ready;
 
-        // Create kernel thread for this process (one-to-one model)
-        let mut kernel_thread = KernelThread::new(
-            new_pid,
-            priority,
-            String::from(name),
-            elf_info.entry_point,
-            process.execution_context.rsp,
-            process.memory_layout.top_page_table_phys.as_u64(),
-        );
-        kernel_thread.assign_to_core(core_id);
+        let cr3 = process.memory_layout.top_page_table_phys.as_u64();
+        let Some(slot_index) = task::allocate_task_slot(new_pid, priority, core_id, cr3) else {
+            let user_mgr = crate::memory::get_user_mem_mgr();
+            let mut frame_allocator = crate::memory::get_frame_allocator();
+            process
+                .memory_layout
+                .free_address_space(user_mgr, &mut frame_allocator);
+            return Err(ProcessError::OutOfTaskSlots);
+        };
+        task::init_task_stack(slot_index, elf_info.entry_point, USER_STACK_TOP);
 
-        serial_println!(
-            "create_process_from_elf: assigned kernel thread to Core ID: {} for process name: {}, pid: {}",
-            core_id,
-            kernel_thread.name,
-            kernel_thread.pid
-        );
-
-        // Create thread group
-        let thread_group = ThreadGroup::new(new_pid, kernel_thread);
-
-        // Store process and thread group BEFORE enqueuing to the scheduler.
-        // Core 1's scheduler loop can pick up the PID the instant it appears in
-        // the scheduler queue and will immediately call get_process(pid).  If we
-        // enqueue first (old order), get_process returns Err(ProcessNotFound)
-        // because processes.push hasn't run yet, causing a race that can corrupt
-        // memory when core 1 jumps to userspace while core 0 is still setting up
-        // the same process's page tables.
+        // Store the process BEFORE enqueuing to the scheduler, an AP core can pick the
+        // task up the instant it is queued
         self.processes.push(process);
-        self.thread_groups.push(thread_group);
 
-        // Only now make the process visible to the scheduler — it is fully
-        // constructed and stored at this point.
-        // Disable interrupts: push_back may call expand() -> ALLOCATOR.lock(),
-        // and a timer interrupt mid-lock would try SCHEDULER again -> deadlock.
-        {
-            x86_64::instructions::interrupts::disable();
-            let mut scheduler = SCHEDULER.lock();
-            scheduler.enqueue_on_core(core_id, new_pid, priority);
-            drop(scheduler);
-            x86_64::instructions::interrupts::enable();
+        task::slot(slot_index).set_state(TaskState::Ready);
+        scheduler::core_enqueue_ready_task(core_id, slot_index, priority);
+
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!(
+                "create_process_from_elf: enqueued process PID {} on core {}; priority: {}",
+                new_pid,
+                core_id,
+                priority
+            );
         }
 
-        serial_println!(
-            "create_process_from_elf: enqueued process PID {} on core {}; priority: {}",
-            new_pid,
-            core_id,
-            priority
-        );
-
-        serial_println!(
-            "Created userspace process {} (PID {}) from ELF on core {} with priority {}",
-            name,
-            new_pid,
-            core_id,
-            priority
-        );
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!(
+                "Created userspace process {} (PID {}) from ELF on core {} with priority {}",
+                name,
+                new_pid,
+                core_id,
+                priority
+            );
+        }
 
         Ok(new_pid)
     }
@@ -302,22 +169,27 @@ impl ProcessManager {
             return Err(ProcessError::DoubleDelete);
         }
 
-        let process = self.get_process_mut(pid)?;
-        let children = process.children.clone();
-        process.state = ProcessState::Terminated;
-        process.exit_code = Some(exit_code);
+        let children: Vec<PID>;
+        {
+            let process = self.get_process_mut(pid)?;
+            children = process.children.clone();
+            process.state = ProcessState::Terminated;
+            process.exit_code = Some(exit_code);
 
-        // Get the core assignment for cleanup
-        let core_id = self.get_process_core(pid);
-
-        // Terminate thread and release core
-        if let Some(thread_group) = self.thread_groups.iter_mut().find(|tg| tg.pid == pid) {
-            if let Some(thread) = thread_group.main_thread_mut() {
-                thread.terminate(exit_code);
-                if let Some(core) = thread.core_id {
-                    let mut core_pool = CORE_POOL.lock();
-                    core_pool.release_core(core);
-                    serial_println!("Released core {} for terminated process {}", core, pid);
+            if process.memory_layout.top_page_table_phys.as_u64() != 0 {
+                let user_mgr = crate::memory::get_user_mem_mgr();
+                let mut frame_allocator = crate::memory::get_frame_allocator();
+                process
+                    .memory_layout
+                    .free_address_space(user_mgr, &mut frame_allocator);
+                process.memory_layout.top_page_table_phys = PhysAddr::new(0);
+                process.memory_layout.regions.clear();
+                if crate::process::PROCESS_DEBUG_PRINT {
+                    serial_println!(
+                        "terminate_process: freed address space for PID {} (free frames: {})",
+                        pid,
+                        frame_allocator.free_frame_count()
+                    );
                 }
             }
         }
@@ -325,7 +197,7 @@ impl ProcessManager {
         // Handle children
         if cascade {
             for child_pid in children.iter().copied() {
-                let _ = self.terminate_process(child_pid, exit_code, true);
+                task::request_kill(child_pid, exit_code);
             }
         } else {
             for child_pid in children.iter().copied() {
@@ -345,7 +217,6 @@ impl ProcessManager {
     pub fn cleanup_dead(&mut self) {
         self.processes
             .retain(|p| p.state != ProcessState::Terminated);
-        self.thread_groups.retain(|tg| !tg.all_terminated());
     }
 
     pub fn get_process(&self, pid: usize) -> Result<&Process, ProcessError> {
@@ -367,29 +238,6 @@ impl ProcessManager {
             .ok_or(ProcessError::ProcessNotFound)
     }
 
-    pub fn get_process_core(&self, pid: usize) -> Option<u8> {
-        self.thread_groups
-            .iter()
-            .find(|tg| tg.pid == pid)
-            .and_then(|tg| tg.main_thread())
-            .and_then(|thread| thread.core_id)
-    }
-
-    pub fn get_kernel_thread(&self, pid: usize) -> Option<&KernelThread> {
-        self.thread_groups
-            .iter()
-            .find(|tg| tg.pid == pid)
-            .and_then(|tg| tg.main_thread())
-    }
-
-    /// Get mutable reference to a kernel thread
-    pub fn get_kernel_thread_mut(&mut self, pid: usize) -> Option<&mut KernelThread> {
-        self.thread_groups
-            .iter_mut()
-            .find(|tg| tg.pid == pid)
-            .and_then(|tg| tg.main_thread_mut())
-    }
-
     pub fn get_process_list(&self) -> &Vec<Process> {
         &self.processes
     }
@@ -397,61 +245,4 @@ impl ProcessManager {
     pub fn process_count(&self) -> usize {
         self.processes.len()
     }
-
-    pub fn thread_count(&self) -> usize {
-        self.thread_groups.len()
-    }
-
-    pub fn processes_on_core(&self, core_id: u8) -> Vec<usize> {
-        self.thread_groups
-            .iter()
-            .filter(|tg| {
-                tg.main_thread()
-                    .map(|t| t.core_id == Some(core_id))
-                    .unwrap_or(false)
-            })
-            .map(|tg| tg.pid)
-            .collect()
-    }
-
-    pub fn get_parallelism_stats(&self) -> ParallelismStats {
-        let active_cores = self
-            .thread_groups
-            .iter()
-            .filter_map(|tg| tg.main_thread().and_then(|t| t.core_id))
-            .collect::<alloc::collections::BTreeSet<_>>()
-            .len();
-
-        let mut running_count = 0;
-        let mut ready_count = 0;
-        let mut blocked_count = 0;
-
-        for tg in self.thread_groups.iter() {
-            if let Some(thread) = tg.main_thread() {
-                match thread.state {
-                    ThreadState::Running => running_count += 1,
-                    ThreadState::Ready => ready_count += 1,
-                    ThreadState::Blocked => blocked_count += 1,
-                    ThreadState::Terminated => {}
-                }
-            }
-        }
-
-        ParallelismStats {
-            total_processes: self.processes.len(),
-            active_cores,
-            running_threads: running_count,
-            ready_threads: ready_count,
-            blocked_threads: blocked_count,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ParallelismStats {
-    pub total_processes: usize,
-    pub active_cores: usize,
-    pub running_threads: usize,
-    pub ready_threads: usize,
-    pub blocked_threads: usize,
 }

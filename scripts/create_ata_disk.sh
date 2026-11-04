@@ -56,20 +56,44 @@ echo "Using template directory: ${INPUT_TEMPLATE}"
 dd if=/dev/zero of="${OUTPUT}" bs=1M count="${SIZE_MB}" status=none
 mkfs.fat -F 32 -n "MOFUOS" "${OUTPUT}"
 
-if [ -d "${INPUT_TEMPLATE}" ]; then
-    file_count=0
-    for f in "${INPUT_TEMPLATE}"/*; do
-        if [ -f "$f" ]; then
-            mcopy -i "${OUTPUT}" "$f" "::/$(basename "$f")"
-            echo "  Copied $(basename "$f")"
-            file_count=$((file_count + 1))
+ITEM_COUNT=0
+
+copy_to_image() {
+    local source_dir="$1"
+    local target_dir="$2"
+    
+    if [ "$target_dir" != "::/" ] && [ "$target_dir" != "::" ]; then
+        local display_path="${target_dir#::/}"
+        echo "  Creating directory: ${display_path}"
+        mmd -i "${OUTPUT}" "${target_dir}" 2>/dev/null || true
+    fi
+    
+    for item in "${source_dir}"/*; do
+        if [ -f "$item" ]; then
+            local filename=$(basename "$item")
+            local display_path="${target_dir#::/}"
+            if [ -n "$display_path" ]; then
+                echo "  Copied ${display_path}/${filename}"
+            else
+                echo "  Copied ${filename}"
+            fi
+            mcopy -i "${OUTPUT}" "$item" "${target_dir}/${filename}"
+            ITEM_COUNT=$((ITEM_COUNT + 1))
+        elif [ -d "$item" ]; then
+            local dirname=$(basename "$item")
+            local new_target="${target_dir}/${dirname}"
+            copy_to_image "$item" "$new_target"
         fi
     done
+}
+
+if [ -d "${INPUT_TEMPLATE}" ]; then
+    copy_to_image "${INPUT_TEMPLATE}" "::"
     
-    if [ $file_count -eq 0 ]; then
-        echo "  No files found in template directory"
+    if [ $ITEM_COUNT -eq 0 ]; then
+        echo "  No files or directories found in template directory"
     else
-        echo "  Copied $file_count file(s) total"
+        echo "  Copied $ITEM_COUNT item(s) total"
     fi
 fi
 

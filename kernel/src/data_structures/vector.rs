@@ -80,12 +80,14 @@ impl<T> Vec<T> {
         }
         self.size += 1;
 
-        serial_println!(
-            "Vec push: size={}, capacity={} ptr={:#x}",
-            self.size,
-            self.capacity,
-            self.data.as_ptr() as usize
-        );
+        if super::DATA_STRUCTURE_DEBUG_PRINT {
+            serial_println!(
+                "Vec push: size={}, capacity={} ptr={:#x}",
+                self.size,
+                self.capacity,
+                self.data.as_ptr() as usize
+            );
+        }
     }
 
     pub fn pop(&mut self) -> Option<T> {

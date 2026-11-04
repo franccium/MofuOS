@@ -8,8 +8,8 @@ use crate::filesystem::fat32::{FileNodeHandle, INVALID_NODE_HANDLE};
 use crate::filesystem::sirius::FileSystemError;
 use crate::{interrupts, serial_println_core};
 
-//pub const FS_CACHE_SIZE: usize = 16 * 1024 * 1024;
-pub const FS_CACHE_SIZE: usize = 32 * 1024;
+pub const FS_CACHE_SIZE: usize = 16 * 1024 * 1024;
+//pub const FS_CACHE_SIZE: usize = 32 * 1024;
 pub const FS_CACHE_MAP_FILE_COUNT: usize = 1024;
 
 const DEBUG_LOGS: bool = true;

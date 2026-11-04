@@ -2,9 +2,6 @@ use crate::serial_println;
 use alloc::vec::Vec;
 use elf::ElfBytes;
 
-pub const SMALL_ELF: &[u8] = include_bytes!("../../../user/programs/first/first");
-pub const TEST_ELF: &[u8] = include_bytes!("../../../user/programs/test/test");
-pub const PING_ELF: &[u8] = include_bytes!("../../../user/programs/ping/ping");
 pub const RUST_FIRST_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/rust_first");
 pub const GAME_ELF: &[u8] = include_bytes!("../../../user/rustspace/target/x86_64-user/debug/game");
@@ -14,6 +11,27 @@ pub const FS_TEST_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fs_test");
 pub const FS_CACHED_TEST_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fs_test_cached");
+pub const ODYS_ELF: &[u8] = include_bytes!("../../../user/rustspace/target/x86_64-user/debug/odys");
+pub const MEMSTRESS_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/memstress");
+pub const WINSTRESS_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/winstress");
+pub const REGPROBE_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/regprobe");
+pub const SPINNER_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/spinner");
+pub const BUSYLOOP_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/busyloop");
+pub const YIELDLOOP_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/yieldloop");
+pub const WORKER_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/worker");
+pub const SLEEPER_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/sleeper");
+pub const PINGPONG_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/pingpong");
+pub const FPUSTRESS_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fpustress");
 
 #[derive(Debug)]
 pub struct ElfLoadInfo {

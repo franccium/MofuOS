@@ -18,8 +18,20 @@ import datetime
 import threading
 from pathlib import Path
 
-# Keep in sync with kernel MAX_CORES (lib.rs).
-MAX_CORES = 4
+def _kernel_max_cores() -> int:
+    try:
+        lib = Path(__file__).parent.parent / "kernel" / "src" / "lib.rs"
+        txt = lib.read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r"pub\s+const\s+MAX_CORES\s*:\s*u8\s*=\s*(\d+)", txt)
+        if m:
+            v = int(m.group(1))
+            if 1 <= v <= 64:
+                return v
+    except Exception:
+        pass
+    return 4
+
+MAX_CORES = _kernel_max_cores()
 
 LOGS_ROOT = Path(__file__).parent.parent / "logs"
 

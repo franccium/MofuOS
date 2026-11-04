@@ -17,6 +17,64 @@ REAL TODO:
 
 - better perf testing
     repetitions
+    like a reusable framework, instrumentation layer
+    markers
+
+- easier way to get file size, and sys_stat_file(fd) instead of (path)
+
+- less allocations in odys, scratch buffer arena
+    figure out how to put a file editor in it
+        read file into a buffer, edit that buffer in-odys
+            scrolling through a file - just change start and end of text to render indices
+        when save file - flush to fs (fs cache but that only kernel knows)
+        
+
+- make a rect-based rendering pipeline
+    or research some real software rendering solutions
+
+- move windows
+    better: a tiling window manager, using the mouse is not comfortable
+
+- create and map an event buffer for each new process, in some global map of phys_addr, virt_addr for the event buffer for the given PID (outside of process manager so compositor doesnt have to lock the process manager to forward input), and read within each process from that
+
+- launch other processes from a userspace process
+    then shell integration
+
+    to create a process i need to pass the elf
+    so thats what the syscall gets, and some arguments for the process / process creation (pass: elf, name, ptr to a buffer with process start args that match what the process wants and the process can interpret itself after start)
+    from shell - we would lookup the command if its a know mapped binary
+    ideally, id need the process binary to live entirely on the OS-loaded disk image and pass that path
+        thats ideal if i wanted to map the paths like linux, readable as files, cause it makes no sense to map a path outside of that disk image that would be too meta
+        and required to load elf data for programs - for now wa is to always load the elf data for all userspace programs cause i cant dynamically load it from outside the in-OS-storage
+    for now ill just start simple and map the path like i did for launching test processes
+        lets do a per-process static data, that will also include a path repository for utils and programs
+        which has issues with visibility of potential modifications, e.g. changing the path but which is for now fine
+        right now, using a vec for path translation to be at least somewhat dynamic with the paths
+
+    this is either:
+        a seperate terminal application, where id also need to decouple shell from the terminal
+        or a part of theophe
+        i suppose its better to decouple shell from terminal now, allows for multiple terminal windows later and stuff
+        actually as of now we dont even have a shell, theophe can be what it is, so a window that takes keyboard input, it will just need to send that input to be handled differently by different things
+        so shell and interpreter would take lines entered and interpret them and its the default
+        any keyboard input it would need can also be translated into commands on the terminal side, eg. ctl+c into kill -c --> kill current
+        processes work within shell, shell forwards their stdout into terminal's stdin
+            that falls into being another linux, but it just makes sense
+        maybe its not the terminal that reads IO input, but just the apps - gets rid of one indirection - then the terminal just has a text buffer to display
+        that means we will have a terminal renderer now
+        and a graphics renderer, both available to apps
+        and then the app is the core and i dont even think in terms of terminal
+        this means apps will have to implement more themselves but thats perfectly fine
+
+        the terminal cant be the owner of the whole backing buffer, since not all terminal apps would have a buffer thats mostly appending, and not all would have a scrollback buffer
+        so i cant do a big circular scrollback for all, since e.g. file explorer and text editor would always have to display just one terminal frame, and any line can change completely at any time, while a more classic console-like terminal app would want a big scrollback and only append new lines
+
+        however, with the approach that apps themselves need to handle stuff and terminal is just some rendering api that just happens to be for rendering text, that would be a perfect generalization, since all apps can have a buffer that fits them, and dont need to think about how to publish data for terminal to render/synchronize with it, they just have the data, format it, and render / not render, since that will also let them handle when redraw needs to happen, and a redraw has to happen very rarely, compared to regular update, in a terminal app
+
+        and since i use embedded_graphics i dont even need to write anything now:
+        just like theophe, each app will have a window it can draw to anyways, so all it needs to do is call draw(line) for each line it wants to redraw, so theophe is now a perfect reference example for apps, which can now implement their own "renderers"
+
+        tldr: what i have now is fine, each app can be monolythic like that, what happens in the app or its child process stays in the app or its child process, and if the app want to render that something (call it stdout or w/e) it can render text calling draw(line), no terminal and terminal renderer nonsense, each app is a window app with text, or gfx, rendering capabilities
 
 - per-cpu scratch buffer
 
@@ -36,8 +94,6 @@ so maybe compositor detects mouse press --> checks rects for what is it within, 
     render mouse cursor - a 2x2 px square at mouse x mouse y; ps2-mouse inits at 0,0, so we add deltas and store current mouse pos from last poll
 
 - mouse support
-
-- !!! MAX_CORES set to the actual count of the cores causes a page fault on the (MAX_CORES-1) core after entering scheduler loop now, it used to work fine
 
 - validating user memory areas
     maybe at the granularity of the 64kB slabs of pages that i give each malloc
@@ -94,3 +150,10 @@ graphics:
 - at this point tough to optimize anything, should do multithreaded rendering
 - might also eg shade 4 pixels at once the same way, and interpolate 16
 - would tiling be beneficial?
+
+
+
+name vault:
+- Argo - could be something payload related
+- Arkad / Arcad
+- Chroma - the drawing thing

@@ -11,6 +11,7 @@ use x86_64::{
 };
 
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
+const FRAME_FREE_LIST_DEFAULT_SIZE: usize = 1024;
 
 #[derive(Clone, Copy)]
 pub struct IdentityAcpiHandler {
@@ -40,6 +41,7 @@ pub struct MemoryMapFrameAllocator {
     memory_map: &'static [&'static Entry],
     curr_region_index: usize,
     frame_offset_in_region: u64,
+    free_list: alloc::vec::Vec<PhysFrame<Size4KiB>>,
 }
 
 pub const fn align_up(x: u64, align: u64) -> u64 {
@@ -48,70 +50,6 @@ pub const fn align_up(x: u64, align: u64) -> u64 {
 
 pub const fn align_down(x: u64, align: u64) -> u64 {
     x & !(align - 1)
-}
-
-// In your kernel's page table initialization:
-pub fn setup_ap_trampoline_mapping(
-    page_table: &mut impl Mapper<Size4KiB>, // Your page table mapper
-    frame_allocator: &mut MemoryMapFrameAllocator,
-) {
-    use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
-
-    // Identity map the trampoline page at 0x8000
-    let trampoline_page =
-        Page::<Size4KiB>::from_start_address(x86_64::VirtAddr::new(0x8000)).unwrap();
-
-    let trampoline_frame = PhysFrame::from_start_address(x86_64::PhysAddr::new(0x8000)).unwrap();
-
-    unsafe {
-        page_table
-            .map_to(
-                trampoline_page,
-                trampoline_frame,
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-                frame_allocator,
-            )
-            .unwrap()
-            .flush();
-    }
-
-    // Also identity map the data pages at 0x9000
-    let data_page = Page::<Size4KiB>::from_start_address(x86_64::VirtAddr::new(0x9000)).unwrap();
-
-    let data_frame = PhysFrame::from_start_address(x86_64::PhysAddr::new(0x9000)).unwrap();
-
-    unsafe {
-        page_table
-            .map_to(
-                data_page,
-                data_frame,
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-                frame_allocator,
-            )
-            .unwrap()
-            .flush();
-    }
-
-    // let stack_start = 0x1200000 + 16 * PAGE_SIZE as u64; // 16 pages for AP stack, starting at 0x1200000
-    // let num_pages = 32;  // 4 pages = 16 KiB
-
-    // for i in 0..num_pages {
-    //     let stack_page = Page::<Size4KiB>::containing_address(VirtAddr::new(stack_start - (i * 4096)));
-    //     let stack_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(stack_start - (i * 4096)));
-
-    //     unsafe {
-    //         page_table.map_to(
-    //             stack_page,
-    //             stack_frame,
-    //             PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-    //             frame_allocator,
-    //         )
-    //         .expect("Failed to map stack page")
-    //         .flush();
-    //     }
-    // }
-
-    // serial_println!("Identity-mapped 0x7000 for AP stack");
 }
 
 pub fn map_acpi_regions(
@@ -220,6 +158,64 @@ impl MemoryMapFrameAllocator {
             memory_map,
             curr_region_index: 0,
             frame_offset_in_region: 0,
+            free_list: alloc::vec::Vec::new(),
+        }
+    }
+
+    pub fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        debug_assert!(
+            frame
+                .start_address()
+                .as_u64()
+                .is_multiple_of(PAGE_SIZE as u64),
+            "deallocate_frame: unaligned frame"
+        );
+        self.free_list.push(frame);
+    }
+
+    /// A frame freed twice would be handed to two owners later, only meant for tests
+    pub fn free_list_has_duplicates(&self) -> bool {
+        let mut frame_addresses: alloc::vec::Vec<u64> = self
+            .free_list
+            .iter()
+            .map(|frame| frame.start_address().as_u64())
+            .collect();
+        frame_addresses.sort_unstable();
+
+        frame_addresses.windows(2).any(|pair| pair[0] == pair[1])
+    }
+
+    pub fn free_frame_count(&self) -> usize {
+        self.free_list.len()
+    }
+
+    pub fn allocated_bump_frames(&self) -> usize {
+        let page_size = PAGE_SIZE as u64;
+        let mut count: usize = 0;
+
+        for idx in 0..self.curr_region_index {
+            let region = self.memory_map[idx];
+            if region.type_ == MEMMAP_USABLE {
+                let start = align_up(region.base, page_size);
+                let end = region.base + region.length;
+                if end > start {
+                    count += ((end - start) / page_size) as usize;
+                    if idx == self.curr_region_index {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(region) = self.memory_map.get(self.curr_region_index) {
+            if region.type_ == MEMMAP_USABLE {
+                count += (self.frame_offset_in_region / page_size) as usize;
+            }
+        }
+        if count >= self.free_list.len() {
+            count - self.free_list.len()
+        } else {
+            0
         }
     }
 
@@ -235,6 +231,9 @@ impl MemoryMapFrameAllocator {
 
 unsafe impl FrameAllocator<Size4KiB> for MemoryMapFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        if let Some(frame) = self.free_list.pop() {
+            return Some(frame);
+        }
         loop {
             let region = self.memory_map.get(self.curr_region_index)?;
 

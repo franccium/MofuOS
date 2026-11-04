@@ -1,23 +1,37 @@
-use crate::asm::ap_trampoline;
 use crate::interrupts::{
     self, get_lapic_base_addr, get_lapic_base_addr_phys, init_timer_for_core,
     map_local_apic_for_current_core, tsc_read,
 };
 use crate::memory::{FRAME_ALLOCATOR, get_frame_allocator};
 use crate::process::process::INVALID_PID;
-use crate::process::{self, CORE_POOL, SCHEDULER};
+use crate::process::{self, CORE_POOL};
 use crate::util::apic::APICOffset;
 use crate::util::msr::msr_read;
-use crate::{HHDM_OFFSET, gdt, hlt_loop, serial_println, serial_println_core};
+use crate::{HHDM_OFFSET, MAX_CORES, gdt, hlt_loop, serial_println, serial_println_core};
 use alloc::vec::Vec;
 use bitflags::bitflags;
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use limine::mp::MpInfo;
-use spin::Once;
+use x86_64::VirtAddr;
 use x86_64::instructions::hlt;
 use x86_64::structures::paging::{
     FrameAllocator, Mapper, OffsetPageTable, PageTable, Size4KiB, frame,
 };
+
+#[derive(Clone, Copy)]
+pub struct CpuInfo {
+    pub features: CpuFeatureFlags,
+    pub cache_line_size: u8,
+    pub apic_id: u8,
+
+    pub family: u8,
+    pub model: u8,
+    pub stepping: u8,
+    pub display_family: u16,
+    pub display_model: u8,
+    pub vendor: CpuVendor,
+}
 
 static mut CPU_INFO: CpuInfo = CpuInfo {
     features: CpuFeatureFlags::empty(),
@@ -31,20 +45,20 @@ static mut CPU_INFO: CpuInfo = CpuInfo {
     vendor: CpuVendor::Unknown,
 };
 
-static CPU_INFO_PER_CORE: Once<Vec<CpuInfo>> = Once::new();
+const DEFAULT_CPU_INFO: CpuInfo = CpuInfo {
+    features: CpuFeatureFlags::empty(),
+    cache_line_size: 0,
+    apic_id: 0,
+    family: 0,
+    model: 0,
+    stepping: 0,
+    display_family: 0,
+    display_model: 0,
+    vendor: CpuVendor::Unknown,
+};
 
-pub struct CpuInfo {
-    pub features: CpuFeatureFlags,
-    pub cache_line_size: u8,
-    pub apic_id: u8,
-
-    pub family: u8,
-    pub model: u8,
-    pub stepping: u8,
-    pub display_family: u16,
-    pub display_model: u8,
-    pub vendor: CpuVendor,
-}
+static mut CPU_INFO_PER_CORE: [CpuInfo; MAX_CORES as usize] =
+    [DEFAULT_CPU_INFO; MAX_CORES as usize];
 
 #[repr(C, align(16))]
 pub struct CpuInfoFlat {
@@ -65,6 +79,7 @@ pub struct CpuInfoFlat {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct CpuFeatureFlags: u32 {
         const APIC = 1 << 0;
         const X2APIC = 1 << 1;
@@ -150,157 +165,29 @@ unsafe fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
     (eax, ebx, ecx, edx)
 }
 
-pub unsafe fn init_cpu_info() {
-    let (max_leaf, vendor_ebx, vendor_ecx, vendor_edx) = unsafe { cpuid(0) };
-    serial_println!(
-        "init_cpu_info: read leaf 0: eax: {:#x}, ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
-        max_leaf,
-        vendor_ebx,
-        vendor_ecx,
-        vendor_edx
-    );
-
-    assert!(max_leaf >= 1);
-    let (feat_eax, feat_ebx, feat_ecx, feat_edx) = unsafe { cpuid(1) };
-    serial_println!(
-        "init_cpu_info: read leaf 1: eax: {:#x} ebx: {:#x}, ecx: {:#x}, edx: {:#x}",
-        feat_eax,
-        feat_ebx,
-        feat_ecx,
-        feat_edx
-    );
-
-    let base_family = ((feat_eax >> 8) & 0xF) as u8;
-    let base_model = ((feat_eax >> 4) & 0xF) as u8;
-    let stepping = (feat_eax & 0xF) as u8;
-    let display_family = if base_family == 0xF {
-        base_family as u16 + (((feat_eax >> 20) & 0xFF) as u16)
-    } else {
-        base_family as u16
-    };
-    let display_model = if base_family == 0x6 || base_family == 0xF {
-        (((feat_eax >> 16) & 0xF) << 4) | (base_model as u32)
-    } else {
-        base_model as u32
-    } as u8;
-
-    let mut features = CpuFeatureFlags::empty();
-
-    if feat_edx & (1 << 9) != 0 {
-        features |= CpuFeatureFlags::APIC;
-    }
-    if feat_ecx & (1 << 21) != 0 {
-        features |= CpuFeatureFlags::X2APIC;
-    }
-    if feat_edx & (1 << 4) != 0 {
-        features |= CpuFeatureFlags::TSC;
-    }
-    if feat_ecx & (1 << 24) != 0 {
-        features |= CpuFeatureFlags::TSC_DEADLINE;
-    }
-    if feat_edx & (1 << 13) != 0 {
-        features |= CpuFeatureFlags::PGE;
-    }
-    if feat_edx & (1 << 16) != 0 {
-        features |= CpuFeatureFlags::PAT;
-    }
-    if feat_edx & (1 << 25) != 0 {
-        features |= CpuFeatureFlags::SSE;
-    }
-    if feat_edx & (1 << 26) != 0 {
-        features |= CpuFeatureFlags::SSE2;
-    }
-    if feat_ecx & (1 << 0) != 0 {
-        features |= CpuFeatureFlags::SSE3;
-    }
-    if feat_ecx & (1 << 19) != 0 {
-        features |= CpuFeatureFlags::SSE4_1;
-    }
-    if feat_ecx & (1 << 20) != 0 {
-        features |= CpuFeatureFlags::SSE4_2;
-    }
-    if feat_ecx & (1 << 28) != 0 {
-        features |= CpuFeatureFlags::AVX;
-    }
-    if feat_ecx & (1 << 25) != 0 {
-        features |= CpuFeatureFlags::AES;
-    }
-    if feat_ecx & (1 << 30) != 0 {
-        features |= CpuFeatureFlags::RDRAND;
-    }
-    if feat_ecx & (1 << 31) != 0 {
-        features |= CpuFeatureFlags::HYPERVISOR;
-    }
-
-    let cache_line_size = ((feat_ebx >> 8) & 0xFF) as u8 * 8;
-    let apic_id = ((feat_ebx >> 24) & 0xFF) as u8;
-    let cpu_family = ((feat_edx >> 8) & 0xF) as u8;
-    let cpu_model = ((feat_edx >> 4) & 0xF) as u8;
-    let cpu_stepping = (feat_edx & 0xF) as u8;
-    let cpu_vendor = unsafe { get_vendor(vendor_ebx, vendor_ecx, vendor_edx) };
-    serial_println!("CPU Info:");
-    serial_println!(
-        "  Vendor: {}, family={:#x}, (display={:#x}), model={:#x} (display={:#x}), stepping={}",
-        cpu_vendor,
-        base_family,
-        display_family,
-        base_model,
-        display_model,
-        stepping
-    );
-    serial_println!("  Cache Line Size: {}", cache_line_size);
-    serial_println!("  Features {:#b}", features);
-
-    unsafe {
-        CPU_INFO = CpuInfo {
-            features,
-            cache_line_size,
-            apic_id,
-            family: cpu_family,
-            model: cpu_model,
-            stepping: cpu_stepping,
-            display_family,
-            display_model,
-            vendor: cpu_vendor,
-        };
-    }
-}
-
 pub fn init_cpu_infos(cpus: &[&MpInfo]) {
     let core_count = cpus.len();
     serial_println!("init_cpu_infos: {} cores", core_count);
 
-    let mut vec = Vec::with_capacity(core_count);
-    for _ in 0..core_count {
-        let default = CpuInfo {
-            features: CpuFeatureFlags::empty(),
-            cache_line_size: 0,
-            apic_id: 0,
-            family: 0,
-            model: 0,
-            stepping: 0,
-            display_family: 0,
-            display_model: 0,
-            vendor: CpuVendor::Unknown,
-        };
-        vec.push(default);
-    }
-
-    CPU_INFO_PER_CORE.call_once(|| vec);
+    debug_assert!(core_count <= MAX_CORES as usize);
 }
 
-pub unsafe fn init_current_core() {
-    let core_id = get_current_core_id();
-
-    serial_println!("Core {}: Initializing", core_id);
+pub unsafe fn init_core(core_id: u8) {
+    serial_println!("Core {}: init_core", core_id);
 
     unsafe { enable_sse_for_current_core() };
-    unsafe { init_cpu_info_for_core(core_id) };
-    unsafe { init_timer_for_core(core_id) };
 
     process::syscall::init_syscall();
+    serial_println!("Core {}: syscall initialized", core_id);
 
-    serial_println!("Core {}: Initialized successfully", core_id);
+    unsafe { interrupts::init_lapic_for_current_core(core_id) };
+    serial_println!("Core {}: LAPIC initialized", core_id);
+
+    unsafe { init_cpu_info_for_core(core_id) };
+
+    unsafe { init_timer_for_core(core_id) };
+
+    serial_println!("Core {}: init_core completed", core_id);
 }
 
 /// CR0.MP (bit 1) = 1 - monitor coprocessor
@@ -425,57 +312,35 @@ pub unsafe fn init_cpu_info_for_core(core_id: u8) {
     serial_println_core!("  Cache Line Size: {}", cache_line_size);
     serial_println_core!("  Features {:#b}", features);
 
-    unsafe {
-        let mut cpu_infos = CPU_INFO_PER_CORE.get().unwrap();
-        let ptr = cpu_infos.as_ptr() as *mut CpuInfo;
-        ptr.add(core_id as usize).write(CpuInfo {
-            features,
-            cache_line_size,
-            apic_id,
-            family: cpu_family,
-            model: cpu_model,
-            stepping: cpu_stepping,
-            display_family,
-            display_model,
-            vendor: cpu_vendor,
-        });
-    }
-}
+    debug_assert!((core_id as usize) < MAX_CORES as usize);
 
-pub fn get_cpu_info() -> &'static CpuInfo {
     unsafe {
-        let ptr = &raw const CPU_INFO;
-        &*ptr
+        core::ptr::write(
+            &raw mut CPU_INFO_PER_CORE[core_id as usize],
+            CpuInfo {
+                features,
+                cache_line_size,
+                apic_id,
+                family: cpu_family,
+                model: cpu_model,
+                stepping: cpu_stepping,
+                display_family,
+                display_model,
+                vendor: cpu_vendor,
+            },
+        );
     }
 }
 
 pub fn get_cpu_info_for_core(core_id: u8) -> &'static CpuInfo {
+    debug_assert!((core_id as usize) < MAX_CORES as usize);
+
     unsafe {
-        let ptr = &raw const CPU_INFO_PER_CORE.get().unwrap()[core_id as usize];
+        let ptr = &raw const CPU_INFO_PER_CORE[core_id as usize];
         &*ptr
     }
 }
 
-// pub fn get_lapic_base_addr() -> *mut u32 {
-//     const IA32_APIC_BASE_MSR: u32 = 0x1B;
-//     unsafe {
-//         let low: u32;
-//         let high: u32;
-//         asm!(
-//             "msr_read",
-//             in("ecx") IA32_APIC_BASE_MSR,
-//             out("eax") low,
-//             out("edx") high,
-//             options(nostack, preserves_flags)
-//         );
-//         let apic_base = ((high as u64) << 32) | (low as u64);
-
-//         let base_addr = apic_base & 0xFFFFF000;
-//         base_addr as *mut u32
-//     }
-// }
-
-//TODO: For now assume APIC ID = core index
 pub fn get_current_core_id() -> u8 {
     unsafe {
         let lapic = get_lapic_base_addr();
@@ -490,31 +355,6 @@ pub fn get_current_cpu_info() -> &'static CpuInfo {
     let core_id = get_current_core_id();
     get_cpu_info_for_core(core_id)
 }
-
-unsafe extern "C" {
-    static ap_trampoline_start: u8;
-    static ap_trampoline_end: u8;
-}
-
-/// Start an AP core using INIT-SIPI-SIPI sequence
-const TRAMPOLINE_PHYS: u64 = 0x8000;
-const MAGIC_OFFSET: u64 = 0x8FF0; // AP writes "APST" here
-pub const SECRET_MESSAGE_OFFSET: u64 = 0x8F30; // AP writes "APST" here
-pub const AP_CORE_CR3_MESSAGE_OFFSET: u64 = 0x8F40;
-pub const AP_CORE_APIC_ID_MESSAGE_OFFSET: u64 = 0x8F48;
-pub const AP_CORE_FUNCTION_ACHIEVED: u64 = 0x1234CCCC;
-
-const ACK_OFFSET: u64 = MAGIC_OFFSET; // BSP writes 1 here
-const DONE_OFFSET: u64 = MAGIC_OFFSET; // AP writes 1 when leaving trampoline
-const GDT_OFFSET: u64 = 0x8FF8; // GDT descriptor
-const CR3_OFFSET: u64 = 0x9000;
-const STACK_OFFSET: u64 = 0x9008;
-const ENTRY_OFFSET: u64 = 0x9010;
-
-const WRITTEN_CR3_OFFSET: u64 = 0x9020;
-
-use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::VirtAddr;
 
 use alloc::string::String;
 impl CpuFeatureFlags {
@@ -669,72 +509,22 @@ pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
         lapic_id
     );
 
-    // Create the core's GDT
     gdt::init_core_gdt(proc_id);
     serial_println!("Core {}: GDT loaded", proc_id);
-
-    // Enable SSE/SSE2 — must be done on every core before entering userspace
-    unsafe { enable_sse_for_current_core() };
-
-    // Initialize per-core syscall stack and SYSCALL/SYSRET MSRs
-    process::syscall::init_syscall();
-    serial_println!("Core {}: syscall initialized", proc_id);
-
-    // Load IDT
     interrupts::load_idt();
     serial_println!("Core {}: IDT loaded", proc_id);
 
-    // we use the same page tables so we dont have to map
-    // but we need to initialize this core's LAPIC registers
-    {
-        let phys_mem_offset = VirtAddr::new(HHDM_OFFSET);
-        let pml4_virt =
-            VirtAddr::new(active_pml4_frame.start_address().as_u64() as u64 + HHDM_OFFSET);
-        let pml4_table = unsafe { &mut *(pml4_virt.as_u64() as *mut PageTable) };
-
-        let mut mapper = unsafe { OffsetPageTable::new(pml4_table, phys_mem_offset) };
-
-        let mut frame_allocator = get_frame_allocator();
-        let fa = &mut *frame_allocator;
-
-        // unsafe { map_local_apic_for_current_core(&mut mapper, fa) };
-    }
-    unsafe { interrupts::init_lapic_for_current_core(proc_id) };
-    serial_println!("Core {}: LAPIC initialized", proc_id);
-
-    // TODO: Initialize this core in the core pool
-
-    // Initialize timer
-    unsafe { init_current_core() };
-    serial_println!("Core {}: Timer initialized", proc_id);
+    unsafe { init_core(proc_id) };
 
     serial_println!("Core {}: Enabling interrupts...", proc_id);
     interrupts::enable_interrupts();
     serial_println!("Core {}: Interrupts enabled", proc_id);
 
-    let mut time_elapsed = 0;
-
-    // Signal to the BSP that this AP is fully initialized and in the scheduler loop.
     crate::AP_CORES_READY.fetch_add(1, core::sync::atomic::Ordering::Release);
     serial_println!("Core {}: ready, entering scheduler loop", proc_id);
 
     process::scheduler::run_on_core_loop(proc_id);
     // loop {
-    //     core::arch::asm!("hlt");
-    // }
-
-    // loop {
-    //     // let time_start = interrupts::system_uptime_ns();
-
-    //     // let time_end = interrupts::system_uptime_ns();
-    //     // let dt: u64 = time_end - time_start;
-    //     // time_elapsed += dt;
-    //     // serial_println_core!(
-    //     //     "Loop time: {} ns; {} ms",
-    //     //     dt,
-    //     //     dt as f32 / 1_000_000.0
-    //     // );
-
     //     core::arch::asm!("hlt");
     // }
 }

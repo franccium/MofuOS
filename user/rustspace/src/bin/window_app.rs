@@ -9,6 +9,8 @@ use alloc::format;
 use core::arch::global_asm;
 use rustspace::gfx::{color::Rgba8888UNORM, surface::UserSurface};
 
+const FRAME_INTERVAL_MS: u64 = 16;
+
 global_asm!(
     ".section .text.entry",
     ".global _start",
@@ -30,7 +32,12 @@ pub extern "C" fn rust_main() -> ! {
         rustspace::println!("game: map_window_buffer failed");
         unsafe { rustspace::sys_exit(1) }
     }
-    let pixels_second = ((pixels as u64) + 8 * 1024 * 1024) as *mut u32;
+    let mut window_info = rustspace::WindowInfo::zeroed();
+    if !unsafe { rustspace::sys_get_window_info(window_id, &mut window_info) } {
+        rustspace::println!("game: get_window_info failed");
+        unsafe { rustspace::sys_exit(1) }
+    }
+    let pixels_second = ((pixels as u64) + window_info.front_buffer_offset) as *mut u32;
 
     let (width, height) = unsafe { rustspace::sys_get_window_size(window_id) };
     rustspace::println!(
@@ -60,7 +67,7 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         unsafe { rustspace::sys_present_window(window_id) };
-        unsafe { rustspace::sys_yield() };
+        unsafe { rustspace::sys_sleep_ms(FRAME_INTERVAL_MS) };
 
         frame = frame.wrapping_add(1);
     }
