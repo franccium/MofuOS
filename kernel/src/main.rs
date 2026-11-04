@@ -3,29 +3,14 @@
 
 mod boot;
 
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use core::fmt::Write;
-use kernel::data_structures::vector::Vec;
-use kernel::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
-use kernel::graphics::compositor::Compositor;
-use kernel::graphics::pipeline::{
-    BlendState, PipelineState, RasterizerState, RenderMode, VertexLayout,
+use kernel::bsp_init::{
+    init_filesystem_on_bsp, init_shared_state_on_bsp, wait_for_ap_cores_blocking,
 };
-use kernel::graphics::renderer::RenderContext;
-use kernel::graphics::resources::Texture;
-use kernel::graphics::shaders::{PassThroughVS, TextureSamplePS};
-use kernel::graphics::window::{Window, WindowBuffer};
-use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, TEST_ELF};
-use kernel::{
-    filesystem::sirius::FileType, graphics::framebuffer::FrameBufferTarget,
-    programs::theophe::Theophe, serial_println,
-};
+use kernel::graphics::compositor::{get_compositor, init_compositor};
+use kernel::{interrupts, serial_println_core, tests_exp::test_graphics};
 use x86_64::instructions::hlt;
 extern crate alloc;
-use kernel::tests_exp::{test_filesystem::test_filesystem, test_graphics, test_process};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum QemuExitCode {
     Success = 0x10,
@@ -47,69 +32,56 @@ pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    serial_println!("PANIC: {:#?}", info);
+    serial_println_core!("PANIC: {:#?}", info);
     exit_qemu(QemuExitCode::Failed);
 }
 
 fn main() -> ! {
-    serial_println!("Welcome to MofuOS!");
+    serial_println_core!("Welcome to MofuOS!");
 
-    kernel::process::syscall::init_syscall_stack();
+    let _ = init_filesystem_on_bsp();
+    kernel::tests_exp::test_ata::test_ata_filesystem();
 
-    //test_filesystem_system();
+    {
+        let mut framebuffer_target = kernel::graphics::framebuffer::get_framebuffer();
+        let fb = &mut *framebuffer_target;
 
-    //test_process::test_process_system();
-    //test_process::create_init_process();
-    //test_process::create_and_run_init_process();
+        let fb_width = fb.width as f32;
+        let fb_height = fb.height as f32;
 
-    let mut framebuffer_target = FrameBufferTarget::new(boot::boot_info().framebuffer.lock());
+        test_graphics::draw_shapes(fb);
 
-    test_graphics::draw_shapes(&mut framebuffer_target);
+        serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
-    let fb_width = framebuffer_target.width as f32;
-    let fb_height = framebuffer_target.height as f32;
+        init_shared_state_on_bsp();
 
-    //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
-    serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
-    let mut compositor = Compositor::new(fb_width as u32, fb_height as u32);
-    let (window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
+        serial_println_core!("Shared state initialized");
 
-    let (window3_id, window3_buffer) = compositor.create_window(400, 300, 700, 200);
-    compositor.set_z_index(window3_id, 5);
-    serial_println!("Created window with ID: {}", window3_id);
+        serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
-    test_graphics::render_shaders(&window3_buffer);
+        init_compositor(fb_width as u32, fb_height as u32);
+        serial_println_core!("Compositor initialized");
 
-    // {
-    //     let mut back_buffer = window3_buffer.back_buffer_mut();
-    //     for y in 0..window3_buffer.height {
-    //         for x in 0..window3_buffer.width {
-    //             let r = (x as f32 / window3_buffer.width as f32 * 255.0) as u8;
-    //             let g = (y as f32 / window3_buffer.height as f32 * 255.0) as u8;
-    //             let b = 0;
-    //             back_buffer.write_pixel(x, y, Rgba8888UNORM::from_rgb(r, g, b));
-    //         }
-    //     }
+        wait_for_ap_cores_blocking();
+        serial_println_core!("AP cores ready, creating userspace processes");
+        kernel::process_start::create_userspace_processes();
 
-    //     serial_println!("Presenting window3 ");
-    //     window3_buffer.present();
-    // }
+        serial_println_core!("Created initial userspace processes");
 
-    let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
-    theophe.write_line("");
-    theophe.write_line("  hi");
-    theophe.write_line("==========================================================");
-    let cpu_info = kernel::util::cpuinfo::get_cpu_info();
-    let cpu_info_str = cpu_info.to_pretty_string();
-    theophe.write_str(&cpu_info_str);
+        serial_println_core!("Entering main kernel loop");
 
-    theophe.render();
-
-    compositor.focus_window(0);
-    compositor.compose(&mut framebuffer_target);
-
-    loop {
-        hlt();
+        loop {
+            //serial_println_core!("loop");
+            let time_start = interrupts::system_uptime_ns();
+            let mut compositor = get_compositor();
+            compositor.process_input_events();
+            compositor.compose(fb);
+            let time_end = interrupts::system_uptime_ns();
+            let dt: u64 = time_end - time_start;
+            // time_elapsed += dt;
+            //serial_println_core!("Loop time: {} ns; {} ms", dt, dt as f32 / 1_000_000.0);
+            hlt();
+        }
     }
 
     exit_qemu(QemuExitCode::Success);

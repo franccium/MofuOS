@@ -6,14 +6,13 @@ use core::{
     ptr::NonNull,
 };
 use x86_64::{
-    VirtAddr,
+    PhysAddr, VirtAddr,
     structures::paging::{
         FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB, mapper::MapToError,
     },
 };
 
-
-const ALLOC_DEBUG: bool = false; 
+const ALLOC_DEBUG: bool = false;
 macro_rules! alloc_debug {
     ($($arg:tt)*) => {
         if ALLOC_DEBUG {
@@ -27,7 +26,7 @@ pub static ALLOCATOR: MutexWrapper<FixedSizeBlockAllocator> =
     MutexWrapper::new(FixedSizeBlockAllocator::new());
 
 pub const HEAP_POINTER: usize = 0xFFFF_8080_0000_0000;
-pub const HEAP_SIZE_BYTES: usize = 16 * 1024 * 1024; // 16 MB
+pub const HEAP_SIZE_BYTES: usize = 32 * 1024 * 1024; // 64 MB
 
 // Wrapper around spin::Mutex to implement GlobalAlloc on a foreign type
 pub struct MutexWrapper<T> {
@@ -46,8 +45,8 @@ impl<T> MutexWrapper<T> {
     }
 }
 
-/// Block sizes used by the fixed-size block allocator.
-/// Also used as alignment for each block so they need to be powers of two.
+/// Block sizes used by the fixed-size block allocator
+/// Also used as alignment for each block so they need to be powers of two
 const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 
 struct AllocatorListNode {
@@ -77,8 +76,8 @@ pub fn init_heap(
 
     let heap_ptr = VirtAddr::new(HEAP_POINTER as u64);
     let heap_end = heap_ptr + HEAP_SIZE_BYTES as u64 - 1;
-    let heap_start_page = Page::containing_address(heap_ptr);
-    let heap_last_page = Page::containing_address(heap_end);
+    let heap_start_page: Page<Size4KiB> = Page::containing_address(heap_ptr);
+    let heap_last_page: Page<Size4KiB> = Page::containing_address(heap_end);
     let page_range = Page::range_inclusive(heap_start_page, heap_last_page);
 
     serial_println!(

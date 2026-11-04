@@ -1,9 +1,9 @@
-use crate::{serial_println};
+use crate::serial_println;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use spin::{Mutex, Once};
 
-const DISK_OP_DEBUG: bool = false; 
+const DISK_OP_DEBUG: bool = false;
 macro_rules! disk_op_debug {
     ($($arg:tt)*) => {
         if DISK_OP_DEBUG {

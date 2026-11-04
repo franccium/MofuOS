@@ -1,13 +1,24 @@
 /limine
 /ovmf
+/target
+xtask/target
 *.iso
 *.hdd
-/target
 notes.md
 architecture.md
 esp
 notes/
-todo.md
-os_disk_fat32
+
+storage/
 
 kernel/kernel
+logs
+test_logs
+scripts/__pycache__
+ata_disk.img
+
+
+temp/
+CLAUDE.md
+.claude
+.vscode

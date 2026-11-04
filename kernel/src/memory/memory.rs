@@ -1,6 +1,6 @@
 use crate::serial_println;
 use acpi::{Handler, PhysicalMapping};
-use limine::memory_map::{Entry, EntryType};
+use limine::memmap::{Entry, MEMMAP_ACPI_NVS, MEMMAP_ACPI_RECLAIMABLE, MEMMAP_USABLE};
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3,
@@ -11,9 +11,10 @@ use x86_64::{
 };
 
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
+const FRAME_FREE_LIST_DEFAULT_SIZE: usize = 1024;
 
 #[derive(Clone, Copy)]
-pub struct IdendtityAcpiHandler {
+pub struct IdentityAcpiHandler {
     pub phys_offset: u64,
 }
 
@@ -40,6 +41,7 @@ pub struct MemoryMapFrameAllocator {
     memory_map: &'static [&'static Entry],
     curr_region_index: usize,
     frame_offset_in_region: u64,
+    free_list: alloc::vec::Vec<PhysFrame<Size4KiB>>,
 }
 
 pub const fn align_up(x: u64, align: u64) -> u64 {
@@ -72,9 +74,7 @@ pub fn map_acpi_regions(
 
     // map all ACPI regions
     for entry in frame_allocator.memory_map {
-        if entry.entry_type == EntryType::ACPI_RECLAIMABLE
-            || entry.entry_type == EntryType::ACPI_NVS
-        {
+        if entry.type_ == MEMMAP_ACPI_RECLAIMABLE || entry.type_ == MEMMAP_ACPI_NVS {
             let start = align_down(entry.base, PAGE_SIZE as u64);
             let end = align_up(entry.base + entry.length, PAGE_SIZE as u64);
 
@@ -158,12 +158,70 @@ impl MemoryMapFrameAllocator {
             memory_map,
             curr_region_index: 0,
             frame_offset_in_region: 0,
+            free_list: alloc::vec::Vec::new(),
+        }
+    }
+
+    pub fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        debug_assert!(
+            frame
+                .start_address()
+                .as_u64()
+                .is_multiple_of(PAGE_SIZE as u64),
+            "deallocate_frame: unaligned frame"
+        );
+        self.free_list.push(frame);
+    }
+
+    /// A frame freed twice would be handed to two owners later, only meant for tests
+    pub fn free_list_has_duplicates(&self) -> bool {
+        let mut frame_addresses: alloc::vec::Vec<u64> = self
+            .free_list
+            .iter()
+            .map(|frame| frame.start_address().as_u64())
+            .collect();
+        frame_addresses.sort_unstable();
+
+        frame_addresses.windows(2).any(|pair| pair[0] == pair[1])
+    }
+
+    pub fn free_frame_count(&self) -> usize {
+        self.free_list.len()
+    }
+
+    pub fn allocated_bump_frames(&self) -> usize {
+        let page_size = PAGE_SIZE as u64;
+        let mut count: usize = 0;
+
+        for idx in 0..self.curr_region_index {
+            let region = self.memory_map[idx];
+            if region.type_ == MEMMAP_USABLE {
+                let start = align_up(region.base, page_size);
+                let end = region.base + region.length;
+                if end > start {
+                    count += ((end - start) / page_size) as usize;
+                    if idx == self.curr_region_index {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(region) = self.memory_map.get(self.curr_region_index) {
+            if region.type_ == MEMMAP_USABLE {
+                count += (self.frame_offset_in_region / page_size) as usize;
+            }
+        }
+        if count >= self.free_list.len() {
+            count - self.free_list.len()
+        } else {
+            0
         }
     }
 
     fn _usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
         let regions = self.memory_map.iter();
-        let usable_regions = regions.filter(|r| r.entry_type == EntryType::USABLE);
+        let usable_regions = regions.filter(|r| r.type_ == MEMMAP_USABLE);
         let addr_ranges = usable_regions.map(|r| r.base..r.base + r.length);
         let frame_addresses = addr_ranges.flat_map(|r| r.step_by(PAGE_SIZE));
 
@@ -173,10 +231,13 @@ impl MemoryMapFrameAllocator {
 
 unsafe impl FrameAllocator<Size4KiB> for MemoryMapFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        if let Some(frame) = self.free_list.pop() {
+            return Some(frame);
+        }
         loop {
             let region = self.memory_map.get(self.curr_region_index)?;
 
-            if region.entry_type != EntryType::USABLE {
+            if region.type_ != MEMMAP_USABLE {
                 self.curr_region_index += 1;
                 self.frame_offset_in_region = 0;
                 continue;
@@ -199,7 +260,7 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryMapFrameAllocator {
     }
 }
 
-impl Handler for IdendtityAcpiHandler {
+impl Handler for IdentityAcpiHandler {
     unsafe fn map_physical_region<T>(
         &self,
         phys_addr: usize,
@@ -207,7 +268,7 @@ impl Handler for IdendtityAcpiHandler {
     ) -> PhysicalMapping<Self, T> {
         let virt_addr = (phys_addr as u64 + self.phys_offset) as *mut T;
         // serial_println!(
-        //     "IdendtityAcpiHandler: mapping phys {:#x} to virt {:#x}",
+        //     "IdentityAcpiHandler: mapping phys {:#x} to virt {:#x}",
         //     phys_addr,
         //     virt_addr as u64
         // );

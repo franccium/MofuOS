@@ -1,5 +1,6 @@
-[build]
-target = "x86_64-unknown-none"
+[alias]
+xtask = "run --manifest-path xtask/Cargo.toml --"
+x = "run --manifest-path xtask/Cargo.toml --"
 
 [target.x86_64-unknown-none]
 rustflags = [
@@ -7,5 +8,5 @@ rustflags = [
     "-C", "relocation-model=static",
 ]
 
-[unstable]
-build-std = ["core", "alloc"]
+# Note: build-std is passed explicitly by xtask via `cargo -Z build-std=core,alloc`
+# To build kernel directly: cargo build -p kernel --target x86_64-unknown-none -Z build-std=core,alloc
