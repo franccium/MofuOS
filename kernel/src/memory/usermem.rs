@@ -57,16 +57,20 @@ impl UserMemoryManager {
         let pml4_virt = VirtAddr::new(self.kernel_page_table_phys.as_u64() + HHDM_OFFSET);
         let pml4 = unsafe { &*(pml4_virt.as_u64() as *const PageTable) };
         let lapic_pml4_idx = ((0xFFFF_FFFF_FF80_0000u64 >> 39) & 0x1FF) as usize;
-        serial_println!(
-            "LAPIC PML4 entry {}: {:?}",
-            lapic_pml4_idx,
-            pml4[lapic_pml4_idx].flags()
-        );
+        if crate::memory::USER_MEMORY_DEBUG_PRINT {
+            serial_println!(
+                "LAPIC PML4 entry {}: {:?}",
+                lapic_pml4_idx,
+                pml4[lapic_pml4_idx].flags()
+            );
+        }
 
-        serial_println!(
-            "allocate_new_address_space: Created user address space: top-level table at {:?}",
-            new_table_pml4_phys
-        );
+        if crate::memory::USER_MEMORY_DEBUG_PRINT {
+            serial_println!(
+                "allocate_new_address_space: Created user address space: top-level table at {:?}",
+                new_table_pml4_phys
+            );
+        }
 
         Ok(new_table_pml4_phys)
     }
@@ -183,11 +187,13 @@ impl UserMemoryManager {
         protection_flags: PageTableFlags,
         frame_allocator: &mut MemoryMapFrameAllocator,
     ) -> Result<(), MapToError<Size4KiB>> {
-        serial_println!(
-            "UserMemoryManager: map_virt_mem_region: mapping vaddr: {:#x}, bytes: {}",
-            virt_addr.as_u64(),
-            size_bytes
-        );
+        if crate::memory::USER_MEMORY_DEBUG_PRINT {
+            serial_println!(
+                "UserMemoryManager: map_virt_mem_region: mapping vaddr: {:#x}, bytes: {}",
+                virt_addr.as_u64(),
+                size_bytes
+            );
+        }
         let new_table_pml4_virt = VirtAddr::new(pml4_table_phys.as_u64() + self.phys_offset);
         let pml4_table = unsafe { &mut *(new_table_pml4_virt.as_u64() as *mut PageTable) };
 
@@ -238,13 +244,15 @@ impl UserMemoryManager {
                         match user_page_mapper.update_flags(page, merged_flags) {
                             Ok(flush) => {
                                 flush.flush();
-                                serial_println!(
-                                    "  map_virt_mem_region: page {:#x} already mapped, merged flags {:?} | {:?} -> {:?}",
-                                    page.start_address().as_u64(),
-                                    existing_flags,
-                                    user_flags,
-                                    merged_flags,
-                                );
+                                if crate::memory::USER_MEMORY_DEBUG_PRINT {
+                                    serial_println!(
+                                        "  map_virt_mem_region: page {:#x} already mapped, merged flags {:?} | {:?} -> {:?}",
+                                        page.start_address().as_u64(),
+                                        existing_flags,
+                                        user_flags,
+                                        merged_flags,
+                                    );
+                                }
                             }
                             Err(e) => {
                                 serial_println!(
@@ -479,10 +487,12 @@ pub fn allocate_zeroed_page(
     unsafe {
         core::ptr::write_bytes(virt_addr.as_mut_ptr::<u8>(), 0, PAGE_SIZE);
     }
-    serial_println!(
-        "allocate_zeroed_page: allocated and zeroed phys addr {:?}",
-        phys_addr
-    );
+    if crate::memory::USER_MEMORY_DEBUG_PRINT {
+        serial_println!(
+            "allocate_zeroed_page: allocated and zeroed phys addr {:?}",
+            phys_addr
+        );
+    }
 
     Some((phys_addr, virt_addr))
 }

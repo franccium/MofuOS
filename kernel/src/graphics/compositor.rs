@@ -2,7 +2,6 @@ use crate::events::event_buffer::{
     EventBuffer, EventType, InputEvent, KeyModifiers, KeyState, MouseButtons, MouseEvent,
 };
 use crate::events::keyboard_state::{KEY_COUNT, KeyBitset, KeyboardState};
-use pc_keyboard::KeyCode;
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb};
 use crate::graphics::framebuffer::FrameBufferTarget;
@@ -23,6 +22,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use embedded_graphics::pixelcolor::Rgb888;
+use pc_keyboard::KeyCode;
 use spin::{Mutex, MutexGuard, Once, RwLock};
 use x86_64::structures::paging::{PageTableFlags, PhysFrame};
 use x86_64::{PhysAddr, VirtAddr};
@@ -355,7 +355,11 @@ impl Compositor {
             window.event_buffer = None;
             window.event_buffer_phys = PhysAddr::zero();
 
-            (window.owner_pid, event_buffer_phys, window.buffer.page_count())
+            (
+                window.owner_pid,
+                event_buffer_phys,
+                window.buffer.page_count(),
+            )
         };
         self.free_window_ids.lock().push(window_id);
 
@@ -407,12 +411,26 @@ impl Compositor {
         }
     }
 
+    /// True when a window of the process has input waiting in its event buffer
+    pub fn process_has_pending_input(&self, pid: PID) -> bool {
+        self.windows.read().iter().any(|window| {
+            window.owner_pid == pid
+                && window.is_visible
+                && window
+                    .event_buffer
+                    .is_some_and(|event_buffer| !event_buffer.is_empty())
+        })
+    }
+
     pub fn process_input_events(&mut self) {
         let buffer = get_input_event_buffer();
 
         self.keyboard_state.clear_transient();
 
+        let mut forwarded_any_event = false;
         while let Some(event) = buffer.read() {
+            forwarded_any_event = true;
+
             match event.event_type {
                 EventType::MouseEvent => {
                     self.handle_mouse_event(event);
@@ -429,6 +447,10 @@ impl Compositor {
                     }
                 }
             }
+        }
+
+        if forwarded_any_event {
+            crate::process::wait::INPUT_WAIT_QUEUE.wake_all();
         }
     }
 
@@ -477,13 +499,8 @@ impl Compositor {
                 self.focus_window(new_focused_window_id);
             }
         }
-        if self.keyboard_state.is_down(KeyCode::LAlt)
-        {
-            serial_println_core!(
-                "Compositor: LAlt is down, key {} state {:?}",
-                key,
-                state
-            );
+        if self.keyboard_state.is_down(KeyCode::LAlt) {
+            serial_println_core!("Compositor: LAlt is down, key {} state {:?}", key, state);
         }
 
         if let Some(event_buffer) = self.get_focused_window_event_buffer() {

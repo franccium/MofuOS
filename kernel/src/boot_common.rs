@@ -9,8 +9,8 @@ use crate::{
 use crate::{
     interrupts::map_local_apic_for_current_core,
     memory::memory::MemoryMapFrameAllocator,
-    process::{CORE_POOL, CorePool, SCHEDULER},
-    util::cpuinfo::{self, init_cpu_infos, init_core},
+    process::{CORE_POOL, CorePool},
+    util::cpuinfo::{self, init_core, init_cpu_infos},
 };
 use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker,
@@ -164,7 +164,6 @@ pub unsafe fn bsp_early_init() {
         }
     }
     crate::gdt::install_guard_pages(&mut frame_allocator);
-    crate::process::syscall::install_syscall_guard_pages(&mut frame_allocator);
     serial_println!("Guard pages installed");
 
     init_input_event_buffer();
@@ -209,10 +208,6 @@ pub unsafe fn bsp_early_init() {
     {
         let mut core_pool = CORE_POOL.lock();
         core_pool.init_with_core_count(core_count as u8, cpus);
-    }
-    {
-        let mut scheduler = SCHEDULER.lock();
-        scheduler.init_with_core_count(core_count as u8);
     }
 
     interrupts::disable_interrupts();

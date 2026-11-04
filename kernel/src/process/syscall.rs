@@ -10,7 +10,7 @@ use crate::memory::memory::PAGE_SIZE;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
 use crate::process::elf_loader::ODYS_ELF;
-use crate::process::process::{ExecutionContext, FileDescriptor};
+use crate::process::process::FileDescriptor;
 use crate::process::process_mem::FrameOwnership;
 use crate::process::{CORE_POOL, ElfLoadInfo};
 use crate::serial_println;
@@ -35,7 +35,7 @@ use x86_64::structures::paging::{Mapper, PageTableFlags};
 #[cfg(feature = "use_cached_fs")]
 use crate::filesystem::file_cache::CacheImportance;
 
-const SYSCALL_STACK_SIZE: usize = 4096 * 16; // 64 KiB per core
+const SYSCALL_DEBUG_PRINT: bool = false;
 
 #[inline]
 fn validate_user_ptr(ptr: usize, len: usize) -> bool {
@@ -103,6 +103,11 @@ pub enum SyscallNumber {
 
     CreateCircularBuffer = 600,
 
+    SleepMs = 990,
+    WaitForInput = 991,
+    FutexWait = 992,
+    FutexWake = 993,
+
     GetCpuInfo = 970,
     GetProcessInfo = 996,
     GetPID = 997,
@@ -110,11 +115,11 @@ pub enum SyscallNumber {
     Exit = 999,
 }
 
+/// Reached through GS after swapgs, the offsets are used by syscall_handler
 #[repr(C, align(64))]
 struct PerCoreSyscallData {
+    /// Kernel stack top of the task running on this core, set on every dispatch
     stack_top: u64,
-    _stack: [u8; SYSCALL_STACK_SIZE],
-    // placed above the stack top so pushes never touch it; keeps _stack at offset 8
     user_rsp_scratch: u64,
 }
 
@@ -122,7 +127,6 @@ impl PerCoreSyscallData {
     const fn zeroed() -> Self {
         Self {
             stack_top: 0,
-            _stack: [0u8; SYSCALL_STACK_SIZE],
             user_rsp_scratch: 0,
         }
     }
@@ -131,75 +135,12 @@ impl PerCoreSyscallData {
 const SYSCALL_USER_RSP_SCRATCH_OFFSET: usize =
     core::mem::offset_of!(PerCoreSyscallData, user_rsp_scratch);
 
-#[repr(C, align(4096))]
-struct GuardedSyscallSlot {
-    guard: [u8; 4096],
-    data: PerCoreSyscallData,
-}
+static mut SYSCALL_DATA: [PerCoreSyscallData; crate::MAX_CORES as usize] =
+    [const { PerCoreSyscallData::zeroed() }; crate::MAX_CORES as usize];
 
-impl GuardedSyscallSlot {
-    const fn new() -> Self {
-        Self {
-            guard: [0u8; 4096],
-            data: PerCoreSyscallData::zeroed(),
-        }
-    }
-}
-
-static mut SYSCALL_SLOTS: [GuardedSyscallSlot; crate::MAX_CORES as usize] = {
-    const EMPTY: GuardedSyscallSlot = GuardedSyscallSlot::new();
-    [EMPTY; crate::MAX_CORES as usize]
-};
-
-pub fn syscall_guard_page(core_id: u8) -> x86_64::VirtAddr {
-    unsafe {
-        let slot = &SYSCALL_SLOTS[core_id as usize];
-        x86_64::VirtAddr::new(slot.guard.as_ptr() as u64)
-    }
-}
-
-pub fn syscall_bounds(core_id: u8) -> (x86_64::VirtAddr, x86_64::VirtAddr) {
-    unsafe {
-        let slot = &SYSCALL_SLOTS[core_id as usize];
-        let bottom = x86_64::VirtAddr::new(slot.data._stack.as_ptr() as u64);
-        let top = x86_64::VirtAddr::new(slot.data._stack.as_ptr().add(SYSCALL_STACK_SIZE) as u64);
-        (bottom, top)
-    }
-}
-
-pub fn syscall_stack_top(core_id: u8) -> u64 {
-    unsafe {
-        let slot = &SYSCALL_SLOTS[core_id as usize];
-        slot.data._stack.as_ptr().add(SYSCALL_STACK_SIZE) as u64
-    }
-}
-
-pub fn install_syscall_guard_pages(
-    frame_allocator: &mut crate::memory::memory::MemoryMapFrameAllocator,
-) {
-    for core_id in 0..crate::MAX_CORES as usize {
-        unsafe {
-            crate::stack_guard::ensure_guard_unmapped(
-                syscall_guard_page(core_id as u8),
-                frame_allocator,
-            );
-        }
-    }
-}
-
-#[inline(always)]
-pub fn assert_syscall_stack_bounds(core_id: u8) {
-    let rsp: u64;
-    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) };
-    let (bottom, top) = syscall_bounds(core_id);
-    debug_assert!(
-        rsp >= bottom.as_u64() && rsp <= top.as_u64(),
-        "syscall RSP {:#x} out of bounds core {} [{:#x}..{:#x}]",
-        rsp,
-        core_id,
-        bottom.as_u64(),
-        top.as_u64()
-    );
+pub fn set_syscall_stack_top(core_id: u8, stack_top: u64) {
+    // SAFETY: only the owning core writes its entry, with interrupts off
+    unsafe { SYSCALL_DATA[core_id as usize].stack_top = stack_top };
 }
 
 const MSR_KERNEL_GS_BASE: u32 = 0xC0000102;
@@ -224,29 +165,6 @@ pub struct SyscallFrame {
     pub rflags: u64,   // r11
     pub user_rip: u64, // rcx
     pub user_rsp: u64,
-}
-
-impl SyscallFrame {
-    /// Saves the user register state so a yielded process resumes with intact callee-saved registers
-    pub fn store_into_context(&self, context: &mut ExecutionContext) {
-        // syscall return value seen by the user after resume
-        context.rax = 0;
-        context.rbx = self.rbx;
-        context.rdx = self.arg3;
-        context.rsi = self.arg2;
-        context.rdi = self.arg1;
-        context.rbp = self.rbp;
-        context.rsp = self.user_rsp;
-        context.r8 = self.arg5;
-        context.r9 = self.arg6;
-        context.r10 = self.arg4;
-        context.r12 = self.r12;
-        context.r13 = self.r13;
-        context.r14 = self.r14;
-        context.r15 = self.r15;
-        context.rip = self.user_rip;
-        context.rflags = self.rflags;
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -278,10 +196,8 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 
         "mov rdi, rsp",
 
-        // stack top is 8 mod 16 and 16 regs were pushed, realign for the SysV call
-        "sub rsp, 8",
+        // the task stack top is 16 aligned and 16 regs were pushed, so rsp is aligned for the call
         "call {handle_syscall}",
-        "add rsp, 8",
 
         // RSP will point at the user stack while still in ring 0, sysretq restores IF from r11
         "cli",
@@ -313,13 +229,23 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
+    debug_assert!(frame as usize % 16 == 0);
     let frame = unsafe { &mut *frame };
     x86_64::instructions::interrupts::enable();
     {
         let core_id = get_current_core_id();
-        assert_syscall_stack_bounds(core_id);
+        crate::gdt::assert_rsp_in_task_stack(core_id);
     }
 
+    let result = unsafe { dispatch_syscall(frame) };
+
+    x86_64::instructions::interrupts::disable();
+    scheduler::exit_to_user();
+
+    result
+}
+
+unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
     let syscall = unsafe { core::mem::transmute::<u64, SyscallNumber>(frame.syscall_num) };
 
     match syscall {
@@ -400,68 +326,23 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
                 return u64::MAX;
             }
 
-            for core_id in 0..crate::MAX_CORES {
-                let running = scheduler::get_current_process_for_core(core_id);
-                if running == target_pid && core_id != caller_core {
-                    serial_println_core!(
-                        "TerminateProcess: target {} running on core {} busy",
-                        target_pid,
-                        core_id
-                    );
-                    return u64::MAX;
-                }
+            if target_pid == caller_pid {
+                crate::process::task::exit_current(exit_code);
             }
 
-            let is_self = target_pid == caller_pid;
-            if is_self {
-                {
-                    let mut pm = PROCESS_MANAGER.lock();
-                    if let Ok(proc) = pm.get_process_mut(caller_pid) {
-                        frame.store_into_context(&mut proc.execution_context);
-                    }
-                }
-                unsafe {
-                    let kernel_phys = crate::memory::get_user_mem_mgr().kernel_page_table_phys;
-                    let kf = x86_64::structures::paging::PhysFrame::<
-                        x86_64::structures::paging::Size4KiB,
-                    >::containing_address(kernel_phys);
-                    x86_64::registers::control::Cr3::write(
-                        kf,
-                        x86_64::registers::control::Cr3Flags::empty(),
-                    );
-                }
-                crate::graphics::compositor::destroy_windows_of_process(target_pid);
-                {
-                    let mut pm = PROCESS_MANAGER.lock();
-                    if let Err(e) = pm.terminate_process(target_pid, exit_code, false) {
-                        serial_println_core!("TerminateProcess self failed: {:?}", e);
-                        return u64::MAX;
-                    }
-                }
-                x86_64::instructions::interrupts::disable();
-                scheduler::return_to_scheduler();
-            } else {
-                crate::graphics::compositor::destroy_windows_of_process(target_pid);
-                let res = {
-                    let mut pm = PROCESS_MANAGER.lock();
-                    pm.terminate_process(target_pid, exit_code, false)
-                };
-                match res {
-                    Ok(()) => {
-                        serial_println_core!(
-                            "TerminateProcess: pid {} killed {} with code {}",
-                            caller_pid,
-                            target_pid,
-                            exit_code
-                        );
-                        0
-                    }
-                    Err(e) => {
-                        serial_println_core!("TerminateProcess: kill failed: {:?}", e);
-                        u64::MAX
-                    }
-                }
+            // the target tears itself down once it is back at the edge of ring 3
+            if !crate::process::task::request_kill(target_pid, exit_code) {
+                serial_println_core!("TerminateProcess: target {} has no task", target_pid);
+                return u64::MAX;
             }
+
+            serial_println_core!(
+                "TerminateProcess: pid {} asked {} to exit with code {}",
+                caller_pid,
+                target_pid,
+                exit_code
+            );
+            0
         }
         SyscallNumber::Write => {
             let fd = frame.arg1;
@@ -531,20 +412,14 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             pid as u64
         }
         SyscallNumber::Yield => {
-            let core_id = get_current_core_id();
-            let pid = scheduler::get_current_process_for_core(core_id);
-            serial_println_core!("sys_yield: PID {} yielding", pid);
-
-            {
-                let mut pm = PROCESS_MANAGER.lock();
-                if let Ok(proc) = pm.get_process_mut(pid) {
-                    frame.store_into_context(&mut proc.execution_context);
-                    unsafe { proc.fpu_state.save_from_cpu() };
-                }
+            if SYSCALL_DEBUG_PRINT {
+                let core_id = get_current_core_id();
+                let pid = scheduler::get_current_process_for_core(core_id);
+                serial_println_core!("sys_yield: PID {} yielding", pid);
             }
 
-            x86_64::instructions::interrupts::disable();
-            scheduler::return_to_scheduler();
+            scheduler::core_yield_executing_tasks(get_current_core_id());
+            0
         }
         SyscallNumber::Exit => {
             let exit_code = frame.arg1;
@@ -552,25 +427,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             let pid = scheduler::get_current_process_for_core(core_id);
             serial_println_core!("sys_exit: PID {} exiting with code {}", pid, exit_code);
 
-            unsafe {
-                let kernel_phys = crate::memory::get_user_mem_mgr().kernel_page_table_phys;
-                let kf = x86_64::structures::paging::PhysFrame::<
-                    x86_64::structures::paging::Size4KiB,
-                >::containing_address(kernel_phys);
-                x86_64::registers::control::Cr3::write(
-                    kf,
-                    x86_64::registers::control::Cr3Flags::empty(),
-                );
-            }
-            // window cleanup takes the process manager lock itself, so it runs first
-            crate::graphics::compositor::destroy_windows_of_process(pid);
-            {
-                let mut pm = PROCESS_MANAGER.lock();
-                pm.terminate_process(pid, exit_code as i32, false);
-            }
-
-            x86_64::instructions::interrupts::disable();
-            scheduler::return_to_scheduler();
+            crate::process::task::exit_current(exit_code as i32);
         }
         SyscallNumber::Allocate => {
             let size = frame.arg1 as usize;
@@ -1401,6 +1258,38 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
             0
         }
 
+        SyscallNumber::SleepMs => {
+            crate::process::wait::sleep_current_task_ms(frame.arg1);
+            0
+        }
+        SyscallNumber::WaitForInput => {
+            let core_id = get_current_core_id();
+            let pid = scheduler::get_current_process_for_core(core_id);
+            crate::process::wait::block_current_task_until_event(
+                &crate::process::wait::INPUT_WAIT_QUEUE,
+                || crate::graphics::compositor::get_compositor().process_has_pending_input(pid),
+            );
+            0
+        }
+        SyscallNumber::FutexWait => {
+            let word_ptr = frame.arg1 as usize;
+            let expected = frame.arg2 as u32;
+            if !validate_user_ptr(word_ptr, core::mem::size_of::<u32>()) {
+                return u64::MAX;
+            }
+
+            // blocks while the word still holds the expected value
+            crate::process::wait::block_current_task_until_event(
+                &crate::process::wait::FUTEX_WAIT_QUEUE,
+                || core::ptr::read_volatile(word_ptr as *const u32) != expected,
+            );
+            0
+        }
+        SyscallNumber::FutexWake => {
+            crate::process::wait::FUTEX_WAIT_QUEUE.wake_all();
+            0
+        }
+
         _ => u64::MAX,
     }
 }
@@ -1418,20 +1307,10 @@ pub fn init_syscall() {
     let core_id = get_current_core_id() as usize;
     debug_assert!(core_id < crate::MAX_CORES as usize);
 
-    let stack_top = unsafe {
-        let slot = &mut SYSCALL_SLOTS[core_id].data;
-        let stack_end_ptr = slot._stack.as_ptr().add(SYSCALL_STACK_SIZE);
-        let top = stack_end_ptr as u64;
-        slot.stack_top = top;
-        top
-    };
-
-    let slot_addr = unsafe { &SYSCALL_SLOTS[core_id].data as *const _ as u64 };
+    let slot_addr = unsafe { core::ptr::addr_of!(SYSCALL_DATA[core_id]) as u64 };
     unsafe {
         msr_write(MSR_KERNEL_GS_BASE, slot_addr);
     }
-
-    serial_println_core!("Syscall stack top (core {}): {:#x}", core_id, stack_top);
 
     unsafe {
         Efer::update(|flags| {

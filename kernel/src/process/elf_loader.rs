@@ -16,6 +16,20 @@ pub const MEMSTRESS_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/memstress");
 pub const WINSTRESS_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/winstress");
+pub const REGPROBE_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/regprobe");
+pub const SPINNER_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/spinner");
+pub const BUSYLOOP_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/busyloop");
+pub const YIELDLOOP_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/yieldloop");
+pub const WORKER_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/worker");
+pub const SLEEPER_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/sleeper");
+pub const PINGPONG_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/pingpong");
 pub const FPUSTRESS_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fpustress");
 

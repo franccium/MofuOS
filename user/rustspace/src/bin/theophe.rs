@@ -105,10 +105,12 @@ pub extern "C" fn main() -> ! {
 
     let mut frame: u32 = 0;
     loop {
+        let mut handled_event = false;
         loop {
             let event = event_reader.try_read(window_id);
             match event {
                 Some(event) => {
+                    handled_event = true;
                     theophe.handle_event(event);
                 }
                 None => break,

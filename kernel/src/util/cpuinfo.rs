@@ -4,20 +4,20 @@ use crate::interrupts::{
 };
 use crate::memory::{FRAME_ALLOCATOR, get_frame_allocator};
 use crate::process::process::INVALID_PID;
-use crate::process::{self, CORE_POOL, SCHEDULER};
+use crate::process::{self, CORE_POOL};
 use crate::util::apic::APICOffset;
 use crate::util::msr::msr_read;
 use crate::{HHDM_OFFSET, MAX_CORES, gdt, hlt_loop, serial_println, serial_println_core};
 use alloc::vec::Vec;
 use bitflags::bitflags;
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use limine::mp::MpInfo;
+use x86_64::VirtAddr;
 use x86_64::instructions::hlt;
 use x86_64::structures::paging::{
     FrameAllocator, Mapper, OffsetPageTable, PageTable, Size4KiB, frame,
 };
-use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::VirtAddr;
 
 #[derive(Clone, Copy)]
 pub struct CpuInfo {

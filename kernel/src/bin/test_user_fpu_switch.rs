@@ -65,18 +65,14 @@ fn test_main() -> ! {
         let mut pm = PROCESS_MANAGER.lock();
 
         for pid_slot in pids.iter_mut() {
-            *pid_slot = match pm.create_process_from_elf(
-                0,
-                &elf_info,
-                "fpustress",
-                PROCESS_PRIORITY,
-            ) {
-                Ok(pid) => pid,
-                Err(e) => {
-                    serial_println_core!("FAIL: create_process_from_elf: {:?}", e);
-                    exit_qemu(QemuExitCode::Failed);
-                }
-            };
+            *pid_slot =
+                match pm.create_process_from_elf(0, &elf_info, "fpustress", PROCESS_PRIORITY) {
+                    Ok(pid) => pid,
+                    Err(e) => {
+                        serial_println_core!("FAIL: create_process_from_elf: {:?}", e);
+                        exit_qemu(QemuExitCode::Failed);
+                    }
+                };
         }
     }
 

@@ -137,7 +137,7 @@ Entry symbol: `kmain`
 10. Parse MP response (multiprocessor) — enumerates CPUs
 11. Init CPU info (`init_cpu_info`, `init_cpu_infos`)
 12. Map LAPIC for core 0, init LAPIC timer
-13. Init `CORE_POOL` and `SCHEDULER` with core count
+13. Init `CORE_POOL` with core count and the LAPIC id table (the run queues are static)
 14. Init `init_current_core()` for BSP
 15. Init global memory globals (`FRAME_ALLOCATOR`, `USER_MEMORY_MANAGER`)
 16. Calibrate TSC via PIT (`init_tsc_globals`)
@@ -147,9 +147,9 @@ Entry symbol: `kmain`
 
 ## main() in src/main.rs
 
-1. `init_syscall_stack()` — sets up global syscall stack pointer
+1. `init_syscall()` per core — MSRs and `KERNEL_GS_BASE`, the syscall stack top is set on every dispatch
 2. `create_userspace_processes()` — parses `TEST_ELF`, creates process via `PROCESS_MANAGER`,
-   enqueues on core 1's scheduler queue
+   queues it on the least loaded AP core
 3. Init framebuffer, create compositor + windows
 4. Run graphics demos (shapes, 3D cube shader test via pipeline)
 5. Enters infinite render loop (RENDER_SHADERS const gate)
@@ -162,7 +162,7 @@ Each AP core (currently only core 1) runs:
 3. `init_lapic_for_current_core(core_id)`
 4. `init_syscall()` — write STAR/LSTAR/SFMASK MSRs for SYSCALL/SYSRET
 5. Enable interrupts
-6. `run_on_core_loop(core_id)` — scheduler loop
+6. `run_on_core_loop(core_id)` — per-core scheduler loop (own stack, `switch_context` to tasks)
 
 ## Key Constants (lib.rs)
 

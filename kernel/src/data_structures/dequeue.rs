@@ -50,7 +50,9 @@ impl<T> Dequeue<T> {
 
     fn expand(&mut self) {
         let new_capacity = self.capacity * 2;
-        serial_println!("Dequeue: expand() to {}", new_capacity);
+        if super::DATA_STRUCTURE_DEBUG_PRINT {
+            serial_println!("Dequeue: expand() to {}", new_capacity);
+        }
 
         let layout = Layout::array::<T>(new_capacity).expect("Cant create layout");
         let new_data_ptr = unsafe { ALLOCATOR.alloc(layout).cast::<T>() };
@@ -70,7 +72,9 @@ impl<T> Dequeue<T> {
             let old_layout = Layout::array::<T>(self.capacity).expect("Cant create layout");
             ALLOCATOR.dealloc(self.data.cast().as_ptr(), old_layout);
         }
-        serial_println!("Dequeue: expanded");
+        if super::DATA_STRUCTURE_DEBUG_PRINT {
+            serial_println!("Dequeue: expanded");
+        }
 
         self.head = 0;
         self.tail = self.size;
@@ -114,7 +118,9 @@ impl<T> Dequeue<T> {
         }
 
         self.size += 1;
-        serial_println!("push_front: New head: {}, size: {}", self.head, self.size);
+        if super::DATA_STRUCTURE_DEBUG_PRINT {
+            serial_println!("push_front: New head: {}, size: {}", self.head, self.size);
+        }
     }
 
     pub fn pop_back(&mut self) -> T {
@@ -124,7 +130,9 @@ impl<T> Dequeue<T> {
 
         let value = unsafe { ptr::read(self.data.as_ptr().add(self.tail)) };
         self.size -= 1;
-        serial_println!("pop_back: New tail: {}, size: {}", self.tail, self.size);
+        if super::DATA_STRUCTURE_DEBUG_PRINT {
+            serial_println!("pop_back: New tail: {}, size: {}", self.tail, self.size);
+        }
 
         value
     }
@@ -135,7 +143,9 @@ impl<T> Dequeue<T> {
         let value = unsafe { ptr::read(self.data.as_ptr().add(self.head)) };
         self.head = self.wrap_index(self.head + 1);
         self.size -= 1;
-        serial_println!("pop_front: New head: {}, size: {}", self.head, self.size);
+        if super::DATA_STRUCTURE_DEBUG_PRINT {
+            serial_println!("pop_front: New head: {}, size: {}", self.head, self.size);
+        }
 
         value
     }

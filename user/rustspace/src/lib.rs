@@ -43,6 +43,10 @@ pub const SYS_CREATE_CIRCULAR_BUFFER: u64 = 600;
 
 pub const SYS_GET_CPU_INFO: u64 = 970;
 
+pub const SYS_SLEEP_MS: u64 = 990;
+pub const SYS_WAIT_FOR_INPUT: u64 = 991;
+pub const SYS_FUTEX_WAIT: u64 = 992;
+pub const SYS_FUTEX_WAKE: u64 = 993;
 pub const SYS_YIELD: u64 = 998;
 pub const SYS_EXIT: u64 = 999;
 pub const SYS_ECHO: u64 = 997;
@@ -288,6 +292,29 @@ pub unsafe fn sys_terminate_process(pid: usize, exit_code: i32) -> bool {
 #[inline(always)]
 pub unsafe fn sys_yield() {
     unsafe { syscall1(SYS_YIELD, 0) };
+}
+
+/// Blocks the calling process for at least `duration_ms`, it uses no cpu meanwhile
+#[inline(always)]
+pub unsafe fn sys_sleep_ms(duration_ms: u64) {
+    unsafe { syscall1(SYS_SLEEP_MS, duration_ms) };
+}
+
+/// Blocks until one of the windows of the calling process has an input event waiting
+#[inline(always)]
+pub unsafe fn sys_wait_for_input() {
+    unsafe { syscall1(SYS_WAIT_FOR_INPUT, 0) };
+}
+
+/// Blocks while `*word == expected`, returns when a FutexWake happened and the word differs
+#[inline(always)]
+pub unsafe fn sys_futex_wait(word: *const u32, expected: u32) {
+    unsafe { syscall2(SYS_FUTEX_WAIT, word as u64, expected as u64) };
+}
+
+#[inline(always)]
+pub unsafe fn sys_futex_wake() {
+    unsafe { syscall1(SYS_FUTEX_WAKE, 0) };
 }
 
 #[inline(always)]
@@ -1018,14 +1045,23 @@ impl EventReader {
             if let Some(event) = self.try_read(0) {
                 return event;
             }
-            unsafe { sys_yield() }
+            unsafe { sys_wait_for_input() }
         }
     }
 }
 
+pub const TEST_COUNTER_COUNT: usize = 16;
+
 #[repr(C, align(4096))]
 pub struct ProgramSharedDataBuffer {
     pub focused_window_id: AtomicU32,
+    /// Scratch counters the kernel integration tests use to coordinate user programs
+    pub test_counters: [AtomicU32; TEST_COUNTER_COUNT],
+}
+
+pub fn program_shared_data() -> &'static ProgramSharedDataBuffer {
+    // SAFETY: the kernel maps the shared page at this address into every process
+    unsafe { &*(PROGRAM_SHARED_DATA_ADDR as *const ProgramSharedDataBuffer) }
 }
 
 pub unsafe fn tsc_read() -> (u64, u32) {

@@ -423,11 +423,13 @@ impl ProcessMemoryLayout {
         }
         let pml4_phys = self.top_page_table_phys;
 
-        serial_println!(
-            "free_address_space: pml4 {:#x} regions {}",
-            pml4_phys.as_u64(),
-            self.regions.len()
-        );
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!(
+                "free_address_space: pml4 {:#x} regions {}",
+                pml4_phys.as_u64(),
+                self.regions.len()
+            );
+        }
 
         for region in self.regions.iter() {
             user_mgr.unmap_user_region(pml4_phys, region, frame_allocator);
@@ -435,10 +437,12 @@ impl ProcessMemoryLayout {
         user_mgr.free_user_tables(pml4_phys, frame_allocator);
         user_mgr.free_pml4_frame(pml4_phys, frame_allocator);
 
-        serial_println!(
-            "free_address_space: freed pml4 {:#x} free_list now {}",
-            pml4_phys.as_u64(),
-            frame_allocator.free_frame_count()
-        );
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!(
+                "free_address_space: freed pml4 {:#x} free_list now {}",
+                pml4_phys.as_u64(),
+                frame_allocator.free_frame_count()
+            );
+        }
     }
 }

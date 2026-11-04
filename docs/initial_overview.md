@@ -106,7 +106,9 @@ MofuOS/
       gdt.rs           — per-core GDT/TSS
       interrupts.rs    — IDT, APIC, TSC calibration, timer
       process_start.rs — create_init_process, create_userspace_processes
-      process/         — scheduler, process, elf_loader, syscall, core_pool, ...
+      process/         — scheduler, task, wait, process, elf_loader, syscall, core_pool, ...
+      trap.rs          — TrapFrame, naked interrupt stubs
+      util/irq_mutex.rs — IrqMutex (spin lock that keeps interrupts off)
       memory/          — frame allocator, heap, user address space manager
       graphics/        — framebuffer, color, window, compositor, pipeline, renderer, ...
       filesystem/      — Sirius VFS, FAT32 driver
@@ -144,10 +146,10 @@ MofuOS/
 6. Init offset page table `init_offset_page_table(hhdm_offset)` (reads `CR3`, adds `HHDM offset` → `OffsetPageTable`)
 7. Init frame allocator `MemoryMapFrameAllocator::init`
 8. Init heap `allocator::init_heap` at `HEAP_POINTER = 0xFFFF_8080_0000_0000`, `16 MB`
-9. Install guard pages `gdt::install_guard_pages` + `syscall::install_syscall_guard_pages` (`stack_guard::unmap_guard_page`, splits `2MiB` huge from Limine via `FrameAllocator` `PT` alloc, `flush`) for `RSP0/IST0/SCHEDULER` `GuardedKernelStack` (36 KiB) and `SYSCALL` `GuardedSyscallSlot` (72 KiB), `align(4096)`, `debug_assert` bounds
+9. Install guard pages `gdt::install_guard_pages` (`stack_guard::unmap_guard_page`, splits `2MiB` huge from Limine via `FrameAllocator` `PT` alloc, `flush`) for `RSP0/IST0/SCHEDULER` `GuardedKernelStack` (36 KiB) and the 64 task stacks `KERNEL_TASK_STACKS` (64 KiB + guard each), `align(4096)`, `debug_assert` bounds
 10. Init ACPI `interrupts::init_acpi`, parse MP response, init CPU info `init_cpu_info`, `init_cpu_infos`
 11. Map LAPIC for core 0, init LAPIC timer
-12. Init `CORE_POOL` + `SCHEDULER` with core count, `init_current_core()` for BSP
+12. Init `CORE_POOL` with core count + LAPIC id table (run queues are static), `init_current_core()` for BSP
 13. Init global memory globals `FRAME_ALLOCATOR`, `USER_MEMORY_MANAGER`, calibrate TSC `init_tsc_globals` via PIT
 14. Bootstrap AP cores `1..core_count` `cpus[i].bootstrap(ap_core_from_limine_entry_point, 0x12345678)`
 15. Enable interrupts, call `main()` in `kernel/src/main.rs` or test `test_main()`
@@ -168,7 +170,7 @@ Per AP (core 1+):
 3. `init_lapic_for_current_core(core_id)` — enable LAPIC (`SVR` bit 8), timer
 4. `init_syscall()` — write `STAR`/`LSTAR`/`SFMASK` MSRs, set `KERNEL_GS_BASE` to `&PER_CORE_SYSCALL[core_id]`
 5. Enable interrupts
-6. `run_on_core_loop(core_id)` — scheduler loop, never return
+6. `run_on_core_loop(core_id)` — per-core scheduler loop on its own stack, never return
 
 ---
 
@@ -190,7 +192,7 @@ RFLAGS_DEFAULT = 0x202 // IF=1, reserved bit 1=1
 DEFAULT_NEW_PROCESS_STACK_SIZE = 1 * 1024 * 1024 // 1 MB
 PER_CORE_STACK_SIZE = 8 * 4096 // 32 KiB per core (RSP0/IST0/SCHEDULER)
 GUARD_PAGE_SIZE = 4096
-SYSCALL_STACK_SIZE = 4096 * 16 // 64 KiB per core (plus 4 KiB guard = 72 KiB GuardedSyscallSlot)
+TASK_KERNEL_STACK_SIZE = 4096 * 16 // 64 KiB per task slot (plus 4 KiB guard), MAX_TASKS = 64
 ```
 
 QEMU exit device port `0xF4` size `4`: write `0x10` success (QEMU 33), `0x11` failed (QEMU 35). Panic handler calls `exit_qemu(QemuExitCode::Failed)`.
@@ -279,11 +281,11 @@ memory::get_user_mem_mgr()    -> &'static UserMemoryManager
 
 ## Process Subsystem `kernel/src/process/`
 
-Files: `mod.rs`, `process.rs`, `process_manager.rs`, `process_mem.rs`, `elf_loader.rs`, `scheduler.rs`, `core_pool.rs`, `kernel_thread.rs`, `execution.rs`, `syscall.rs`, `process_start.rs`
+Files: `mod.rs`, `process.rs`, `process_manager.rs`, `process_mem.rs`, `elf_loader.rs`, `task.rs`, `scheduler.rs`, `wait.rs`, `core_pool.rs`, `syscall.rs`, `process_start.rs`
 
 ### Process Model
 
-Monolithic, multiple processes share AP core via scheduler queue — not hard-pinned, assigned to least-loaded AP at creation (`scheduler.ready_count_on_core()`).
+Monolithic, one task per process, multiple tasks share an AP core via its run queue. Assigned to the least loaded AP at creation (`scheduler::core_runnable_tasks_count()`), idle cores steal waiting tasks. Core 0 never schedules.
 
 Root arche PID 0, children re-parented to arche if parent exits without cascade.
 
@@ -300,25 +302,21 @@ pub struct Process {
     pub file_descriptors: Vec<FileDescriptor>,
     pub resources: ProcessResources,
     pub exit_code: Option<i32>, pub is_out: bool,
-    pub execution_context: ExecutionContext,
     pub memory_layout: ProcessMemoryLayout,
 }
-pub struct ExecutionContext {
-    rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8-r15, rip, rflags,
-    page_table_base_phys: u64, // CR3
-}
-pub struct KernelThread { pub pid: PID, pub priority: u8, pub name: String, pub state: ThreadState, pub context: ExecutionContext, pub core_id: Option<u8> }
+pub struct TaskSlot { pid, state: AtomicU8, priority, home_core, on_cpu, kill_pending, exit_code_request, cpu_ticks, core_migration_count, cr3, kernel_stack_top, next: AtomicU16, saved_rsp, fpu_state }
+static TASKS: [TaskSlot; MAX_TASKS] // MAX_TASKS = 64, TaskRef{slot,pid} detects stale slots
 ```
 
-`ThreadGroup` holds PID + `KernelThread` (1:1 with Process).
+Registers are not stored in `Process`: user registers live in a frame on the task's kernel stack, kernel registers are pushed by `switch_context` on the same stack. `TaskState`: `Free/Creating/Ready/Running/Blocked/Dead`.
 
 `FileDescriptor { pub node_id: usize, pub flags: u8 }` (`FD_FLAG_READ=0x01`, `FD_FLAG_WRITE=0x02`), no per-fd offset — offset explicit per `ReadFile`/`WriteFile` arg. Swap-remove on close — fd indices unstable.
 
 ### Process Manager `PROCESS_MANAGER: Mutex<ProcessManager>` `lazy_static!`
 
-`new_pid` starts `1` (arche 0). `create_process_from_elf`: verify parent, assign pid, pick least-loaded core via `CORE_POOL`/`SCHEDULER`, `Process::create_with_elf` (maps ELF segments with `PageTableFlags` from `PF_` bits, copy data + zero BSS via `translate_user_virt_to_phys`, create stack, build `ExecutionContext::new(entry, stack_top, pml4_phys)`), create `KernelThread`, `assign_to_core`, create `ThreadGroup`. **Critical order**: push `process` + `thread_group` vectors **first**, then `SCHEDULER.lock().enqueue_on_core(core_id, new_pid, priority)` — else AP dequeue finds `ProcessNotFound` and jumps with invalid context.
+`new_pid` starts `1` (arche 0). `create_process_from_elf`: verify parent, assign pid, pick the least loaded core via `scheduler::core_runnable_tasks_count`, `Process::create_with_elf` (maps ELF segments with `PageTableFlags` from `PF_` bits, copy data + zero BSS via `translate_user_virt_to_phys`, create stack), `task::allocate_task_slot` (`OutOfTaskSlots` when full), `task::init_task_stack(slot, entry, USER_STACK_TOP)`. **Critical order**: push the `process` **first**, then set the slot `Ready` and `scheduler::core_enqueue_ready_task(core, slot, prio)` — an AP can dequeue it at once and its first syscall looks the process up.
 
-`terminate_process` sets `Terminated`, terminates thread, `CORE_POOL.release_core`, cascade or orphan children to arche.
+`terminate_process` runs on the dying task's own stack (called by `task::exit_current`): sets `Terminated`, frees the address space, orphans children to arche (or sends them kill requests when cascading).
 
 `get_process`/`get_process_mut` linear `Vec` scan O(n).
 
@@ -326,60 +324,48 @@ pub struct KernelThread { pub pid: PID, pub priority: u8, pub name: String, pub 
 
 `ElfLoadInfo::from_elf_data` uses `elf::ElfBytes`, validates `EM_X86_64`, collects `PT_LOAD` `LoadSegment {vaddr, filesz, memsz, flags, data}`, `merge_segments` sorts by vaddr, merges overlapping (OR flags), returns `{entry_point, min_vaddr, max_vaddr, segments}`.
 
-### Scheduler `SCHEDULER: Mutex<Scheduler>`
+### Scheduler `process/scheduler.rs`
+
+Preemptive, per-core run queues, work stealing, per-task kernel stacks.
 
 ```rust
-pub struct Scheduler { per_core: Vec<CoreScheduler>, core_count: u8 }
-pub struct CoreScheduler {
-    core_id: u8,
-    ready_queues: [Dequeue<PID>; 8], // 8 priority levels, 7 highest, FIFO pop_front
-    blocked_queue: Dequeue<PID>,
-    current_thread: PID,
-}
+static CORE_RUN_QUEUES: [CacheAligned<IrqMutex<CoreRunQueue>>; MAX_CORES] // never two locks at once
+struct CoreRunQueue { active: TaskSlotQueueTable, expired: TaskSlotQueueTable, sleeping_tasks: [SleepingTask; MAX_TASKS] }
+// TaskSlotQueueTable: 8 intrusive queues (TaskSlot::next) + u8 bitmap of non-empty levels
 ```
 
-`run_on_core_loop(core_id)`:
+`pick_next_task` pops the highest level of `active`, swaps the banks when `active` is empty. New and woken tasks go to `active`, a task that used its slice `(priority+1) * BASE_SLICE_TICKS` or yielded goes to `expired`. `RUNNABLE_TASKS_COUNT[core]` (lock-free) drives placement and the "someone waits" check of the timer tick.
+
+`run_on_core_loop(core_id)`: naked `enter_scheduler_stack` moves to `SCHEDULER_STACKS[core]`, then `scheduler_loop`:
 
 ```
 loop:
-  disable interrupts
-  get_next_on_core(core_id) -> (pid, prio) // highest non-empty queue
-  if pid==INVALID_PID: enable interrupts, hlt, continue
-  set_current_on_core(core_id, pid)
-  extract exec context from PROCESS_MANAGER (lock then drop)
-  set_current_process_for_core(core_id, pid)
-  Cr3::write(user_pml4)
-  enable interrupts
-  asm: lea rax,[rip+2f]; push rax; mov [KERNEL_RSP_ON_CORE[core_id]], rsp; jmp jump_to_userspace
-  2: mark_core_idle(core_id); if !terminated {re-enqueue(pid,prio)} else {log terminated}
+  disable interrupts; pick_next_task from the own queue
+  none: try_steal_task() or load kernel CR3 + enable_and_hlt
+  run_task: state Running, on_cpu, current slot/pid of the core, syscall stack top + TSS rsp0 = task stack top,
+            restore FPU, write CR3, switch_context(&SCHEDULER_RSP[core], task.saved_rsp)
+  back: on_cpu = false, if Dead release the slot
 ```
 
-`KERNEL_RSP_ON_CORE: [AtomicU64; MAX_CORES]` set before `jmp`, read by `return_to_scheduler()`: `mov rsp, KERNEL_RSP_ON_CORE[core_id]; ret` (pops label, resumes loop). Used by `sys_yield`/`sys_exit` + timer preemption.
+`switch_context(save_rsp, load_rsp)` naked: push rbx rbp r12-r15, store rsp, load rsp, pop, ret. `core_run_scheduling(core_id)` (task stack, no locks held, any IF state): save IF, cli, fxsave, `CAS(Running, Ready)` and requeue on success, switch to the loop, restore IF. `core_yield_executing_tasks(core_id)` = requeue to `expired`, returns at once if nothing else is runnable.
 
-`CURRENT_PROCESS_ON_CORE: [AtomicU64; MAX_CORES]` stores pid per core, `INVALID_PID` = idle. Used syscall to identify caller.
+Interrupts (timer, keyboard, mouse, reschedule IPI `0xF0`) use `trap::interrupt_stub!` naked stubs with a `TrapFrame`. Ring 0: work + EOI + return (kernel not preemptible). Ring 3: EOI, SS fix, `exit_to_user()` (pending kill → `exit_current`, `CORE_SHOULD_BE_RESCHEDULED` → `core_run_scheduling(core_id)`). `handle_syscall_inner` runs `exit_to_user()` after every syscall.
 
-`SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES]` `36 KiB` (`4096` guard + `32 KiB` stack, `align(4096)`) each, `get_scheduler_stack_top(core_id)` = `stack+0x8000` (`-0x1000` headroom for `run_on_core_loop` `mov rsp` frame), switched at `run_on_core_loop` entry because Limine bootstrap stack too small. Guard `!PRESENT` -> overflow `#PF`.
+A task tears itself down (`task::exit_current`): kernel CR3, destroy windows, `terminate_process`, state `Dead`, `core_run_scheduling(core_id)`. `task::request_kill(pid, code)` flags another task, wakes it if blocked, IPIs its core. Blocking: `wake_task(TaskRef)` is `CAS(Blocked, Ready)` + enqueue on the home core; `block_current_task_until_event(queue, cond)` checks, joins the `WaitQueue` and blocks, checks again; `sleep_current_task_ms` uses per-core sleeping_tasks woken by the timer tick. Stealing: an idle core `try_lock`s other AP queues, takes a task with `on_cpu == false`, sets `home_core`, counts `core_migration_count`, queues it locally.
+
+`CURRENT_PROCESS_ON_CORE: [AtomicU64; MAX_CORES]` stores the pid per core, `INVALID_PID` = idle, used by syscalls to identify the caller (`get_current_process_for_core`). `CURRENT_SLOT_ON_CORE` holds the slot. `SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES]` `36 KiB` each, `get_scheduler_stack_top(core_id)`.
 
 ### Core Pool `CORE_POOL: Mutex<CorePool>`
 
 ```rust
-pub struct CorePool {
-    total_cores: u8,
-    available_cores: u64, // bitmask, bit N=1 free
-    core_assignments: [usize; MAX_CORES],
-    lapic_ids: [u8; MAX_CORES],
-}
+pub struct CorePool { total_cores: u8, lapic_ids: [u8; MAX_CORES] }
 ```
 
-Core 0 reserved `available_cores &= !1`. `allocate_core(pid)` linear scan first free bit. `release_core(core_id)` sets bit. Limit `MAX_CORES=16` via `u64` bitmap.
+Total core count and LAPIC id per core (also mirrored into the lock-free table behind `send_reschedule_ipi`). It no longer allocates cores.
 
-### Jump to Userspace `process/execution.rs`
+### First entry to ring 3
 
-```rust
-pub unsafe fn jump_to_userspace(entry_point: u64, stack_pointer: u64, rflags: u64) -> !
-```
-
-Disable interrupts, load user DS/ES/FS/GS, build `iretq` frame `SS,RSP,RFLAGS,CS,RIP`, `iretq` → ring3. `rflags` `0x202` first entry, saved `frame.rflags` on resume.
+`task::init_task_stack` lays out the kernel stack of a new task: a `switch_context` frame whose return address is the naked `task_first_entry`, above it a `TrapFrame` (all GPRs zero, rip = ELF entry, cs = 0x23, rflags = `RFLAGS_DEFAULT`, rsp = `USER_STACK_TOP`, ss = 0x1B). `task_first_entry` exits if a kill is pending, loads the user data selectors into ds/es/fs/gs, pops the registers and `iretq`s. After that a task always returns through the path that took it into the kernel (`sysretq` or `iretq`).
 
 ### Syscall Interface `process/syscall.rs` — Canonical Ref `docs/syscalls.md`
 
@@ -401,14 +387,14 @@ Userspace convention `user/rustspace/src/lib.rs:224-244` `syscall6`: `rax=num`, 
 
 #### syscall_handler Naked Asm `syscall.rs:154-206`
 
-Per-core `72 KiB` slot `SYSCALL_SLOTS[core_id].data: PerCoreSyscallData` (`GuardedSyscallSlot{guard[4096],data}` `align(4096)`, `PerCoreSyscallData` `#[repr(C,align(64))]` `stack_top:u64` first field `_stack:[u8;65536]`), `KERNEL_GS_BASE=&SYSCALL_SLOTS[core].data` (`guard` at `slot` base `!PRESENT`, `data` at `+0x1000`, `_stack` at `data+8` `page` `guard+0x1000`), pointed via `KERNEL_GS_BASE`:
+Per-core `SYSCALL_DATA[core_id]: PerCoreSyscallData` (`#[repr(C,align(64))]`, `stack_top:u64` first, then `user_rsp_scratch:u64`), `KERNEL_GS_BASE=&SYSCALL_DATA[core]`. `stack_top` is the 16 aligned kernel stack top of the task running on the core, written by `run_task` on every dispatch (the syscall runs on the task's own stack, guard page below it):
 
 ```asm
 swapgs; mov r15,rsp; mov rsp,gs:0; swapgs
 push r15; push rcx; push r11; push rax
 push rdi; push rsi; push rdx; push r10; push r8; push r9
 push rbx; push rbp; push r12; push r13; push r14
-mov rdi,rsp; call handle_syscall_inner // sti at top, cli before return_to_scheduler
+mov rdi,rsp; call handle_syscall_inner // sti, dispatch_syscall, cli, exit_to_user()
 pop r14; pop r13; pop r12; pop rbp; pop rbx
 pop r9; pop r8; pop r10; pop rdx; pop rsi; pop rdi
 add rsp,8 // skip syscall_num slot — rax holds return value
@@ -417,9 +403,9 @@ pop r11; pop rcx; pop r15; mov rsp,r15; sysretq
 
 `SyscallFrame` `#[repr(C)]` lowest addr first: `r14,r13,r12,rbp,rbx, arg6(r9),arg5(r8),arg4(r10),arg3(rdx),arg2(rsi),arg1(rdi), syscall_num(rax), rflags(r11), user_rip(rcx), user_rsp(r15)`.
 
-`handle_syscall_inner` does `sti` early (preemptible long syscalls), `cli` before `return_to_scheduler` in `Yield`/`Exit`.
+`handle_syscall_inner` does `sti` early, runs `dispatch_syscall`, then `cli` + `exit_to_user()` (pending kill / reschedule) so every early return is covered. `Yield` is `core_yield_executing_tasks(core_id)`, `Exit` is `exit_current()`.
 
-Intel `SYSRETQ` bug (`BUG-09`): Intel sets `SS = STAR[63:48]+8` without ORing `RPL=3` → `SS=0x18` RPL0 in userspace (`qemu64` Intel-mode). Timer firing in Ring3 captures `SS=0x18`, `iretq` faults `#GP` because `SS.RPL != CS.RPL`. Fix: `SFMASK=1<<9` + `sti` inside handler so timer never fires with kernel `SS`; if Ring3 and work waiting → `return_to_scheduler()` bypass `iretq`; if Ring3 nothing waiting → patch `*(stack_frame_ptr+4)=0x1B` (`SS` slot at `+32`).
+Intel `SYSRETQ` bug (`BUG-09`, still seen under KVM, now handled in `trap::interrupt_return_path` for every ring 3 return): Intel sets `SS = STAR[63:48]+8` without ORing `RPL=3` → `SS=0x18` RPL0 in userspace (`qemu64` Intel-mode). Timer firing in Ring3 captures `SS=0x18`, `iretq` faults `#GP` because `SS.RPL != CS.RPL`. Fix: `SFMASK=1<<9` + `sti` inside handler so timer never fires with kernel `SS`; if Ring3 and work waiting → `return_to_scheduler()` bypass `iretq`; if Ring3 nothing waiting → patch `*(stack_frame_ptr+4)=0x1B` (`SS` slot at `+32`).
 
 #### Pointer Validation
 
@@ -430,7 +416,7 @@ Intel `SYSRETQ` bug (`BUG-09`): Intel sets `SS = STAR[63:48]+8` without ORing `R
 | Num | Name | Args | Ret | Notes |
 |-----|------|------|-----|-------|
 | 0 | `CreateProcess` | `rdi=path_ptr, rsi=path_len, rdx=name_ptr, r10=name_len` | `0` ok, `MAX` err | partial — parses `ODYS_ELF` + `create_process_from_elf`, path not wired `ISSUE-P8` |
-| 1 | `TerminateProcess` | — | `MAX` | stub |
+| 1 | `TerminateProcess` | `rdi=pid, rsi=code` | `0` / `MAX` | self: `exit_current`; other: kill request, target exits at its next return to ring 3 |
 | 2 | `Write` | `rdi=fd(1/2), rsi=buf, rdx=count` | `count` | `fd==1/2` → `COM2` `serial2_print!("[pid=N] s")` to `userspace_pid_N.txt` |
 | 5 | `Allocate` | `rdi=size` | `old_heap_end:u64` or `MAX` | bump at `0x6000_0000`, maps `PRESENT|WRITABLE|USER_ACCESSIBLE|NO_EXECUTE`; rustspace `Arena` `64KiB` slabs |
 | 10 | `CreateWindow` | `rdi=w, rsi=h, rdx=x, r10=y` | `window_id:u32` | `compositor.create_window(w,h,x,y,pid)` → `Window {Arc<WindowBuffer 2*heap alloc> + EventBuffer}`, `z=7` |
@@ -458,8 +444,12 @@ Intel `SYSRETQ` bug (`BUG-09`): Intel sets `SS = STAR[63:48]+8` without ORing `R
 | 600 | `CreateCircularBuffer` | `rdi=size, rsi=page_flags, rdx=info_ptr` | `0` ok, `MAX` err | `data_size=align_up(size,PAGE_SIZE)`, `total=2*data_size`, alloc `data_size/PAGE` frames, map twice at `virt_base + i*PAGE` and `+data_size + i*PAGE`, returns `CircularBufferInfo {virtual_base, view_size, total_virtual_size}` |
 | 970 | `GetCpuInfo` | `rdi=buf_ptr, rsi=buf_len` | `0` ok, `2` err | fills `CpuInfoFlat` (vendor, family/model/stepping, cache_line, apic_id, features, tsc_frequency_hz, boot_tsc, max_cpuid, core_count) |
 | 997 | `GetPID` | — | `pid:u64` | `CURRENT_PROCESS_ON_CORE[core_id]` |
-| 998 | `Yield` | — | `0` | save `user_rip/rsp/rflags` → `return_to_scheduler()`, re-enqueue |
-| 999 | `Exit` | `rdi=exit_code:i32` | `!` | `terminate_process(pid, code, false)` orphans children to arche 0 → `return_to_scheduler()` |
+| 990 | `SleepMs` | `rdi=ms` | `0` | blocks at least `ms`, no cpu use |
+| 991 | `WaitForInput` | — | `0` | blocks until a window of the caller has input |
+| 992 | `FutexWait` | `rdi=ptr, rsi=expected` | `0` | blocks while `*ptr == expected` |
+| 993 | `FutexWake` | — | `0` | wakes all futex waiters |
+| 998 | `Yield` | — | `0` | `core_yield_executing_tasks(core_id)`, other runnable tasks of the core go first |
+| 999 | `Exit` | `rdi=exit_code:i32` | `!` | `exit_current`: the task frees its address space and slot itself, orphans children to arche 0 |
 
 Unlisted → `u64::MAX`. Stubs: `1,3,4,8,9,996`.
 
@@ -669,9 +659,10 @@ const GUARD_PAGE_SIZE: usize = 4096;
 #[repr(C, align(4096))] struct GuardedKernelStack { guard: [u8;4096], stack: [u8;32768] } // 36 KiB
 static mut RSP0_STACKS:      [GuardedKernelStack; MAX_CORES] // 4*36 KiB=144 KiB
 static mut IST0_STACKS:      [GuardedKernelStack; MAX_CORES] // 4*36 KiB
-static mut SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES] // 4*36 KiB, top-0x1000 headroom for run_on_core_loop
-#[repr(C, align(4096))] struct GuardedSyscallSlot { guard:[u8;4096], data:PerCoreSyscallData } // 72 KiB
-static mut SYSCALL_SLOTS: [GuardedSyscallSlot; MAX_CORES] // 4*72 KiB, KERNEL_GS_BASE=&SYSCALL_SLOTS[core].data
+static mut SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES] // 4*36 KiB, scheduler loop of the core
+static mut KERNEL_TASK_STACKS: [GuardedKernelStack<65536>; MAX_TASKS] // 64*68 KiB, one per task slot
+#[repr(C, align(64))] struct PerCoreSyscallData { stack_top: u64, user_rsp_scratch: u64 }
+static mut SYSCALL_DATA: [PerCoreSyscallData; MAX_CORES] // KERNEL_GS_BASE=&SYSCALL_DATA[core]
 static mut PER_CORE_GDT:  [Gdt; MAX_CORES]
 static mut PER_CORE_TSS:  [UnsafeCell<TaskStateSegment>; MAX_CORES]
 ```
@@ -699,7 +690,7 @@ TIMER_TICK_INTERVAL_MS = 10 // TIMER_TICK_FREQ_HZ 100, TICK_DURATION_NS 10_000_0
 
 `init_tsc_globals()` measures via PIT channel2 one-shot `~55ms`, records boot TSC. `tsc_timestamp_us()` for `serial_println_core!`, `system_uptime_ns()` via TSC.
 
-APIC timer: `TSC-Deadline` (`MSR_IA32_TSC_DEADLINE 0x6E0`), per core programs `TSC + ticks_per_interval`, vector `0x20`. On tick: inc `SYSTEM_TICKS`, `SCHEDULER.lock().on_timer_tick(core_id)` (currently empty, preemption handled `timer_interrupt_handler`), re-arm deadline.
+APIC timer: `TSC-Deadline` (`MSR_IA32_TSC_DEADLINE 0x6E0`), per core programs `TSC + ticks_per_interval`, vector `0x20`. On tick (naked stub, `timer_interrupt_handler(&mut TrapFrame)`): inc `SYSTEM_TICKS` (core 0), re-arm deadline, `scheduler::on_timer_tick(core_id)` (cpu_ticks, due sleeping_tasks, slice, `CORE_SHOULD_BE_RESCHEDULED`), EOI; ring 3 returns go through `exit_to_user()`.
 
 LAPIC `LAPIC_VIRT_BASE 0xFFFF_FFFF_0000_0000`, phys from `APIC_BASE MSR 0x1B`, `map_local_apic_for_current_core`, `init_lapic_for_current_core` enables `SVR` bit8 + timer. Helpers `util/apic.rs` `lapic_read`/`lapic_write` via `APICOffset` enum.
 
@@ -742,18 +733,18 @@ MSR helpers `util/msr.rs`: `msr_read(reg)->u64` `RDMSR`, `msr_write(reg,val)` `W
 ## Conventions & Gotchas `docs/conventions.md`
 
 - `nightly 1.96.0-nightly`, `#![allow(warnings, unused)]` blanket suppressor in `lib.rs` (TODO remove).
-- Unsafe: every `unsafe fn`/`unsafe {}` needs reason comment if not obvious; phys→virt `phys + HHDM_OFFSET` (runtime `BootInfo::hhdm_offset`), never deref phys directly; never hold `spin::Mutex` (`PROCESS_MANAGER`, `SCHEDULER`) across `jump_to_userspace` (`->!` noreturn, deadlock — extract data, drop lock, then jump); `static mut` per core indexed `core_id`; `UnsafeCell` for double-buffer swap relies single compositor thread.
-- Naming: globals `UPPER_SNAKE_CASE` (`SCHEDULER`, `CORE_POOL`, `FRAME_ALLOCATOR`), constants `UPPER_SNAKE_CASE`, types `PascalCase`, funcs `snake_case`, per-core `PER_CORE_`, `Once<Mutex<T>>` singletons, sentinel `INVALID_PID = usize::MAX`, `INVALID_WINDOW_ID = u32::MAX`.
+- Unsafe: every `unsafe fn`/`unsafe {}` needs reason comment if not obvious; phys→virt `phys + HHDM_OFFSET` (runtime `BootInfo::hhdm_offset`), never deref phys directly; never hold a lock across `core_run_scheduling(core_id)` or a blocking call (the task sleeps with the lock held); data an interrupt handler touches uses `IrqMutex`; `static mut` per core indexed `core_id`; `UnsafeCell` for double-buffer swap relies single compositor thread.
+- Naming: globals `UPPER_SNAKE_CASE` (`CORE_RUN_QUEUES`, `CORE_POOL`, `FRAME_ALLOCATOR`), constants `UPPER_SNAKE_CASE`, types `PascalCase`, funcs `snake_case`, per-core `PER_CORE_`, `Once<Mutex<T>>` singletons, sentinel `INVALID_PID = usize::MAX`, `INVALID_WINDOW_ID = u32::MAX`.
 - Data structures `data_structures/`: custom `Vec`, `Dequeue` (no-std), prefer over `alloc::vec::Vec` for consistency.
 - Error handling: no `std::error::Error`, enums `#[derive(Debug,Clone,Copy)]`, `Result<T,FooError>` (`FileSystemResult`, `DiskOpResult`, `ProcessError`, `ElfLoadError`, `MapToError`), no panics hot path, `assert!`/`debug_assert!` for invariants (`assert!(pid != INVALID_PID)`).
-- Lock ordering `COMPOSITOR → CORE_POOL → PROCESS_MANAGER → SCHEDULER → FRAME_ALLOCATOR → SERIAL1/SERIAL2` (`USER_MEMORY_MANAGER` has no lock now) — never hold SCHEDULER while acquiring PROCESS_MANAGER. Compositor `RwLock<Vec<Window>>`.
+- Lock ordering `COMPOSITOR → CORE_POOL → PROCESS_MANAGER → run queue (one at a time) / wait queue → FRAME_ALLOCATOR → SERIAL1/SERIAL2` (`USER_MEMORY_MANAGER` has no lock now) — never hold a run queue lock while acquiring PROCESS_MANAGER. Compositor `RwLock<Vec<Window>>`.
 - File layout: new subsystems `kernel/src/<name>/mod.rs` with `pub use` re-exports, tests `kernel/src/tests_exp/test_<name>.rs`, userspace `user/programs/<name>/`.
 - Arch constraints: monolithic, `no_std`, base `0xffffffff80000000`, HHDM `0xFFFF_8000_0000_0000` (use runtime `BootInfo` value for new mapping), MMX disabled, red zone disabled, `large` code model, `4-level` `4KiB` paging, XAPIC only (`X2APIC` disabled), SMP `BSP core0` kernel/graphics/process creation, `AP core1+` scheduler loops, currently `2` cores QEMU.
 - Suppressed warnings known TODO.
 - Pixel XRGB8888 `u32` via `rgba_to_xrgb`, not `to_u32_rgba`.
 - Session notes `notes/agents/userspace/` (master index: see note drift `notes/agents/` vs `docs/` canonical — keep `docs/` source truth).
 
-Process creation invariant: push `Process` + `ThreadGroup` to `PROCESS_MANAGER` vectors **before** enqueue PID `SCHEDULER`.
+Process creation invariant: push `Process` to `PROCESS_MANAGER` **before** the task slot is made `Ready` and queued.
 
 ---
 
@@ -771,11 +762,11 @@ Style: `impl` directly below type, group methods `constructors, getters, mutatio
 
 `BUG-01` global syscall stack SMP corruption: fixed per-core `PER_CORE_SYSCALL[core_id]` + `KERNEL_GS_BASE` + `swapgs` `gs:0`.
 
-`BUG-02` `sys_exit` halts core: fixed `return_to_scheduler()` `mov rsp,[slot]; ret` to label `2:` in `run_on_core_loop`, correct asm order `push rax` before `mov [slot],rsp` before `mov cr3,rcx`, per-core `SCHEDULER_STACKS`, register pinning `r8` slot, `rcx` cr3, `rdi` rip, `rsi` rsp, `lateout rax`.
+`BUG-02` `sys_exit` halts core: fixed at the time with `return_to_scheduler()` (since replaced by per-task stacks, `exit_current` and `switch_context`), kept as history: correct asm order `push rax` before `mov [slot],rsp` before `mov cr3,rcx`, per-core `SCHEDULER_STACKS`, register pinning `r8` slot, `rcx` cr3, `rdi` rip, `rsi` rsp, `lateout rax`.
 
 `BUG-08` missing `push rax` in `SyscallFrame`: all syscalls hit `_=> MAX`, fixed `push rax` + `add rsp,8` pop skip.
 
-`BUG-09` Intel `SYSRETQ` leaves `SS=0x18 RPL0` → timer `iretq` `#GP`: fixed `SFMASK=1<<9` + `sti` inside handler + `cli` before `return_to_scheduler` + preempt via `return_to_scheduler` bypass or patch `SS=0x1B`.
+`BUG-09` Intel `SYSRETQ` leaves `SS=0x18 RPL0` → timer `iretq` `#GP`: fixed `SFMASK=1<<9` + `sti` inside handler; today every interrupt return to ring 3 patches `SS=0x1B` in `trap::interrupt_return_path`.
 
 `BUG-10` `MapWindowBuffer` missing `USER_ACCESSIBLE`: fixed, also `map_specific_frame` ORs it.
 
@@ -790,7 +781,7 @@ Remaining `BUG-06` framebuffer ignore Limine masks, `BUG-07` ACPI `todo!()` stub
 Blockers P0:
 
 - `A0-1`/`ISSUE-M1`/`BUG-05` **RESOLVED 2026-08-22** frame reclamation — `MemoryMapFrameAllocator` now `free_list: Vec<PhysFrame>` + `deallocate_frame`/`free_frame_count`/`allocated_bump_frames` (`Vec::new()` before `init_heap`), `map_virt_mem_region` deallocates spare on `PageAlreadyMapped`, `ProcessMemoryLayout::free_address_space` + `unmap_all_user_pages_with_owned_set`/`reclaim_empty_user_tables`/`free_pml4_frame` walks `mapped_regions`+stack+`allocated_ranges` and intermediate tables; `terminate_process` frees + `release_core` + `SCHEDULER.remove_pid`; `heap_end` fixed to `VIRT_START`; `allocate_heap` single-lock; verified `test_usermem_reclaim` 4×528384 → 801 frames reclaimed, `cargo xtask test/usertest` 3/3 → `test_logs/<test>/all.txt`.
-- `A0-2`/`ISSUE-M4` **DONE** guard pages kernel stacks (`RSP0`, `IST0`, `SCHEDULER_STACKS`, `SYSCALL_SLOTS`) — `GuardedKernelStack`/`GuardedSyscallSlot` `align(4096)` `guard+stack`, `stack_guard::unmap_guard_page` splits `2MiB` huge, `install_guard_pages` after `init_heap`, `assert_rsp_in_bounds`/`assert_syscall_stack_bounds`, `run_on_core_loop` `top-0x1000` headroom, verified `kernel/src/bin/test_guard_pages.rs` `88` checks `guard !mapped` `bottom mapped`.
+- `A0-2`/`ISSUE-M4` **DONE** guard pages kernel stacks (`RSP0`, `IST0`, `SCHEDULER_STACKS`, `KERNEL_TASK_STACKS`; the per-core `SYSCALL_SLOTS` were replaced by the task stacks) — `GuardedKernelStack` `align(4096)` `guard+stack`, `stack_guard::unmap_guard_page` splits `2MiB` huge, `install_guard_pages` after `init_heap`, `assert_rsp_in_task_stack`, verified `kernel/src/bin/test_guard_pages.rs` `88` checks `guard !mapped` `bottom mapped`.
 - `A0-3` cache `directory_children` never populated `reserve_cache`/`evict_directory` dead. Fix: decode `parent_cluster` bits `55-32` on load, `register_file_in_directory`, lookup parent in `get_effective_importance`.
 
 High P1:
@@ -798,12 +789,12 @@ High P1:
 - `A1-1`/`ISSUE-F6` FAT mirror FAT2 not updated — `fsck.fat` diff, cross-linked on power loss. Fix: write both `FAT1` and `FAT2` (`fat_start + fat_size_32*bytes_per_sector`).
 - `A1-2`/`BUG-06` framebuffer hardcoded XRGB — wrong colors real hardware. Fix: store `red_mask_shift` etc at `init_framebuffer`, compose via masks.
 - `A1-3`/`BUG-07` ACPI IO stubs `todo!()` panic on AML/PCI. Fix: HHDM `read_volatile`/`port` impl or graceful no-op with log.
-- `A1-4`/`ISSUE-P9` tight syscall loop starves preemption `100Hz` + `~10 instr` Ring3 window → hog core. Fix: preemption check at syscall exit if `ready_count>1` → `return_to_scheduler`, keep `SFMASK`+`sti`.
+- `A1-4`/`ISSUE-P9` tight syscall loop starves preemption `100Hz` + `~10 instr` Ring3 window → hog core. Fix: done: `exit_to_user()` at syscall exit reschedules when the slice ran out.
 - `A1-5` wire type fragility `FS_NAME_LEN` vs `DIR_ENTRY_NAME_LEN` must match, `validate_user_ptr` not checking `USER_ACCESSIBLE`. Fix: `const_assert!(size_of::<DirEntryFlat>()==32)`, `validate_user_slice` walk page tables per page.
 - `A1-6`/`ISSUE-P5` single-core userspace bottleneck core0 reserved, QEMU `cores=2` → one runnable. Fix: test `cores=4` with `MAX_CORES=16`, fix `log_splitter.py` mismatch, consider BSP userspace when idle.
 - `A1-7` HHDM misuse class `BUG-11` pattern — enforce page-table walk only.
 
-Medium P2: paging hygiene (PML4 copy check `lapic_pml4_idx` `debug_assert`), `2MiB` huge keep 4KiB, TLB shootdown future, lock ordering enforce, `on_timer_tick` accounting, `Dequeue` O(n) ok, `write_direntry` batch, `find_free_cluster` FSInfo hints, timestamps, cache size tunable, graphics double `Compositor::new` dead code delete, dirty rect, alpha blend, compositor own framebuffer, input routing, AP trampoline `0x8000` remove if Limine suffices, `X2APIC`, `4+` core testing, ELF `TEST_ELF` baked → wire `Sirius` to `sys_create_process(path)`, `create_process` dead path, `rustspace` `Arena` leak track, window double-buffer contract.
+Medium P2: paging hygiene (PML4 copy check `lapic_pml4_idx` `debug_assert`), `2MiB` huge keep 4KiB, TLB shootdown future, lock ordering enforce, `Dequeue` O(n) ok, `write_direntry` batch, `find_free_cluster` FSInfo hints, timestamps, cache size tunable, graphics double `Compositor::new` dead code delete, dirty rect, alpha blend, compositor own framebuffer, input routing, AP trampoline `0x8000` remove if Limine suffices, `X2APIC`, `4+` core testing, ELF `TEST_ELF` baked → wire `Sirius` to `sys_create_process(path)`, `create_process` dead path, `rustspace` `Arena` leak track, window double-buffer contract.
 
 Low P3: drop `#![allow(warnings,unused)]` → `clippy` CI, `no_std` test harness `cargo xtask test` with `isa-debug-exit`, formatting, `build.rs` pin, doc sync `docs/` canonical vs `notes/agents/` drift, `reading_asm_with_addresses.md` objdump recipes, `FAT32 8.3`, `FSInfo`, `text.rs`, `RENDER_SHADERS`.
 
@@ -817,7 +808,7 @@ Suggested order Week1 `A0-1` frame free + `A0-2` guard + `A0-3` cache; Week2 `A1
 2. For deep dive see `docs/{overview,memory,process,graphics,filesystem/hardware,syscalls,conventions,rust_coding_guidelines}.md`
 3. Check build `cargo xtask iso`, run `cargo xtask run` — logs `logs/<timestamp>/all.txt` + `core_N.txt` + `userspace_pid_N.txt`; tests `cargo xtask test`/`cargo xtask usertest` → `test_logs/<test>/all.txt` + `core_N.txt` + `userspace_pid_N.txt` (`xtask/src/main.rs:save_test_logs`, QEMU `-serial stdio -serial file:`)
 4. Inspect `kernel/src/lib.rs:13` `MAX_CORES` vs `scripts/log_splitter.py:22`, QEMU `cores=` in `xtask/src/main.rs:run_iso`/`run_test_with_timeout`
-5. Follow conventions: lock order `CORE_POOL→PROCESS_MANAGER→SCHEDULER→FRAME_ALLOCATOR→SERIAL`, never hold lock across `jump_to_userspace`, push `PROCESS_MANAGER` before `SCHEDULER` enqueue, `HHDM_OFFSET` via `BootInfo`, XRGB via `rgba_to_xrgb`
+5. Follow conventions: lock order `CORE_POOL→PROCESS_MANAGER→run queue→FRAME_ALLOCATOR→SERIAL`, never hold a lock across `core_run_scheduling(core_id)`, push `PROCESS_MANAGER` before the run queue enqueue, `HHDM_OFFSET` via `BootInfo`, XRGB via `rgba_to_xrgb`
 6. Code style: `docs/rust_coding_guidelines.md` — perf first, no `dyn`, slice APIs, `debug_assert`, `const` values, no emojis, no padded alignment, no `.` end comments
 7. Verification per item: QEMU boots no `#PF`/`#GP`, 4-core interleaves, `fs_test` passes `fsck.fat -n` clean, `clippy` zero, objdump `mov %rcx,%cr3` not `rax`, frame free count stable 1000 cycles
 

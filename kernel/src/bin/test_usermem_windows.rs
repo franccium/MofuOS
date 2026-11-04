@@ -8,7 +8,7 @@ use kernel::graphics::compositor::{get_compositor, init_compositor};
 use kernel::process::elf_loader::{ElfLoadInfo, WINSTRESS_ELF};
 use kernel::process::process::ProcessState;
 use kernel::process::process_manager::PROCESS_MANAGER;
-use kernel::process::scheduler::SCHEDULER;
+use kernel::process::scheduler;
 use kernel::{boot_common, bsp_init, serial_println_core};
 use x86_64::instructions::{hlt, port::Port};
 
@@ -158,7 +158,7 @@ fn test_main() -> ! {
     {
         let mut pm = PROCESS_MANAGER.lock();
         pm.cleanup_dead();
-        if pm.get_process(pid).is_ok() || SCHEDULER.lock().is_pid_queued(pid) {
+        if pm.get_process(pid).is_ok() || scheduler::is_pid_queued(pid) {
             serial_println_core!("FAIL: pid {} not reclaimed", pid);
             success = false;
         }

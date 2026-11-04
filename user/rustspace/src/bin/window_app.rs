@@ -9,6 +9,8 @@ use alloc::format;
 use core::arch::global_asm;
 use rustspace::gfx::{color::Rgba8888UNORM, surface::UserSurface};
 
+const FRAME_INTERVAL_MS: u64 = 16;
+
 global_asm!(
     ".section .text.entry",
     ".global _start",
@@ -65,7 +67,7 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         unsafe { rustspace::sys_present_window(window_id) };
-        unsafe { rustspace::sys_yield() };
+        unsafe { rustspace::sys_sleep_ms(FRAME_INTERVAL_MS) };
 
         frame = frame.wrapping_add(1);
     }

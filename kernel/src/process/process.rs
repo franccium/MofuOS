@@ -2,7 +2,7 @@ use crate::memory::usermem::USER_STACK_TOP;
 use crate::{
     data_structures::vector::Vec,
     process::{
-        ElfLoadInfo, KernelThread, ThreadState,
+        ElfLoadInfo,
         elf_loader::ElfLoadFlags,
         process_mem::ProcessMemoryLayout,
         shared_state::{SHARED_STATE, SharedState},
@@ -65,86 +65,6 @@ impl ProcessResources {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ExecutionContext {
-    pub rax: u64,
-    pub rbx: u64,
-    pub rcx: u64,
-    pub rdx: u64,
-    pub rsi: u64,
-    pub rdi: u64,
-    pub rbp: u64,
-    pub rsp: u64,
-    pub r8: u64,
-    pub r9: u64,
-    pub r10: u64,
-    pub r11: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-
-    pub rip: u64,
-    pub rflags: u64,
-
-    pub page_table_base_phys: u64,
-}
-
-const FPU_STATE_SIZE_BYTES: usize = 512;
-const FXSAVE_FCW_OFFSET: usize = 0;
-const FXSAVE_MXCSR_OFFSET: usize = 24;
-
-// reset values, every FP exception masked
-const FCW_DEFAULT: u16 = 0x37F;
-const MXCSR_DEFAULT: u32 = 0x1F80;
-
-/// FXSAVE image: x87, xmm0-15 and MXCSR
-/// Holds no ymm state because CR4.OSXSAVE is off, so AVX instructions #UD
-#[repr(C, align(16))]
-pub struct FpuState {
-    pub fxsave_area: [u8; FPU_STATE_SIZE_BYTES],
-}
-
-const _: () = assert!(core::mem::size_of::<FpuState>() == FPU_STATE_SIZE_BYTES);
-
-impl FpuState {
-    pub const fn new() -> Self {
-        let mut fxsave_area = [0u8; FPU_STATE_SIZE_BYTES];
-        let fcw_bytes = FCW_DEFAULT.to_le_bytes();
-        let mxcsr_bytes = MXCSR_DEFAULT.to_le_bytes();
-
-        fxsave_area[FXSAVE_FCW_OFFSET] = fcw_bytes[0];
-        fxsave_area[FXSAVE_FCW_OFFSET + 1] = fcw_bytes[1];
-
-        fxsave_area[FXSAVE_MXCSR_OFFSET] = mxcsr_bytes[0];
-        fxsave_area[FXSAVE_MXCSR_OFFSET + 1] = mxcsr_bytes[1];
-        fxsave_area[FXSAVE_MXCSR_OFFSET + 2] = mxcsr_bytes[2];
-        fxsave_area[FXSAVE_MXCSR_OFFSET + 3] = mxcsr_bytes[3];
-
-        Self { fxsave_area }
-    }
-
-    pub unsafe fn save_from_cpu(&mut self) {
-        unsafe {
-            asm!(
-                "fxsave64 [{}]",
-                in(reg) self.fxsave_area.as_mut_ptr(),
-                options(nostack),
-            );
-        }
-    }
-
-    pub unsafe fn restore_to_cpu(&self) {
-        unsafe {
-            asm!(
-                "fxrstor64 [{}]",
-                in(reg) self.fxsave_area.as_ptr(),
-                options(nostack, readonly),
-            );
-        }
-    }
-}
-
 pub const FD_FLAG_READ: u8 = 0x01;
 pub const FD_FLAG_WRITE: u8 = 0x02;
 
@@ -172,38 +92,10 @@ pub struct Process {
     pub exit_code: Option<i32>,
     pub is_out: bool,
 
-    pub execution_context: ExecutionContext,
-    pub fpu_state: FpuState,
     pub memory_layout: ProcessMemoryLayout,
 }
 
 unsafe impl Send for Process {}
-
-impl ExecutionContext {
-    pub fn new(entry_point: u64, stack_top: u64, page_table_base_phys: u64) -> Self {
-        Self {
-            rax: 0,
-            rbx: 0,
-            rcx: 0,
-            rdx: 0,
-            rsi: 0,
-            rdi: 0,
-            rbp: 0,
-            rsp: stack_top,
-            r8: 0,
-            r9: 0,
-            r10: 0,
-            r11: 0,
-            r12: 0,
-            r13: 0,
-            r14: 0,
-            r15: 0,
-            rip: entry_point,
-            rflags: RFLAGS_DEFAULT,
-            page_table_base_phys,
-        }
-    }
-}
 
 impl Process {
     pub fn new(
@@ -213,8 +105,6 @@ impl Process {
         name: String,
         is_out: bool,
         resources: ProcessResources,
-        entry_point: u64,
-        stack_top: u64,
         page_table_base_phys: u64,
     ) -> Result<Self, MapToError<Size4KiB>> {
         let memory_layout =
@@ -231,8 +121,6 @@ impl Process {
             resources,
             exit_code: None,
             is_out,
-            execution_context: ExecutionContext::new(entry_point, stack_top, page_table_base_phys),
-            fpu_state: FpuState::new(),
             memory_layout,
         })
     }
@@ -243,7 +131,9 @@ impl Process {
         pid: PID,
         parent_pid: PID,
     ) -> Result<Self, MapToError<Size4KiB>> {
-        serial_println!("Process::create_with_elf()");
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!("Process::create_with_elf()");
+        }
         //TODO: safer
         let address_space_manager = crate::memory::get_user_mem_mgr();
         let mut frame_allocator = crate::memory::get_frame_allocator();
@@ -263,12 +153,14 @@ impl Process {
                 flags |= PageTableFlags::NO_EXECUTE;
             }
 
-            serial_println!(
-                "  Mapping ELF segment: vaddr={:#x}, size={:#x}, elf_flags={:#x}",
-                vaddr.as_u64(),
-                in_memory_size,
-                segment.flags,
-            );
+            if crate::process::PROCESS_DEBUG_PRINT {
+                serial_println!(
+                    "  Mapping ELF segment: vaddr={:#x}, size={:#x}, elf_flags={:#x}",
+                    vaddr.as_u64(),
+                    in_memory_size,
+                    segment.flags,
+                );
+            }
 
             if let Err(e) = memory_layout.map_owned_region(
                 vaddr,
@@ -306,7 +198,9 @@ impl Process {
                 }
                 bytes_copied += bytes_in_page;
             }
-            serial_println!("  Copied {} bytes to {:#x}", file_size, vaddr.as_u64());
+            if crate::process::PROCESS_DEBUG_PRINT {
+                serial_println!("  Copied {} bytes to {:#x}", file_size, vaddr.as_u64());
+            }
 
             // Zero-fill the BSS (in-memory > in-file) via HHDM, page by page.
             if segment.in_memory_size > segment.in_file_size {
@@ -329,11 +223,13 @@ impl Process {
                     }
                     bytes_zeroed += bytes_in_page;
                 }
-                serial_println!(
-                    "  Zeroed BSS: {:#x} bytes starting at user vaddr {:#x}",
-                    bss_size,
-                    (vaddr + bss_offset).as_u64(),
-                );
+                if crate::process::PROCESS_DEBUG_PRINT {
+                    serial_println!(
+                        "  Zeroed BSS: {:#x} bytes starting at user vaddr {:#x}",
+                        bss_size,
+                        (vaddr + bss_offset).as_u64(),
+                    );
+                }
             }
         }
 
@@ -361,12 +257,6 @@ impl Process {
             return Err(e);
         }
 
-        let context = ExecutionContext::new(
-            elf_info.entry_point,
-            stack_top.as_u64(),
-            memory_layout.top_page_table_phys.as_u64(),
-        );
-
         Ok(Self {
             pid,
             parent_pid: parent_pid,
@@ -378,102 +268,7 @@ impl Process {
             resources: ProcessResources::default(),
             exit_code: None,
             is_out: true,
-            execution_context: context,
-            fpu_state: FpuState::new(),
             memory_layout,
         })
     }
-}
-
-use core::arch::asm;
-
-/// Save the current CPU context into a thread's ExecutionContext
-pub unsafe fn save_thread_context(thread: &mut KernelThread) {
-    asm!(
-        "mov {}, rsp",
-        "mov {}, rbp",
-        "mov {}, rbx",
-        "mov {}, r12",
-        "mov {}, r13",
-        "mov {}, r14",
-        "mov {}, r15",
-        out(reg) thread.context.rsp,
-        out(reg) thread.context.rbp,
-        out(reg) thread.context.rbx,
-        out(reg) thread.context.r12,
-        out(reg) thread.context.r13,
-        out(reg) thread.context.r14,
-        out(reg) thread.context.r15,
-        options(nomem, nostack)
-    );
-
-    // Get the return address (RIP) from the stack
-    asm!(
-        "mov {}, [rsp]",
-        out(reg) thread.context.rip,
-        options(nostack)
-    );
-
-    // Get current RFLAGS
-    asm!(
-        "pushfq; pop {}",
-        out(reg) thread.context.rflags,
-        options(nostack)
-    );
-
-    // CR3 is saved when switching address spaces
-    // We'll handle it separately during context switch
-}
-
-/// Restore a thread's ExecutionContext to the CPU
-pub unsafe fn restore_thread_context(thread: &KernelThread) -> ! {
-    // Switch page table if this is a user process
-    let cr3 = thread.context.page_table_base_phys;
-    if cr3 != 0 {
-        asm!(
-            "mov cr3, {}",
-            in(reg) cr3,
-            options(nostack)
-        );
-    }
-
-    // Restore registers and jump to the thread
-    asm!(
-        // Restore general purpose registers
-        "mov rsp, {}",
-        "mov rbp, {}",
-        "mov rbx, {}",
-        "mov r12, {}",
-        "mov r13, {}",
-        "mov r14, {}",
-        "mov r15, {}",
-        // Push return address and flags, then IRETQ or RET
-        "push {}",
-        "push {}",
-        "add rsp, 8", // Skip the push for RIP alignment
-        "ret",
-        in(reg) thread.context.rsp,
-        in(reg) thread.context.rbp,
-        in(reg) thread.context.rbx,
-        in(reg) thread.context.r12,
-        in(reg) thread.context.r13,
-        in(reg) thread.context.r14,
-        in(reg) thread.context.r15,
-        in(reg) thread.context.rflags,
-        in(reg) thread.context.rip,
-        options(noreturn)
-    );
-
-    unreachable!();
-}
-
-pub unsafe fn switch_threads(current: &mut KernelThread, next: &KernelThread) {
-    // Save current thread's context
-    save_thread_context(current);
-
-    // Update thread states
-    current.state = ThreadState::Ready;
-
-    // Restore next thread's context
-    restore_thread_context(next);
 }

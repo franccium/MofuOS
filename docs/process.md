@@ -4,25 +4,28 @@
 
 ```
 kernel/src/process/
-  mod.rs              — public re-exports
-  process.rs          — Process, ExecutionContext, ProcessState, context save/restore
+  mod.rs              — public re-exports, PROCESS_DEBUG_PRINT
+  process.rs          — Process, ProcessState
   process_manager.rs  — ProcessManager, PROCESS_MANAGER lazy_static
   process_mem.rs      — ProcessMemoryLayout, MappedMemoryRegion
-  elf_loader.rs       — ElfLoadInfo, LoadSegment, merge_segments, TEST_ELF
-  scheduler.rs        — Scheduler, CoreScheduler, run_on_core_loop, SCHEDULER
-  core_pool.rs        — CorePool, CORE_POOL
-  kernel_thread.rs    — KernelThread, ThreadGroup, ThreadState
-  execution.rs        — execute_process_direct, jump_to_userspace
-  syscall.rs          — syscall_handler (naked), handle_syscall_inner, init_syscall
+  elf_loader.rs       — ElfLoadInfo, LoadSegment, merge_segments, embedded ELFs
+  task.rs             — TaskSlot, TASKS, FpuState, request_kill, exit_current, task_first_entry
+  scheduler.rs        — per-core run queues, switch_context, run_on_core_loop, schedule, work stealing
+  wait.rs             — WaitQueue, block_current_task_until_event, sleep_current_task_ms
+  core_pool.rs        — CorePool (core count and LAPIC ids), CORE_POOL
+  syscall.rs          — syscall_handler (naked), handle_syscall_inner, dispatch_syscall, init_syscall
+kernel/src/trap.rs            — TrapFrame, interrupt_stub!, interrupt_return_path
+kernel/src/util/irq_mutex.rs  — IrqMutex
 kernel/src/process_start.rs  — create_init_process, create_userspace_processes
 ```
 
 ## Process Model
 
-Monolithic kernel. Multiple processes can share the same AP core via the
-scheduler queue. Threads are not hard-pinned — at creation time the process
-is assigned to the least-loaded AP core (by ready queue depth), but multiple
-processes can be queued on the same core.
+Monolithic kernel. Every process has exactly one task, a slot in the static `TASKS`
+table with its own kernel stack. Multiple tasks share an AP core through the
+per-core run queue. A task is assigned to the least-loaded AP core at creation
+(`scheduler::core_runnable_tasks_count`) and an idle core steals waiting tasks from a busy one.
+Core 0 runs the boot code and the tests and never schedules a task.
 
 Process tree root: **arche** (PID 0). All other processes are children of arche or
 of their creating process. If a parent exits without `kill_children`, orphaned children
@@ -36,17 +39,48 @@ Currently `create_userspace_processes` launches two `ping` instances (PID 1, PID
 on core 1 for scheduler testing. The default active binary can be swapped by editing
 `process_start.rs`.
 
-## Core Pool vs Scheduler Queue
+## Tasks
 
-`CORE_POOL` tracks which core is *currently executing* a process (set by
-`set_current_process_for_core`, cleared by `mark_core_idle`). It does NOT gate
-process creation — multiple processes can be queued on the same core.
+File: `process/task.rs`
 
-`create_process_from_elf` picks the target core by comparing
-`scheduler.ready_count_on_core()` across all AP cores (least-loaded first).
-It does NOT call `allocate_core`. This was a bug where the second process
-creation would fail with `NoCoresAvailable` because core 1 was still marked
-occupied from the first process.
+`static TASKS: [TaskSlot; MAX_TASKS]` (`MAX_TASKS = 64`). Process creation fails with
+`ProcessError::OutOfTaskSlots` when no slot is free. A slot is named by a `TaskRef { slot, pid }`,
+valid while `TASKS[slot].pid == pid`. PIDs are never reused, so a stale reference is detected.
+
+```rust
+pub struct TaskSlot {
+    pid, state: AtomicU8 (TaskState), priority, home_core, on_cpu, kill_pending,
+    exit_code_request, cpu_ticks, core_migration_count, cr3, kernel_stack_top,
+    next: AtomicU16,                 // intrusive run queue link
+    saved_rsp: UnsafeCell<u64>,      // written by switch_context
+    fpu_state: UnsafeCell<FpuState>, // 512 byte FXSAVE image, 16 byte aligned
+}
+```
+
+`TaskState`: `Free`, `Creating`, `Ready`, `Running`, `Blocked`, `Dead`. Changes between them go through
+`TaskSlot::transition(from, to)` (a compare and swap), so a double wake or a wake racing a block is harmless.
+
+Each slot owns a static kernel stack, `gdt::KERNEL_TASK_STACKS[slot]`: 64 KiB plus an unmapped 4 KiB guard
+page. Syscalls and ring 3 interrupts of the task run on it. The per-core syscall stack no longer exists.
+
+`FpuState` is saved in `core_run_scheduling(core_id)` and restored by the scheduler loop right before it switches to the task.
+New tasks start with FCW=0x37F and MXCSR=0x1F80. There is no ymm state because CR4.OSXSAVE is off.
+
+### Lifecycle
+
+- Created by `create_process_from_elf`: slot allocated, a first-entry stack built by `init_task_stack`
+  (callee-saved frame whose return address is `task_first_entry`, above it a `TrapFrame` with the user
+  rip, rsp, `RFLAGS_DEFAULT`, user CS and SS), state `Ready`, queued on the chosen core.
+- `task_first_entry` (naked) exits right away if a kill is pending, else loads the user data selectors,
+  pops the all-zero `TrapFrame` registers and `iretq`s to ring 3.
+- A task tears itself down. `exit_current(code)` loads the kernel CR3, destroys the windows, runs
+  `terminate_process` (frees the address space, sets `Terminated`), marks the slot `Dead` and calls
+  `core_run_scheduling(core_id)`, which never returns. The scheduler loop releases the slot after it switched away from the
+  stack. Nothing is ever unwound or discarded.
+- Killing another process is a request: `task::request_kill(pid, code)` sets `kill_pending` and
+  `exit_code_request`, wakes the task if it is blocked and sends a reschedule IPI to its core. The task
+  calls `exit_current` at its next `exit_to_user` or at its first entry. A task in a long syscall exits
+  when the syscall returns.
 
 ## Core Types
 
@@ -64,8 +98,6 @@ pub struct Process {
     pub resources: ProcessResources,
     pub exit_code: Option<i32>,
     pub is_out: bool,                  // true = independent top-level process
-    pub execution_context: ExecutionContext,
-    pub fpu_state: FpuState,
     pub memory_layout: ProcessMemoryLayout,
 }
 ```
@@ -74,38 +106,8 @@ pub struct Process {
 `RFLAGS_DEFAULT = 0x202` — IF=1, reserved bit 1=1.
 `DEFAULT_NEW_PROCESS_STACK_SIZE = 1 * 1024 * 1024` (1 MB).
 
-### ExecutionContext
-
-Full register set snapshot for context switching:
-```rust
-pub struct ExecutionContext {
-    rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp,
-    r8-r15, rip, rflags,
-    page_table_base_phys: u64,  // CR3 value
-}
-```
-
-### FpuState
-
-512-byte, 16-aligned FXSAVE image (x87, xmm0-15, MXCSR), stored in `Process` and
-not in `ExecutionContext`. Saved eagerly on sys_yield and timer preemption, restored
-in `run_on_core_loop` before the jump to userspace. New processes start with
-FCW=0x37F and MXCSR=0x1F80. There is no ymm state because CR4.OSXSAVE is off.
-
-### KernelThread
-
-```rust
-pub struct KernelThread {
-    pub pid: PID,
-    pub priority: u8,
-    pub name: String,
-    pub state: ThreadState,   // Ready/Running/Blocked/Terminated
-    pub context: ExecutionContext,
-    pub core_id: Option<u8>,
-}
-```
-
-`ThreadGroup` holds a PID and a KernelThread (main thread). Matches 1:1 with a Process.
+The registers of a process are not stored in `Process`. A task's user registers live in a frame on its kernel
+stack and its kernel registers are saved by `switch_context` on the same stack.
 
 ### Userspace heap and virtual-range allocators
 
@@ -131,37 +133,34 @@ Main API for creating userspace processes from ELF:
 
 1. Verify parent exists in `processes` Vec.
 2. Assign `new_pid`, increment counter.
-3. `CORE_POOL.lock().allocate_core(new_pid)` — get a free core.
+3. Pick the AP core with the lowest `scheduler::core_runnable_tasks_count` (no lock).
 4. `Process::create_with_elf(elf_info, name, pid, parent_pid)` — maps ELF, stack.
-5. Create `KernelThread` with ELF entry point + stack from process execution context.
-6. Assign thread to core: `kernel_thread.assign_to_core(core_id)`.
-7. Create `ThreadGroup`.
-8. **Push process and thread group FIRST** (`self.processes.push(process)` etc.).
-9. **Then** `SCHEDULER.lock().enqueue_on_core(core_id, new_pid, priority)`.
+5. `task::allocate_task_slot(...)`, on failure free the address space and return `OutOfTaskSlots`.
+6. `task::init_task_stack(slot, entry_point, USER_STACK_TOP)`.
+7. **Push the process FIRST** (`self.processes.push(process)`).
+8. Set the slot `Ready` and `scheduler::core_enqueue_ready_task(core_id, slot, priority)`, which also sends an
+   IPI when the core is idle or runs a lower priority task.
 
-The ordering in steps 8-9 is critical: the AP core scheduler loop calls
-`PROCESS_MANAGER.get_process(pid)` immediately after dequeuing. If enqueued before
-pushed, it finds `ProcessNotFound` and the core jumps to userspace with an invalid
-context — memory corruption ensues.
+The ordering in steps 7-8 matters: an AP core can dequeue the task the instant it is queued and the first
+syscall looks the process up in `PROCESS_MANAGER`.
 
 ### terminate_process (with reclamation)
 
-`PROCESS_MANAGER::terminate_process(pid, exit_code, cascade)` now reclaims **all**
-user resources before releasing the core:
+`PROCESS_MANAGER::terminate_process(pid, exit_code, cascade)` is called by `exit_current` on the dying task's own
+kernel stack, after the task switched to the kernel CR3. It reclaims all user resources:
 
 1. Under `get_process_mut`, copy `children`, set `Terminated`/`exit_code`.
 2. If `top_page_table_phys != 0`, call `memory_layout.free_address_space(get_user_mem_mgr(), &mut frame_allocator)` directly on the process layout (no clone), then zero `top_page_table_phys` (guard against double free) and clear `regions`:
    - `UserMemoryManager::unmap_user_region` for every region in `regions`: `Mapper::unmap` per page, absent pages skipped, frames freed only for `FrameOwnership::Owned`.
    - `free_user_tables` frees all PT/PD/PDPT frames, with a `debug_assert` that they are empty.
    - `free_pml4_frame` frees the top table and `flush_all`.
-   The windows of the process are destroyed before this, by the callers (`sys_exit`, `TerminateProcess`), because window cleanup locks the compositor and then `PROCESS_MANAGER`.
-3. Lookup `core_id` via `thread_groups`, `thread.terminate`, `CORE_POOL.release_core`,
-   `SCHEDULER.remove_pid(pid)` (with `cli`+`SCHEDULER.lock`).
-4. Orphan vs cascade children to arche `PID 0`.
+   The windows of the process are destroyed before this, by `exit_current`, because window cleanup locks the compositor and then `PROCESS_MANAGER`.
+3. Orphan children to arche `PID 0`, or with `cascade` send each child a kill request.
 
-`cleanup_dead()` (`retain Terminated` + `retain !all_terminated`) is called by
-`test_usermem_reclaim` harness to verify PID fully removed. `free_frame_count` +
-`allocated_bump_frames` in `MemoryMapFrameAllocator` expose reclamation for tests.
+The run queues are not touched: the task is running, so it is in no queue, and the scheduler loop frees its slot.
+
+`cleanup_dead()` (`retain Terminated`) is called by the tests to verify a PID is fully removed.
+`free_frame_count` + `allocated_bump_frames` in `MemoryMapFrameAllocator` expose reclamation for tests.
 
 ### get_process / get_process_mut
 
@@ -198,139 +197,121 @@ File: `process/process.rs`
    - Copy file data via `translate_user_virt_to_phys` → HHDM pointer → `copy_nonoverlapping`.
    - Zero BSS (in_memory_size > in_file_size) via same translation path.
 4. Map the shared data page (`SharedState::map_into_process`, `Borrowed`) and the main stack (`map_owned_region` ending at `USER_STACK_TOP`).
-5. Build `ExecutionContext::new(entry_point, stack_top, pml4_phys)`.
 
 ## Scheduler
 
 File: `process/scheduler.rs`
 
-`lazy_static! SCHEDULER: Mutex<Scheduler>`
+Preemptive, per-core, with work stealing. Per-switch logging is behind `SCHED_DEBUG_PRINT` (off) and never
+happens under a run queue lock.
 
-### Scheduler Structure
+### Run queues
 
-```rust
-pub struct Scheduler {
-    per_core: Vec<CoreScheduler>,  // index = core_id
-    core_count: u8,
-}
+`static CORE_RUN_QUEUES: [CacheAligned<IrqMutex<CoreRunQueue>>; MAX_CORES]`. Never hold two of these locks at
+once. `IrqMutex` (`util/irq_mutex.rs`) saves IF, disables interrupts, then locks; the guard unlocks first and
+restores IF afterwards. Everything an interrupt handler touches must use it.
 
-pub struct CoreScheduler {
-    core_id: u8,
-    ready_queues: [Dequeue<PID>; 8],  // 8 priority levels (0=lowest, 7=highest)
-    blocked_queue: Dequeue<PID>,
-    current_thread: PID,
-}
-```
+`CoreRunQueue` has two banks, `active` and `expired`. A bank has one queue per priority (0-7, 7 highest), made of
+`TaskSlot::next` links, plus a `u8` bitmap of the non-empty levels. `pick_next_task` takes the oldest task of the
+highest set level of `active`, and swaps the banks when `active` is empty.
 
-`SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES]` `36 KiB` (`guard+stack`, `align(4096)`, `guard !PRESENT` after `boot_common::bsp_early_init`, `top-0x1000` headroom for `mov rsp` frame). `gdt::scheduler_bounds` / `assert_rsp_in_bounds` (timer `RPL==Ring3` only).
+- New and woken tasks go to `active`.
+- A task that used its slice or yielded goes to `expired`. One that was only displaced by a higher priority
+  task keeps its place in `active`.
+- Slice length is `(priority + 1) * BASE_SLICE_TICKS` timer ticks (tick = 10 ms).
+- So every runnable task runs once per epoch, a priority 7 task that yields gives way to priority 1 and
+  nothing starves.
 
-Priority: 8 levels (0-7). Higher number = higher priority. Within a level: FIFO
-(Dequeue pop_front).
+The queue also holds the per-core sleeping_tasks, see `docs/syscalls.md` (SleepMs).
 
-### run_on_core_loop
+Lock-free per-core state: `RUNNABLE_TASKS_COUNT` (tasks queued or running, changes only when a task becomes runnable,
+blocks or dies; it drives placement and "does anyone wait"), `CORE_SHOULD_BE_RESCHEDULED`, `SLICE_REMAINING_TICKS`,
+`CURRENT_PROCESS_ON_CORE` and `CURRENT_SLOT_ON_CORE`. `get_current_process_for_core(core)` is the only record
+of the current process.
 
-Called on each AP core after boot initialization:
+### Switching
+
+`switch_context(save_rsp, load_rsp)` (naked) pushes rbx rbp r12-r15, stores rsp, loads the other rsp, pops, `ret`.
+`run_on_core_loop(core_id)` moves onto the per-core scheduler stack (`SCHEDULER_STACKS`, 36 KiB with guard) through
+the naked `enter_scheduler_stack` and runs `scheduler_loop`, with interrupts off:
 
 ```
 loop:
-  disable interrupts
-  get_next_on_core(core_id) -> (pid, priority)
-  if pid == INVALID_PID:
-    enable interrupts, hlt, continue
-
-  set_current_on_core(core_id, pid)
-  extract exec context from PROCESS_MANAGER (lock then drop)
-  set_current_process_for_core(core_id, pid)
-  Cr3::write(user_pml4)
-  enable interrupts
-
-  // push return label address, save RSP, jmp to jump_to_userspace
-  asm:
-    lea rax, [rip + 2f]      // return label address
-    push rax                  // return address on stack
-    mov [KERNEL_RSP_ON_CORE[core_id]], rsp   // save RSP
-    jmp jump_to_userspace    // one-way trip to userspace
-  "2:"                       // return_to_scheduler() ret lands here
-
-  // post-exit cleanup
-  mark_core_idle(core_id)
-  if process is NOT terminated: re-enqueue(pid, priority)
-  else: log "PID N terminated"
+  pick_next_task from the own queue
+  if none: try to steal; else load the kernel CR3, enable_and_hlt
+  run_task:
+    state = Running, on_cpu = true, current task of the core = slot
+    clear CORE_SHOULD_BE_RESCHEDULED, reset the slice
+    syscall stack top and TSS rsp0 = kernel stack top of the task
+    restore FPU, write CR3 (always), switch_context to the task
+  // back here when the task called core_run_scheduling(core_id)
+    on_cpu = false; if the task is Dead, release the slot
 ```
 
-The `jmp` (not `call`) into `jump_to_userspace` means no extra stack frame is
-created. The return address is the manually pushed label `"2:"`. This is the
-same pattern used by the Linux kernel for `iret`-based userspace entry.
+`core_run_scheduling(core_id)` runs on a task stack with no locks held: saves IF, disables interrupts, saves the FPU, does
+`CAS(Running, Ready)` and queues the task on success (a `Blocked` or `Dead` task is not queued), then switches to
+the scheduler loop. When the task runs again it restores IF. `core_yield_executing_tasks(core_id)` is `core_run_scheduling` that requeues to
+`expired` and returns at once when nothing else is runnable on the core.
 
-### KERNEL_RSP_ON_CORE and return_to_scheduler
+A woken task may sit in a run queue before it has switched out. That is safe: only its home core dequeues it and
+only after the switch. Stealing checks `on_cpu`.
 
-```rust
-static KERNEL_RSP_ON_CORE: [AtomicU64; MAX_CORES]
-```
+### Preemption and the exit to ring 3
 
-Set by the scheduler loop just before entering userspace. Read by `return_to_scheduler()`.
+Timer, keyboard, mouse and reschedule interrupts use naked stubs (`trap::interrupt_stub!`) that push a
+`TrapFrame`, call the Rust handler, then `interrupt_return_path`. Interrupted ring 0 code just returns, the kernel
+is not preemptible. For ring 3 the stub restores the user SS selector (after `sysretq` the CPU pushes SS=0x18,
+RPL 0, which makes `iretq` fault) and calls `scheduler::exit_to_user()`.
 
-```rust
-pub fn return_to_scheduler() -> ! {
-    let core_id = get_current_core_id();
-    let kernel_rsp = KERNEL_RSP_ON_CORE[core_id].load(SeqCst);
-    asm!("mov rsp, {rsp}; ret", rsp = in(reg) kernel_rsp, options(noreturn));
-}
-```
+`exit_to_user()` (interrupts off, also run at the end of every syscall) loops: exit if `kill_pending`; if
+`CORE_SHOULD_BE_RESCHEDULED` call `core_run_scheduling(core_id)`; otherwise return.
 
-Called from `sys_exit`. Restores kernel RSP and `ret` — pops the saved label
-address and resumes the scheduler loop at the instruction after the asm block.
+`on_timer_tick(core)` (interrupt context, lock-free except for the sleeper check) counts `cpu_ticks`, wakes due
+sleeping_tasks and, when the slice is used up and another task waits, sets `CORE_SHOULD_BE_RESCHEDULED`.
 
-This mechanism is also the foundation for future preemption: the timer interrupt
-handler can call `return_to_scheduler()` to preempt a running process mid-slice.
+Reschedule IPI (`InterruptIndex::Reschedule = 0xF0`, `send_reschedule_ipi`) is sent when a task is queued on a
+remote core that is idle or runs a lower priority, and when a kill is requested for a running task. The LAPIC
+address is an atomic pointer and the core-to-LAPIC-id table is a static, so IPIs and EOI take no lock.
+
+### Blocking
+
+`TaskState` is a state machine, `wake_task(TaskRef)` does `CAS(Blocked, Ready)` and on success queues the
+task on its home core (blocked tasks do not migrate), so it is idempotent. `process/wait.rs`:
+
+- `WaitQueue`: fixed capacity list of `TaskRef` under an `IrqMutex`.
+- `block_current_task_until_event(queue, condition)`: check; join the queue and become `Blocked` in one step; check again (wake
+  yourself if it now holds); `core_run_scheduling(core_id)`; loop. A wake between the first check and the block is not lost.
+- `sleep_current_task_ms(ms)` / `scheduler::core_block_current_task_until_wake_time(t)`: the task is added to the sleeping_tasks of its core and
+  blocked; the timer tick of that core wakes it. A kill wakes it early and the sleep loop ends.
+- Static queues: `INPUT_WAIT_QUEUE` (woken by the compositor after it forwarded input to a window buffer) and
+  `FUTEX_WAIT_QUEUE`.
+
+### Work stealing
+
+An idle core scans the other AP cores, skipping core 0, for a core_from with more than one runnable task and
+`try_lock`s its queue. It takes a task whose `on_cpu` is false (highest priority first), drops the core_from lock,
+sets `home_core`, bumps the task's `core_migration_count` counter and queues it locally. CR3 is written on every dispatch
+and the kernel CR3 is loaded before `hlt`, so no idle core keeps the page tables of a task that exits elsewhere.
+`WORK_STEALING_ENABLED` switches it off.
 
 ### CURRENT_PROCESS_ON_CORE
 
-```rust
-static CURRENT_PROCESS_ON_CORE: [AtomicU64; MAX_CORES]
-```
-
-Stores current PID for each core. Used by syscall handler to identify calling process.
-`INVALID_PID as u64` = idle.
+Stores the current PID for each core, `INVALID_PID` = idle. Used by the syscall handler to identify the caller.
 
 ## Core Pool
 
 File: `process/core_pool.rs`
 
-`lazy_static! CORE_POOL: Mutex<CorePool>`
+`lazy_static! CORE_POOL: Mutex<CorePool>` holds the total core count and the LAPIC id of each core
+(`interrupts::set_lapic_id_of_core` mirrors the ids into a lock-free table). It does not allocate cores,
+placement is `scheduler::core_runnable_tasks_count`. `TOTAL_CORE_COUNT` is the same count as a static.
 
-Tracks which CPU cores are available for process assignment.
+## Entering Ring 3
 
-```rust
-pub struct CorePool {
-    total_cores: u8,
-    available_cores: u64,  // bitmask: bit N=1 means core N is free
-    core_assignments: [usize; MAX_CORES],  // core_id -> PID
-    lapic_ids: [u8; MAX_CORES],
-}
-```
-
-- Core 0 is reserved for kernel/BSP: `available_cores &= !1` during init.
-- `allocate_core(pid)` → linear scan for first available bit, marks it used.
-- `release_core(core_id)` → sets bit, clears assignment.
-- Hard limit: MAX_CORES=16, bitmask fits in u64.
-
-## Jump to Userspace
-
-File: `process/execution.rs`
-
-```rust
-pub unsafe fn jump_to_userspace(entry_point: u64, stack_pointer: u64, rflags: u64) -> !
-```
-
-1. Disable interrupts.
-2. Load user data selectors into DS/ES/FS/GS.
-3. Build iretq frame on stack: SS, RSP, RFLAGS (from param), CS, RIP.
-4. `iretq` — switches to ring 3, jumps to entry_point, stack at stack_pointer.
-
-The `rflags` parameter is `RFLAGS_DEFAULT (0x202)` on first entry
-(`ExecutionContext::new`) and the saved user RFLAGS on resumed entry
-(set by sys_yield or timer preemption).
+A task enters ring 3 the first time through `task_first_entry` and afterwards through the normal return of the
+path that took it into the kernel: `sysretq` at the end of `syscall_handler`, or `iretq` at the end of an
+interrupt stub. Both restore every user register from the frame on the task's kernel stack (a yield returns 0 in
+rax like any syscall). `RFLAGS_DEFAULT (0x202)` is the first-entry flags value.
 
 ## Syscall Interface
 
@@ -341,23 +322,23 @@ Mechanism: SYSCALL/SYSRET (64-bit). Configured in `init_syscall()` per AP core:
 - STAR MSR: kernel CS=0x08, user CS base=0x10 (so sysretq → CS=0x23, SS=0x1B)
 - LSTAR MSR: address of `syscall_handler` (naked function)
 - SFMASK: `1 << 9` (masks IF on SYSCALL entry — see `docs/syscalls.md:1.4` and BUG-09)
-- KERNEL_GS_BASE: `&PER_CORE_SYSCALL[core_id]` (per-core 64 KiB stack, `swapgs`+`gs:0`)
+- KERNEL_GS_BASE: `&SYSCALL_DATA[core_id]` (`stack_top` = kernel stack top of the task running on the core, set on every dispatch, `swapgs`+`gs:0`)
 
 > **Canonical reference:** `docs/syscalls.md` — full Ring 3 -> Ring 0 switch, `SyscallFrame` layout, and per-syscall spec. The table below is a summary; `docs/syscalls.md:2` is authoritative.
 
 ### syscall_handler (naked asm) — see `docs/syscalls.md:1.3` for full asm
 
-1. `swapgs; mov r15,rsp; mov rsp,gs:0; swapgs` — save user RSP, switch to per-core kernel stack via `KERNEL_GS_BASE`.
-2. Push: user RSP (R15), user RIP (RCX), user RFLAGS (R11), `rax` (syscall_num — BUG-08 fix), args `rdi,rsi,rdx,r10,r8,r9`, callee-saved `rbx,rbp,r12,r13,r14`.
+1. `swapgs`, stash user rsp in `gs:[user_rsp_scratch]`, `mov rsp,gs:0`, push the user rsp, `swapgs` — switch to the kernel stack of the running task.
+2. Push: user RSP, user RIP (RCX), user RFLAGS (R11), `rax` (syscall_num — BUG-08 fix), args `rdi,rsi,rdx,r10,r8,r9`, callee-saved `rbx,rbp,r12,r13,r14,r15`. 16 pushes on a 16 byte aligned stack top leave rsp aligned for the call.
 3. `mov rdi, rsp` → pointer to `SyscallFrame`.
-4. `call handle_syscall_inner` (does `sti` at top, `cli` before `return_to_scheduler`).
-5. Pop callee-saved, `add rsp,8` skip syscall_num slot (rax holds return), restore RFLAGS/RIP/RSP.
-6. `mov rsp,r15; sysretq`.
+4. `call handle_syscall_inner`: `sti`, `dispatch_syscall`, `cli`, `exit_to_user()` (pending kill or reschedule), return value in rax.
+5. `cli`, pop callee-saved and args, `add rsp,8` skip syscall_num slot (rax holds return), restore RFLAGS/RIP, `pop rsp`.
+6. `sysretq`.
 
 ### SyscallFrame (repr C)
 
 ```
-r14, r13, r12, rbx, rbp        (callee-saved)
+r15, r14, r13, r12, rbx, rbp   (callee-saved)
 arg6 (r9), arg5 (r8), arg4 (r10), arg3 (rdx), arg2 (rsi), arg1 (rdi)
 syscall_num (rax)
 rflags (r11), user_rip (rcx), user_rsp (r15)
@@ -368,6 +349,7 @@ rflags (r11), user_rip (rcx), user_rsp (r15)
 | Number | Name                  | Args                          | Behavior                                              |
 |--------|-----------------------|-------------------------------|-------------------------------------------------------|
 | 0      | sys_create_process    | path_ptr, path_len, name_ptr, name_len | **partial** — parses `ODYS_ELF` and `create_process_from_elf`; FS path not yet wired (`ISSUE-P8`) |
+| 1      | sys_terminate_process | pid, exit_code                | self: `exit_current`; other: kill request, returns `0` at once, the target exits later |
 | 2      | sys_write             | fd, buf, count                | fd=1/2: write to COM2; returns count                  |
 | 5      | sys_allocate          | size                          | grows user heap at `0x6000_0000`, returns old heap_end |
 | 10     | sys_create_window     | w, h, x, y                    | creates compositor window, returns window_id          |
@@ -395,10 +377,14 @@ rflags (r11), user_rip (rcx), user_rsp (r15)
 | 600    | sys_create_circular_buffer | size, page_flags, info_ptr | double-maps `size` bytes at `2*size` contiguous VA; returns `CircularBufferInfo` |
 | 970    | sys_get_cpu_info      | buf_ptr, buf_len              | fills `CpuInfoFlat`; `0` ok, `2` invalid ptr          |
 | 997    | sys_get_pid           | -                             | returns calling process PID (alias `sys_echo`)        |
-| 998    | sys_yield             | -                             | save context, re-enqueue, return to scheduler         |
-| 999    | sys_exit              | exit_code                     | terminate process, return to scheduler                |
+| 990    | sys_sleep_ms          | duration_ms                   | blocks the caller for at least that long, no cpu use  |
+| 991    | sys_wait_for_input    | -                             | blocks until a window of the caller has input waiting |
+| 992    | sys_futex_wait        | word_ptr, expected            | blocks while `*word == expected` and no FutexWake came |
+| 993    | sys_futex_wake        | -                             | wakes every FutexWait waiter, they recheck their word |
+| 998    | sys_yield             | -                             | gives the core to another runnable task, returns 0    |
+| 999    | sys_exit              | exit_code                     | `exit_current`: the task tears itself down, never returns |
 
-Unimplemented (return u64::MAX): 1 (terminate_process), 3 (read), 4 (get_line), 8 (load_file), 9 (unload_file), 996 (get_process_info).
+Unimplemented (return u64::MAX): 3 (read), 4 (get_line), 8 (load_file), 9 (unload_file), 996 (get_process_info).
 
 ### FileDescriptor
 
@@ -442,76 +428,49 @@ must be identical. If they diverge the struct layout breaks silently.
 
 The naked asm pushes registers in this exact order (lowest address first = first struct field):
 ```
-push r14, r13, r12, rbp, rbx       <- callee-saved
+push r15, r14, r13, r12, rbp, rbx  <- callee-saved
 push r9(arg6), r8(arg5), r10(arg4), rdx(arg3), rsi(arg2), rdi(arg1)
 push rax                            <- syscall_num  *** must not be omitted ***
 push r11                            <- rflags (saved by CPU in r11 on SYSCALL)
 push rcx                            <- user_rip (saved by CPU in rcx on SYSCALL)
-push r15                            <- user_rsp (saved before stack switch)
+push user_rsp                       <- saved in the per-core scratch before the stack switch (pushed first)
 ```
 On the pop side, the syscall_num slot is skipped with `add rsp, 8` because RAX already
 holds the return value from `handle_syscall_inner` and must reach userspace unchanged.
 
 ### SFMASK and interrupt safety
 
-SFMASK = `1 << 9` (masks IF on SYSCALL entry). This prevents the timer from firing
-while the handler is on the kernel stack but SS is still in kernel state (Intel SYSRETQ
-does not restore SS.RPL=3 — see BUG-09 in bugs.md).
-
-Interrupts are re-enabled at the start of `handle_syscall_inner` (sti) so long-running
-syscalls can still be preempted. Before calling `return_to_scheduler()` in sys_yield
-and sys_exit, interrupts are disabled again (cli) to prevent the timer firing during
-the stack unwind.
+SFMASK = `1 << 9` (masks IF on SYSCALL entry). This keeps the timer from firing while the handler is on the
+kernel stack but SS is still in the state `syscall` left it in, and protects `user_rsp_scratch`, which is per core.
+Interrupts are re-enabled at the start of `handle_syscall_inner` (`sti`) so long syscalls are not blocked from
+interrupts, and disabled again before `exit_to_user`.
 
 ### sys_yield (998)
 
-Saves `user_rip`, `user_rsp`, `rflags` from the syscall frame into
-`process.execution_context`, then calls `return_to_scheduler()`. The scheduler
-loop sees the process is not Terminated, re-enqueues it, and runs the next
-process. When it comes back, `jump_to_userspace` resumes at the instruction
-after the `syscall` instruction (sysretq return address in `frame.user_rip`).
-
-Note: syscall 998 is only effective as a yield when the process is in a tight
-loop. If the process spends most of its time in the kernel (e.g. tight
-sys_write loop), preemption via the timer may not fire often enough to
-interleave with another process. See ISSUE-P9.
+`scheduler::core_yield_executing_tasks(core_id)`: the task is queued in the `expired` bank and the core runs the next task. It returns
+0 through the normal syscall return, so no user register is lost. With nothing else runnable on the core it
+returns at once.
 
 ### Syscall Stack + Guard
 
-Per-core. Each core gets `64 KiB` stack plus `4 KiB` guard inside `GuardedSyscallSlot` (total `72 KiB`).
+There is no per-core syscall stack. `syscall_handler` runs on the kernel stack of the task, `gdt::KERNEL_TASK_STACKS`
+(64 KiB + unmapped 4 KiB guard per slot, 16 byte aligned top). `run_task` writes the stack top of the next task
+to `SYSCALL_DATA[core].stack_top` (read through `gs:0`) and to `TSS.privilege_stack_table[0]`, so ring 3 entries by
+interrupt and by `syscall` land on the same stack.
 
 ```rust
-const SYSCALL_STACK_SIZE: usize = 4096 * 16; // 64 KiB
-const GUARD_PAGE_SIZE: usize = 4096;
-
 #[repr(C, align(64))]
 struct PerCoreSyscallData {
-    stack_top: u64,              // must be first field — naked asm reads gs:0
-    _stack: [u8; SYSCALL_STACK_SIZE],
+    stack_top: u64,          // must be first field, naked asm reads gs:0
+    user_rsp_scratch: u64,
 }
-
-#[repr(C, align(4096))]
-struct GuardedSyscallSlot { guard: [u8; 4096], data: PerCoreSyscallData } // guard at slot base
-
-static mut SYSCALL_SLOTS: [GuardedSyscallSlot; MAX_CORES] // 4 * 72 KiB, guard !PRESENT
-// KERNEL_GS_BASE = &SYSCALL_SLOTS[core].data (not guard)
+static mut SYSCALL_DATA: [PerCoreSyscallData; MAX_CORES]
+// KERNEL_GS_BASE = &SYSCALL_DATA[core]
 ```
 
-`stack_top` first field (`repr(C)`) so `gs:0` reads directly. `guard` at `slot` base `page-aligned`, `data` at `+0x1000`, `_stack` at `data+8` (`bottom &0xFFF==8`, `page(bottom)==guard+0x1000`), `top = _stack+64KiB`. Guard unmapped after `init_heap` via `stack_guard::unmap_guard_page` (splits `2MiB` huge from Limine if needed, `FrameAllocator` `PT` alloc, `flush`). Overflow at `guard` -> `#PF` `present=0` instead of silent `TSS` corrupt.
-
-`init_syscall()` per AP:
-1. `stack_top = &slot.data._stack[64KiB]` (one past end, grows down)
-2. `slot.data.stack_top = top`
-3. `WRMSR KERNEL_GS_BASE = &slot.data` (`gs:0==top`)
-
-Naked asm prologue:
-```asm
-swapgs; mov r15,rsp; mov rsp,gs:0; swapgs // save user RSP, switch to per-core top
-```
-
-`assert_syscall_stack_bounds(core_id)` (`mov rsp` `debug_assert!(bottom<=rsp<=top)`) at top of `handle_syscall_inner`.
-
-`install_syscall_guard_pages(&mut FrameAllocator)` called after `init_heap` in `boot_common::bsp_early_init`.
+`gdt::assert_rsp_in_task_stack(core_id)` (`debug_assert!(bottom<=rsp<=top)` against the current task) runs at the
+top of `handle_syscall_inner` and in the timer handler for ring 3 interrupts. `handle_syscall_inner` also asserts
+that the frame pointer is 16 byte aligned.
 
 ## Userspace Test Program
 
@@ -532,9 +491,8 @@ Output goes to COM2 via sys_write(fd=1). The log splitter routes it to
 
 ## Known Issues / TODOs
 
-- Stubs still return u64::MAX: 1, 3, 4, 8, 9, 996. `CreateProcess (0)` is partial (hardcodes `ODYS_ELF`).
-- No frame deallocation when processes terminate.
-- Preemption of tight syscall loops: sti inside handle_syscall_inner helps, but a process
-  running a tight sys_write loop still hogs the core during each handler invocation.
+- Stubs still return u64::MAX: 3, 4, 8, 9, 996. `CreateProcess (0)` is partial (hardcodes `ODYS_ELF`).
+- The kernel is not preemptible: a long syscall delays the reschedule and a kill until it returns.
 - Process exit code from sys_exit does not propagate to parent via wait() (no wait).
-- `current_on_core` in Scheduler returns INVALID_PID sentinel rather than Option<PID>.
+- User pointers passed to syscalls are range checked only, not walked through the page tables.
+- A task blocked forever (for example `sys_wait_for_input` without a window) only leaves through a kill.

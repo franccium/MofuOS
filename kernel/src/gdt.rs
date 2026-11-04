@@ -6,6 +6,7 @@ use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector
 use x86_64::structures::paging::Mapper;
 use x86_64::structures::tss::TaskStateSegment;
 
+use crate::process::task::MAX_TASKS;
 use crate::{MAX_CORES, serial_println, serial_println_core};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
@@ -14,17 +15,25 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub const PER_CORE_STACK_SIZE: usize = 8 * 4096; // 32 KiB
 pub const GUARD_PAGE_SIZE: usize = 4096;
 
+// Syscalls run on the task stack, so it needs the room the old per-core syscall stack had
+pub const TASK_KERNEL_STACK_SIZE: usize = 16 * 4096; // 64 KiB
+
+pub const KERNEL_CODE_SELECTOR_VALUE: u16 = 0x08;
+pub const KERNEL_DATA_SELECTOR_VALUE: u16 = 0x10;
+pub const USER_DATA_SELECTOR_VALUE: u16 = 0x18 | 3;
+pub const USER_CODE_SELECTOR_VALUE: u16 = 0x20 | 3;
+
 #[repr(C, align(4096))]
-pub struct GuardedKernelStack {
+pub struct GuardedKernelStack<const STACK_SIZE: usize = PER_CORE_STACK_SIZE> {
     pub guard: [u8; GUARD_PAGE_SIZE],
-    pub stack: [u8; PER_CORE_STACK_SIZE],
+    pub stack: [u8; STACK_SIZE],
 }
 
-impl GuardedKernelStack {
+impl<const STACK_SIZE: usize> GuardedKernelStack<STACK_SIZE> {
     const fn new() -> Self {
         Self {
             guard: [0u8; GUARD_PAGE_SIZE],
-            stack: [0u8; PER_CORE_STACK_SIZE],
+            stack: [0u8; STACK_SIZE],
         }
     }
 }
@@ -37,6 +46,44 @@ static mut IST0_STACKS: [GuardedKernelStack; MAX_CORES as usize] =
 
 static mut SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES as usize] =
     [const { GuardedKernelStack::new() }; MAX_CORES as usize];
+
+static mut KERNEL_TASK_STACKS: [GuardedKernelStack<TASK_KERNEL_STACK_SIZE>; MAX_TASKS] =
+    [const { GuardedKernelStack::new() }; MAX_TASKS];
+
+pub fn task_stack_top(slot_index: usize) -> u64 {
+    debug_assert!(slot_index < MAX_TASKS);
+
+    unsafe {
+        let slot = &KERNEL_TASK_STACKS[slot_index];
+        slot.stack.as_ptr().add(TASK_KERNEL_STACK_SIZE) as u64
+    }
+}
+
+pub fn task_guard_page(slot_index: usize) -> VirtAddr {
+    debug_assert!(slot_index < MAX_TASKS);
+
+    unsafe {
+        let slot = &KERNEL_TASK_STACKS[slot_index];
+        VirtAddr::new(slot.guard.as_ptr() as u64)
+    }
+}
+
+pub fn task_stack_bounds(slot_index: usize) -> (VirtAddr, VirtAddr) {
+    debug_assert!(slot_index < MAX_TASKS);
+
+    unsafe {
+        let slot = &KERNEL_TASK_STACKS[slot_index];
+        let bottom = VirtAddr::new(slot.stack.as_ptr() as u64);
+        let top = VirtAddr::new(slot.stack.as_ptr().add(TASK_KERNEL_STACK_SIZE) as u64);
+        (bottom, top)
+    }
+}
+
+/// Where the CPU switches to on a ring 3 to ring 0 transition of this core
+pub fn set_privilege_stack_top(core_id: u8, stack_top: u64) {
+    let tss = unsafe { &mut *PER_CORE_TSS[core_id as usize].get() };
+    tss.privilege_stack_table[0] = VirtAddr::new(stack_top);
+}
 
 pub fn get_scheduler_stack_top(core_id: u8) -> u64 {
     unsafe {
@@ -124,17 +171,30 @@ pub fn install_guard_pages(frame_allocator: &mut crate::memory::memory::MemoryMa
             );
         }
     }
+
+    for slot_index in 0..MAX_TASKS {
+        unsafe {
+            crate::stack_guard::ensure_guard_unmapped(task_guard_page(slot_index), frame_allocator);
+        }
+    }
 }
 
+/// The running task owns its kernel stack, so rsp must lie inside it
 #[inline(always)]
-pub fn assert_rsp_in_bounds(core_id: u8) {
+pub fn assert_rsp_in_task_stack(core_id: u8) {
+    let slot_index = crate::process::scheduler::get_current_slot_for_core(core_id);
+    if slot_index == crate::process::task::INVALID_SLOT as usize {
+        return;
+    }
+
     let rsp: u64;
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) };
-    let (bottom, top) = rsp0_bounds(core_id);
+    let (bottom, top) = task_stack_bounds(slot_index);
     debug_assert!(
         rsp >= bottom.as_u64() && rsp <= top.as_u64(),
-        "RSP {:#x} out of bounds for core {} RSP0 [{:#x}..{:#x}]",
+        "RSP {:#x} out of bounds for task slot {} on core {} [{:#x}..{:#x}]",
         rsp,
+        slot_index,
         core_id,
         bottom.as_u64(),
         top.as_u64()
@@ -200,6 +260,10 @@ impl Gdt {
         let user_data_selector = table.append(Descriptor::user_data_segment());
         let user_code_selector = table.append(Descriptor::user_code_segment());
         let tss_selector = table.append(Descriptor::tss_segment(tss));
+        debug_assert!(kernel_code_selector.0 == KERNEL_CODE_SELECTOR_VALUE);
+        debug_assert!(kernel_data_selector.0 == KERNEL_DATA_SELECTOR_VALUE);
+        debug_assert!(user_data_selector.0 | 3 == USER_DATA_SELECTOR_VALUE);
+        debug_assert!(user_code_selector.0 | 3 == USER_CODE_SELECTOR_VALUE);
         serial_println!("Initialized GDT for core {} with: kernel_code_selector={:#x}, kernel_data_selector={:#x}, 
         user_code_selector={:#x}, user_data_selector={:#x}, tss_selector={:#x}", core_id, kernel_code_selector.0, kernel_data_selector.0, 
         user_code_selector.0, user_data_selector.0, tss_selector.0);

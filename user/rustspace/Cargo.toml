@@ -33,6 +33,34 @@ path = "src/bin/fs_test.rs"
 name = "memstress"
 path = "src/bin/memstress.rs"
 
+[[bin]]
+name = "regprobe"
+path = "src/bin/regprobe.rs"
+
+[[bin]]
+name = "spinner"
+path = "src/bin/spinner.rs"
+
+[[bin]]
+name = "busyloop"
+path = "src/bin/busyloop.rs"
+
+[[bin]]
+name = "yieldloop"
+path = "src/bin/yieldloop.rs"
+
+[[bin]]
+name = "worker"
+path = "src/bin/worker.rs"
+
+[[bin]]
+name = "sleeper"
+path = "src/bin/sleeper.rs"
+
+[[bin]]
+name = "pingpong"
+path = "src/bin/pingpong.rs"
+
 [dependencies.lazy_static]
 version = "1.5"
 features = ["spin_no_std"]

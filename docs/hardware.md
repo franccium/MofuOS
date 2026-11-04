@@ -33,10 +33,12 @@ struct GuardedKernelStack { guard: [u8; 4096], stack: [u8; 32768] } // 36 KiB = 
 static mut RSP0_STACKS:      [GuardedKernelStack; MAX_CORES] // 4 * 36 KiB = 144 KiB
 static mut IST0_STACKS:      [GuardedKernelStack; MAX_CORES] // 4 * 36 KiB = 144 KiB
 static mut SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES] // 4 * 36 KiB = 144 KiB
+static mut KERNEL_TASK_STACKS: [GuardedKernelStack<65536>; MAX_TASKS] // 64 * 68 KiB, one per task slot, ring 3 entries land here
 
-#[repr(C, align(4096))]
-struct GuardedSyscallSlot { guard: [u8; 4096], data: PerCoreSyscallData } // 72 KiB
-static mut SYSCALL_SLOTS: [GuardedSyscallSlot; MAX_CORES] // 4 * 72 KiB = 288 KiB
+#[repr(C, align(64))]
+struct PerCoreSyscallData { stack_top: u64, user_rsp_scratch: u64 }
+// there is no per-core syscall stack, syscalls run on KERNEL_TASK_STACKS[slot]
+static mut SYSCALL_DATA: [PerCoreSyscallData; MAX_CORES] // stack_top + user_rsp_scratch, KERNEL_GS_BASE
 
 static mut PER_CORE_GDT: [Gdt; MAX_CORES]
 static mut PER_CORE_TSS: [UnsafeCell<TaskStateSegment>; MAX_CORES]
@@ -72,7 +74,7 @@ STAR MSR userspace: CS = 0x23 (0x20 | 3), SS = 0x1B (0x18 | 3).
 
 `DOUBLE_FAULT_IST_INDEX = 0`
 
-Helpers `gdt::rsp0_bounds/ist0_bounds/scheduler_bounds(core_id) -> (VirtAddr bottom, VirtAddr top)`, `gdt::assert_rsp_in_bounds(core_id)` (`mov rsp` `debug_assert!` in `timer_interrupt_handler` when `RPL==Ring3`), `gdt::install_guard_pages(&mut FrameAllocator)` called after `init_heap` in `boot_common::bsp_early_init` (also `syscall::install_syscall_guard_pages`).
+Helpers `gdt::rsp0_bounds/ist0_bounds/scheduler_bounds(core_id) -> (VirtAddr bottom, VirtAddr top)`, `gdt::task_stack_bounds/task_stack_top/task_guard_page(slot)`, `gdt::assert_rsp_in_task_stack(core_id)` (`debug_assert!` that rsp is inside the stack of the running task, in `timer_interrupt_handler` for `RPL==Ring3` and in `handle_syscall_inner`), `gdt::set_privilege_stack_top(core_id, top)` (TSS RSP0, written on every dispatch), `gdt::install_guard_pages(&mut FrameAllocator)` called after `init_heap` in `boot_common::bsp_early_init` (core stacks and all task stacks). The per-core RSP0 stack is only the RSP0 of an idle core.
 
 ### init_core_gdt(core_id: u8)
 
@@ -138,7 +140,7 @@ Timer interrupt vector: `0x20` (typical; check IDT setup in interrupts.rs).
 
 On each tick:
 - Increment `SYSTEM_TICKS`.
-- Call `SCHEDULER.lock().on_timer_tick(core_id)`.
+- Call `scheduler::on_timer_tick(core_id)` (cpu_ticks, due sleeping_tasks, slice accounting, no run queue lock except for sleeping_tasks).
 - Re-arm TSC-Deadline.
 
 ### LAPIC

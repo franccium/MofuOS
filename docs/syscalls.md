@@ -1,7 +1,7 @@
 # MofuOS — Syscall Reference & Ring 3 -> Ring 0 Context Switch
 
 > Canonical reference for all syscalls. Source of truth is `kernel/src/process/syscall.rs:66-108` (`SyscallNumber`) and `user/rustspace/src/lib.rs:14-48` (wrappers). This doc documents the hardware mechanism and every implemented number.
-> Last updated: 2026-08-21 — covers File IO (20-28), File Cache (30-35), `CreateCircularBuffer (600)`, `GetWindowInfo (16)`, `GetCpuInfo (970)`.
+> Last updated: 2026-11-04 — covers File IO (20-28), File Cache (30-35), `CreateCircularBuffer (600)`, `GetWindowInfo (16)`, `GetCpuInfo (970)`, scheduler rework (`TerminateProcess (1)` as a request, `SleepMs (990)`, `WaitForInput (991)`, `FutexWait/Wake (992/993)`, `Yield (998)`, `Exit (999)`).
 
 ---
 ## 1. Hardware Mechanism: SYSCALL / SYSRET
@@ -20,7 +20,7 @@ STAR  = (0x10 << 48) | (0x08 << 32)  // MSR 0xC0000081
   // SYSRET then does: CS = (STAR[63:48]+16)|3 = 0x23, SS = (STAR[63:48]+8)|3 = 0x1B
 LSTAR = syscall_handler as u64       // MSR 0xC0000082 — Ring0 entry RIP
 SFMASK = 1 << 9                      // MSR 0xC0000084 — mask IF on entry (see 1.4)
-KERNEL_GS_BASE = &PER_CORE_SYSCALL[core_id] as u64 // MSR 0xC0000102
+KERNEL_GS_BASE = &SYSCALL_DATA[core_id] as u64 // MSR 0xC0000102
 ```
 
 GDT layout `gdt.rs:5-6` (per-core):
@@ -53,80 +53,62 @@ asm: mov r10, rcx; syscall
 ret: rax = return value, rcx/r11/r10 clobbered
 ```
 
-### 1.3 Kernel entry: `syscall_handler` naked asm (`syscall.rs:154-206`)
+### 1.3 Kernel entry: `syscall_handler` naked asm (`syscall.rs`)
 
-Per-core 64 KiB stack `PER_CORE_SYSCALL[core_id]: PerCoreSyscallData` — `stack_top` is first field (`#[repr(C)]`), cache-line `align(64)`, pointed to by `KERNEL_GS_BASE`. Hot path uses `swapgs` + `gs:0`:
+The handler runs on the kernel stack of the task that made the call (`gdt::KERNEL_TASK_STACKS[slot]`, 64 KiB, unmapped guard page below). `run_task` stores its 16 byte aligned top in `SYSCALL_DATA[core].stack_top` before every dispatch. `PerCoreSyscallData` is `#[repr(C, align(64))]`, `stack_top` first, then `user_rsp_scratch`, and `KERNEL_GS_BASE` points at it. Hot path uses `swapgs` + `gs:0`:
 
 ```asm
-swapgs              // GS: user -> kernel (now GS points to PerCoreSyscallData)
-mov r15, rsp        // save user RSP in r15 (callee-saved, survives handler)
-mov rsp, gs:0       // load this core's kernel stack top (PER_CORE_SYSCALL[core].stack_top)
-swapgs              // restore user GS (done with gs:0, no further GS use)
+swapgs                          // GS: user -> kernel (now GS points to PerCoreSyscallData)
+mov gs:[user_rsp_scratch], rsp  // IF is off (SFMASK), so the per-core scratch cannot be clobbered
+mov rsp, gs:0                   // kernel stack top of the running task
+push qword ptr gs:[user_rsp_scratch]  // user_rsp
+swapgs                          // restore user GS
 
-push r15            // user_rsp
 push rcx            // user_rip (CPU saved)
 push r11            // rflags (CPU saved)
 push rax            // syscall_num  — BUG-08 fix: must not be omitted
 push rdi; push rsi; push rdx; push r10; push r8; push r9  // args
-push rbx; push rbp; push r12; push r13; push r14           // callee-saved
+push rbx; push rbp; push r12; push r13; push r14; push r15 // callee-saved
 
-mov rdi, rsp        // rdi = *mut SyscallFrame
-call handle_syscall_inner  // Rust, interrupts re-enabled inside (sti)
+mov rdi, rsp        // rdi = *mut SyscallFrame, 16 byte aligned (16 pushes on an aligned top)
+call handle_syscall_inner  // sti, dispatch_syscall, cli, exit_to_user()
 
-pop r14; pop r13; pop r12; pop rbp; pop rbx
+cli
+pop r15; pop r14; pop r13; pop r12; pop rbp; pop rbx
 pop r9; pop r8; pop r10; pop rdx; pop rsi; pop rdi
 add rsp, 8          // skip syscall_num slot — rax already holds return value
-pop r11; pop rcx; pop r15
-mov rsp, r15        // restore user RSP
+pop r11; pop rcx
+pop rsp             // user stack
 sysretq             // RCX->RIP, R11->RFLAGS, CS=0x23 SS=0x1B, CPL=3
 ```
 
-`SyscallFrame` `syscall.rs:133-151` (`#[repr(C)]`, lowest address first):
+`SyscallFrame` (`#[repr(C)]`, lowest address first):
 
 ```
-r14, r13, r12, rbp, rbx          // callee-saved
+r15, r14, r13, r12, rbp, rbx     // callee-saved
 arg6(r9), arg5(r8), arg4(r10), arg3(rdx), arg2(rsi), arg1(rdi)
 syscall_num(rax)
-rflags(r11), user_rip(rcx), user_rsp(r15)
+rflags(r11), user_rip(rcx), user_rsp
 ```
 
-Pop order skips `syscall_num` with `add rsp,8` so `rax` (return value from `handle_syscall_inner`) is not overwritten — `process.md:403-411` documents this.
+Pop order skips `syscall_num` with `add rsp,8` so `rax` (return value from `handle_syscall_inner`) is not overwritten.
 
-### 1.4 Interrupt safety & Intel SYSRET SS bug (BUG-09)
+A syscall that blocks or yields keeps its frame on its own kernel stack, `core_run_scheduling(core_id)` switches to the scheduler loop and the task resumes inside `handle_syscall_inner`. Every user register comes back from the frame, so nothing of the kernel leaks to user mode and nothing is lost across a yield.
 
-**SFMASK = 1<<9 (IF).** On `SYSCALL` entry `IF` is cleared, so timer (`APIC TSC-Deadline`, 10ms, vector 0x20) cannot fire while handler runs with kernel `SS=0x10` but still on kernel stack. At top of `handle_syscall_inner:211` the kernel does `sti` — long syscalls become preemptible again. Before `return_to_scheduler()` in `Yield`/`Exit` it does `cli` to avoid timer firing during `mov rsp,[slot]; ret` unwind.
+### 1.4 Interrupt safety & the SYSRET SS value (BUG-09)
 
-**Intel SYSRET SS bug:** Intel `SYSRETQ` sets `SS = STAR[63:48]+8` without ORing `RPL=3`, leaving `SS=0x18` (`RPL=0`) in userspace. `qemu64` follows Intel. User then runs with `SS=0x18`. When timer fires in Ring3 the interrupt frame captures `SS=0x18`; compiler `iretq` back to Ring3 faults `#GP` because `iretq` requires `SS.RPL == CS.RPL (3)`. Fix `interrupts.rs:timer_interrupt_handler`:
+**SFMASK = 1<<9 (IF).** On `SYSCALL` entry `IF` is cleared, so the timer (`APIC TSC-Deadline`, 10ms, vector 0x20) cannot fire while the handler is switching stacks, and the per-core `user_rsp_scratch` is safe. At top of `handle_syscall_inner` the kernel does `sti`, long syscalls take interrupts again, and it does `cli` before the exit to ring 3.
 
-- `SFMASK`+`sti` as above so timer never fires with kernel SS.
-- If `stack_frame.code_segment.rpl()==Ring3` and work waiting → `return_to_scheduler()` (bypasses `iretq` entirely).
-- If Ring3 but nothing waiting → patch `*(stack_frame_ptr+4) = 0x1B` (SS slot at offset +32: `RIP+0, CS+8, RFLAGS+16, RSP+24, SS+32`) before `iretq`.
+**SS after `sysretq`:** under KVM with `qemu64` (checked again for the scheduler rework) an interrupt in ring 3 right after a `sysretq` pushes `SS=0x18`, RPL 0, and an `iretq` with that frame faults `#GP` because `SS.RPL != CS.RPL`. So `trap::interrupt_return_path` writes the user data selector (`0x1B`) into the SS slot of the `TrapFrame` for every interrupt that came from ring 3, before it pops the registers and `iretq`s.
 
-AMD does OR `RPL=3`; bug is Intel-specific but QEMU `qemu64` is Intel-mode.
+### 1.5 Return paths & scheduler integration
 
-### 1.5 Return paths & scheduler integration (`scheduler.rs:run_on_core_loop`)
+Both ways back to ring 3 end in the code that took the task into the kernel, there is no special resume path:
 
-AP `run_on_core_loop(core_id)` saves kernel `RSP` before `jmp jump_to_userspace`:
+- syscall: `exit_to_user()` at the end of `handle_syscall_inner`, then the `sysretq` epilogue above.
+- interrupt from ring 3: the stub calls the Rust handler, then `interrupt_return_path` (SS fix + `exit_to_user()`), pops all 15 general registers of the `TrapFrame` and `iretq`s. Interrupts from ring 0 just return, the kernel is not preemptible.
 
-```asm
-lea rax, [rip+2f]; push rax        // return label address
-mov [KERNEL_RSP_ON_CORE[core_id]], rsp  // save (kernel PML4 still active)
-mov rcx, cr3  // user PML4 phys — pinned to rcx (not rax!) — BUG-02:4 fix
-jmp jump_to_userspace  // builds iretq frame SS/RSP/RFLAGS/CS/RIP, iretq -> Ring3
-2:  // return_to_scheduler() ret lands here
-mark_core_idle(core_id)
-if !terminated { re-enqueue(pid, prio) }
-```
-
-`execution.rs:jump_to_userspace(rip,rsp,rflags)` does `cli; mov ds/es/fs/gs=user_data; push SS,RSP,RFLAGS,CS,RIP; iretq` — `rflags` is `0x202` on first entry, saved `frame.rflags` on resume (Yield/preemption).
-
-`return_to_scheduler(): !` (`scheduler.rs:244`):
-
-```rust
-mov rsp, KERNEL_RSP_ON_CORE[core_id]; ret  // pops pushed label, resumes loop at 2:
-```
-
-Called from `sys_yield` (998), `sys_exit` (999), and `timer_interrupt_handler` preemption. Callee disables interrupts (`cli`) before calling.
+`exit_to_user()` runs with interrupts off and loops: if the task has a pending kill it calls `exit_current`; if `CORE_SHOULD_BE_RESCHEDULED` is set it calls `core_run_scheduling(core_id)` (it comes back here when it runs again); else it returns. The first entry of a new task goes through `task_first_entry`, which does the same kill check and then pops a zeroed `TrapFrame` and `iretq`s. See `docs/process.md` (Scheduler) for `core_run_scheduling(core_id)`, `switch_context` and the scheduler loop.
 
 ### 1.6 Pointer validation
 
@@ -140,7 +122,7 @@ Return convention: success = documented value, error = `u64::MAX` (or `FileDescr
 | Num | Name | Args (regs) | Return | Impl | Notes |
 |-----|------|-------------|--------|------|-------|
 | 0 | `CreateProcess` | `rdi=path_ptr, rsi=path_len, rdx=name_ptr, r10=name_len` | `0` ok, `MAX` err | **partial** | Parses `ODYS_ELF` (`elf_loader.rs:ODYS_ELF`, `include_bytes!` fallback) and calls `PROCESS_MANAGER.create_process_from_elf(0, &info, "proc1", 5)`. `path`/`name` args are logged but not used to load from FS — FS load is TODO `ISSUE-P8`. |
-| 1 | `TerminateProcess` | — | `MAX` | no | stub, `_ => MAX` |
+| 1 | `TerminateProcess` | `rdi=pid, rsi=exit_code:i32` | `0` ok, `MAX` denied or no such task | yes | Allowed for self, a child, or from arche. Self: `exit_current`, never returns. Another process: `task::request_kill` sets the kill flag, wakes it if blocked, IPIs its core, and returns `0` at once. The target exits the next time it returns to ring 3, so the call does not mean the target is gone. Poll the process state or its exit code. |
 | 2 | `Write` | `rdi=fd(1/2), rsi=buf, rdx=count` | `count` | yes | `fd==1/2` → COM2 `serial2_print!("[pid=N] s")` routed via `log_splitter.py` to `userspace_pid_N.txt`; else `serial_println_core!`. Validates UTF-8 for logging, returns `count` even if invalid. |
 | 3 | `Read` | — | `MAX` | no | stub |
 | 4 | `GetLine` | — | `MAX` | no | stub |
@@ -172,10 +154,14 @@ Return convention: success = documented value, error = `u64::MAX` (or `FileDescr
 | 600 | `CreateCircularBuffer` | `rdi=size_bytes:usize, rsi=page_flags:u32, rdx=info_ptr:*mut CircularBufferInfo` | `0` ok, `MAX` err | yes | **New — missing from `process.md`.** `CircularBuffer::map_for_user` (`circular_buffer.rs:36-79`): `data_size=align_up(size,PAGE_SIZE)`, `total_virt_size=2*data_size`. Allocates `data_size/PAGE_SIZE` frames, maps each frame **twice**: at `virt_view_base + i*PAGE` and `virt_second_view_base = virt_view_base + data_size + i*PAGE` with `PRESENT|USER_ACCESSIBLE|NO_EXECUTE` plus `WRITABLE` if requested (other user flags are ignored). The first view owns the frames, the second only borrows them. `size_bytes == 0` or a size whose two views do not fit the reservation window fails. Returns `CircularBufferInfo { virtual_base, view_size=data_size, total_virtual_size }` via `*info_ptr` (`info_ptr` is validated with `validate_user_ptr`). Enables contiguous wrap-around read/write without modulo branch; `total_virt_size` is contiguous `2*data_size` alias. Uses `ProcessMemoryLayout::allocate_virtual_range` (`PROCESS_USER_VADDR_ALLOC_START=0x1000_0000, MAX=0x5000_0000`). |
 | 970 | `GetCpuInfo` | `rdi=buf_ptr:*mut CpuInfoFlat, rsi=buf_len:usize` | `0` ok, `2` err | yes | **New — missing from `process.md`.** Validates `buf_ptr`. Reads `get_cpu_info_for_core(get_current_core_id())`, `TSC_FREQUENCY_HZ`, `BOOT_TSC`, `TOTAL_CORE_COUNT`. Fills `CpuInfoFlat {vendor,family,model,stepping,display_family,display_model,cache_line_size,apic_id,features:TSC|APIC|... bits, tsc_frequency_hz, boot_tsc, max_cpuid_leaf, max_extended_cpuid_leaf, core_count:u8}` (`cpuinfo.rs:49-65`, `syscall.rs:1129-1152`). Rust wrapper `sys_get_cpu_info(&mut CpuInfoFlat)->bool` checks `ret==0`. |
 | 997 | `GetPID` | — | `pid:u64` | yes | `scheduler::get_current_process_for_core(core_id)` — `CURRENT_PROCESS_ON_CORE[core_id]`. No args. Rust alias `SYS_ECHO`/`SYS_GET_PID` both 997. |
-| 998 | `Yield` | — | `0` (never returns directly) | yes | Saves `frame.user_rip/rsp/rflags` into `process.execution_context`, `cli`, `return_to_scheduler()` → scheduler re-enqueues `pid` and runs next. On resume `jump_to_userspace(rip,rsp,rflags)` sysrets to after `syscall` instruction. Cooperative. See `ISSUE-P9` tight-loop note. |
-| 999 | `Exit` | `rdi=exit_code:i32` | `!` | yes | `PROCESS_MANAGER.terminate_process(pid, code, false)` (orphans children to arche `0`), `cli`, `return_to_scheduler()` → scheduler sees `Terminated`, logs, does not re-enqueue. Noreturn. No `wait()` yet (`ISSUE-P3`). |
+| 990 | `SleepMs` | `rdi=duration_ms` | `0` | yes | `wait::sleep_current_task_ms`: the task is put in the sleeper list of its core and blocked, the core's timer tick wakes it once `tsc_timestamp_us() >= deadline`, so it wakes at 10 ms granularity and never earlier. It uses no cpu while asleep. A kill request wakes it early. |
+| 991 | `WaitForInput` | — | `0` | yes | Blocks until a visible window of the caller has an event waiting in its `EventBuffer` (or a kill is requested). `compositor.process_input_events` calls `INPUT_WAIT_QUEUE.wake_all()` after it forwarded events. Waiters recheck their own windows. Rust `EventReader::read_blocking` uses it. |
+| 992 | `FutexWait` | `rdi=word_ptr:*const u32, rsi=expected:u32` | `0`, `MAX` for a bad pointer | yes | Blocks while `*word_ptr == expected`, rechecked after the task joined `FUTEX_WAIT_QUEUE`, so a wake in between is not lost. Returns on any wake, callers loop. Single global queue, the address is not a key. |
+| 993 | `FutexWake` | — | `0` | yes | Wakes every `FutexWait` waiter. |
+| 998 | `Yield` | — | `0` | yes | `scheduler::core_yield_executing_tasks(core_id)`: queues the task in the `expired` bank and lets the other runnable tasks of the core run; returns at once when there is none. Returns through the normal syscall return with every register restored. |
+| 999 | `Exit` | `rdi=exit_code:i32` | `!` | yes | `task::exit_current`: kernel CR3, destroy windows, `terminate_process(pid, code, false)` (frees the address space, orphans children to arche `0`), slot `Dead`, `core_run_scheduling(core_id)`. The scheduler loop frees the slot after it left the dead task's stack. Noreturn. No `wait()` yet (`ISSUE-P3`). |
 | 996 | `GetProcessInfo` | — | `MAX` | no | stub `_ => MAX` |
-| — | `Read (3), GetLine (4), LoadFile (8), UnloadFile (9), TerminateProcess (1)` | — | `MAX` | no | stubs, return `MAX`. |
+| — | `Read (3), GetLine (4), LoadFile (8), UnloadFile (9)` | — | `MAX` | no | stubs, return `MAX`. |
 
 Unlisted numbers → `match _ => u64::MAX` `syscall.rs:1154`.
 
@@ -192,23 +178,22 @@ Wire types that must match kernel <-> `user/rustspace/src/lib.rs`:
 ---
 ## 3. Context Switch Details (userspace ↔ kernel ↔ scheduler)
 
-### Userspace -> Kernel -> Userspace roundtrip (no preemption)
+### Userspace -> Kernel -> Userspace roundtrip
 
 1. User `syscall` → CPU saves `RCX/R11`, clears `IF`, jumps to `LSTAR`.
-2. Handler saves user `RSP/RIP/RFLAGS` + args + callee-saved, `mov rdi,rsp; call handle_syscall_inner; sti` inside.
-3. Handler restores callee-saved, `mov rsp,r15; sysretq` → user `RIP=RCX, RFLAGS=R11`.
+2. Handler switches to the task kernel stack, pushes the `SyscallFrame`, `call handle_syscall_inner`: `sti`, `dispatch_syscall`, `cli`, `exit_to_user()`.
+3. Handler pops the frame, `pop rsp; sysretq` → user `RIP=RCX, RFLAGS=R11`.
 
-For `Yield`/`Exit` the handler never reaches `sysretq` — it calls `return_to_scheduler()` which `ret`s to `run_on_core_loop` label `2:`.
+`Yield`, `SleepMs`, `WaitForInput` and `FutexWait` call `core_run_scheduling(core_id)` from inside step 2 and the task resumes there when it runs again, possibly on another core (only tasks that are queued migrate, a running or blocked task stays). `Exit` never returns.
 
 ### Preemption (timer IRQ, Ring3)
 
-`interrupts.rs:timer_interrupt_handler` (TSC-Deadline, 10ms):
+`interrupts.rs:timer_interrupt_stub` → `timer_interrupt_handler(&mut TrapFrame)` (TSC-Deadline, 10ms):
 
-- Increments `SYSTEM_TICKS`, re-arms deadline.
-- If `stack_frame.code_segment.rpl()==Ring0` → just EOI + return (no preempt).
-- If Ring3: saves `instruction_pointer/stack_pointer/cpu_flags` from `InterruptStackFrame` into `process.execution_context` (via `PROCESS_MANAGER`), `interrupt_over()` (LAPIC EOI), then `return_to_scheduler()` → scheduler picks next `PID` (priority 0-7 FIFO within level `scheduler.rs:188-193`). Resumed process re-enters via `jump_to_userspace(rip,rsp,rflags)` with saved `rflags`.
+- Increments `SYSTEM_TICKS` (core 0), re-arms the deadline, `scheduler::on_timer_tick(core)`, EOI.
+- `interrupt_return_path`: ring 0 → return, no preemption. Ring 3 → SS fix, then `exit_to_user()`, which calls `core_run_scheduling(core_id)` when the slice ran out and another task waits (`CORE_SHOULD_BE_RESCHEDULED`). The interrupted registers are in the `TrapFrame` on the task's kernel stack and come back by the normal pops and `iretq`. The FPU image is saved by `core_run_scheduling(core_id)`.
 
-This is why `SFMASK` masks `IF` and `handle_syscall_inner` does `sti` — timer can preempt long syscalls; otherwise tight `sys_write` loop (ISSUE-P9) starves.
+The reschedule IPI (vector `0xF0`) and the keyboard and mouse interrupts use the same stub and return path.
 
 ---
 ## 4. Userspace Wrappers
@@ -223,6 +208,7 @@ Build notes: `process.md:Userspace Test Program` still references old `user/prog
 
 - `CreateProcess` hardcodes `ODYS_ELF` — wire to Sirius FS (`ISSUE-P8`, `action_items.md:A2-6`).
 - `FileDescriptor` no per-fd offset (removed) — offset is per-call arg; update `process.md:361-372` docstring.
+- `FutexWait` reads the user word with a plain volatile load, a bad but range-valid pointer faults the kernel (same gap as the other pointer syscalls).
 - `CreateCircularBuffer` now validates `info_ptr` (written with `write_unaligned`) and normalizes the flags.
 - `directory_children` never populated — cache hints 32/33 dead (`A0-3`).
 - No `wait()`/`get_process_info(996)` — exit code not propagated (`ISSUE-P3`).

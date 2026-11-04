@@ -299,7 +299,7 @@ memory::get_user_mem_mgr()    -> &'static UserMemoryManager
   reclamation: boots via `boot_common::bsp_early_init` + `init_shared_state`, waits for
   APs, snapshots `free_frame_count` and the frames in use (`allocated_bump_frames`, which is
   frames handed out minus the free list), creates `memstress` ELF (`user/rustspace/src/bin/memstress.rs`
-  4×528384), polls `PROCESS_MANAGER`/`SCHEDULER` for `Terminated`, asserts `free` reclaimed,
+  4×528384), polls `PROCESS_MANAGER`/`scheduler::is_pid_queued` for `Terminated`, asserts `free` reclaimed,
   the frames in use did not grow, the free list has no duplicate frame, and `cleanup_dead`
   removes PID.
 - `kernel/src/bin/test_usermem_layout.rs` drives `ProcessMemoryLayout` directly: heap growths

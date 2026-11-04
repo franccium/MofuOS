@@ -25,13 +25,12 @@ This is bare-metal OS code. Unsafe is pervasive and necessary. Rules to follow:
    memory from the kernel. Physical address → virtual: `phys + HHDM_OFFSET`.
    Never dereference a physical address directly.
 
-3. Never hold a `spin::Mutex` lock across `jump_to_userspace`. That function is
-   `-> !` (noreturn) and any held lock is held forever. Pattern: extract needed
-   data from a lock, drop the lock, then jump.
+3. Never hold a lock across `core_run_scheduling(core_id)`, `block_current_task_until_event` or anything else that can switch
+   tasks. A task that sleeps with a lock held blocks every core that wants the lock.
+   Pattern: extract needed data from a lock, drop the lock, then block.
 
-4. Never hold `PROCESS_MANAGER` across `jump_to_userspace` — the syscall handler
-   acquires PROCESS_MANAGER, causing a deadlock if another CPU holds it while blocked
-   in userspace.
+4. Never hold `PROCESS_MANAGER` while blocking — the syscall handler of every
+   other task acquires it, so one blocked holder stalls the whole system.
 
 5. Statics mutated after init (`static mut`) should be indexed by core_id where
    per-core state is needed (e.g., `PER_CORE_GDT[core_id]`).
@@ -41,7 +40,7 @@ This is bare-metal OS code. Unsafe is pervasive and necessary. Rules to follow:
 
 ## Naming Conventions
 
-- Kernel globals: `UPPER_SNAKE_CASE` statics (e.g., `SCHEDULER`, `CORE_POOL`,
+- Kernel globals: `UPPER_SNAKE_CASE` statics (e.g., `CORE_RUN_QUEUES`, `CORE_POOL`,
   `FRAME_ALLOCATOR`, `PROCESS_MANAGER`).
 - Constants: `UPPER_SNAKE_CASE` (e.g., `HHDM_OFFSET`, `MAX_CORES`, `HEAP_POINTER`).
 - Types: `PascalCase`. Traits: `PascalCase`.
@@ -71,7 +70,7 @@ Do not use `println!` or `print!` — there is no std and no VGA text mode handl
 
 Custom no-std implementations in `data_structures/`:
 - `Vec<T>` — heap-backed growable array with manual capacity management
-- `Dequeue<T>` — double-ended queue used by scheduler priority queues
+- `Dequeue<T>` — double-ended queue (the run queues no longer use it, they are intrusive lists through `TaskSlot::next`)
 
 Prefer these over `alloc::vec::Vec` inside the kernel for consistency. In some places
 `alloc::vec::Vec` is used directly (ELF loader, compositor, filesystem) — both are fine,
@@ -99,15 +98,17 @@ Lock hierarchy (acquire in this order to avoid deadlock):
 1. Compositor (when needed)
 2. `CORE_POOL`
 3. `PROCESS_MANAGER`
-4. `SCHEDULER`
+4. Run queue of one core (`IrqMutex`, never two at once) and wait queues (`IrqMutex`)
 5. `FRAME_ALLOCATOR` (`USER_MEMORY_MANAGER` has no lock, it is a `&'static` from a `Once`)
 6. `SERIAL1` / `SERIAL2` (grabbed briefly, interrupts disabled)
 
 Window cleanup on process exit (`destroy_windows_of_process`) takes the compositor and then
 `PROCESS_MANAGER`, so it runs before `PROCESS_MANAGER` is locked by the exit and kill paths.
 
-Never hold SCHEDULER while acquiring PROCESS_MANAGER (reverse would deadlock during
-`terminate_process` which acquires PM, called from scheduler context).
+Never hold a run queue lock while acquiring PROCESS_MANAGER. Data that an interrupt handler
+touches (run queues, wait queues) is behind `IrqMutex`, which keeps interrupts off while it is held.
+A plain `spin::Mutex` that an interrupt handler also takes deadlocks the core (the LAPIC address
+lock did).
 
 Compositor uses `RwLock<Vec<Window>>` — reads are concurrent, writes (create/destroy)
 are exclusive.
@@ -156,13 +157,12 @@ the blanket suppressor will not report it.
 ## Process / Thread Creation Invariant
 
 When creating a new process:
-1. Push `Process` to `PROCESS_MANAGER.processes` Vec.
-2. Push `ThreadGroup` to `PROCESS_MANAGER.thread_groups` Vec.
-3. **Only then** enqueue PID in `SCHEDULER`.
+1. Allocate the task slot and build its first-entry stack (`task::init_task_stack`).
+2. Push `Process` to `PROCESS_MANAGER.processes` Vec.
+3. **Only then** make the slot `Ready` and queue it (`scheduler::core_enqueue_ready_task`).
 
-This ordering is required. The AP core scheduler loop calls `get_process(pid)`
-immediately after dequeuing. Breaking this ordering causes a use-after-free / invalid
-memory access.
+This ordering is required. An AP core can dequeue the task the instant it is queued and its
+first syscall looks the process up with `get_process(pid)`.
 
 ## Pixel Format
 

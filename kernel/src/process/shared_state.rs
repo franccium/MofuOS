@@ -30,9 +30,13 @@ const PROGRAM_SHARED_DATA_INDEX: usize = 0;
 pub const EVENT_BUFFER_ADDR: usize = 0x0000_0007_0000_0000;
 pub const PROGRAM_SHARED_DATA_ADDR: usize = EVENT_BUFFER_ADDR + PAGE_SIZE;
 
+pub const TEST_COUNTER_COUNT: usize = 16;
+
 #[repr(C, align(4096))]
 pub struct ProgramSharedDataBuffer {
     pub focused_window_id: AtomicU32,
+    /// Scratch counters the kernel integration tests use to coordinate user programs
+    pub test_counters: [AtomicU32; TEST_COUNTER_COUNT],
 }
 
 pub static SHARED_STATE: spin::Once<Mutex<SharedState>> = spin::Once::new();
@@ -94,11 +98,13 @@ impl SharedState {
     ) -> Result<(), MapToError<Size4KiB>> {
         for i in 0..SHARED_REGION_COUNT {
             let region = self.regions[i];
-            serial_println_core!(
-                "map_into_process: Mapping {} to user vaddr {:#x}",
-                region.region_type as u8,
-                region.default_user_vaddr.as_u64()
-            );
+            if crate::process::PROCESS_DEBUG_PRINT {
+                serial_println_core!(
+                    "map_into_process: Mapping {} to user vaddr {:#x}",
+                    region.region_type as u8,
+                    region.default_user_vaddr.as_u64()
+                );
+            }
 
             memory_layout.map_frames(
                 region.default_user_vaddr,

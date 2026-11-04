@@ -7,7 +7,7 @@ extern crate alloc;
 use core::sync::atomic::Ordering;
 use kernel::process::elf_loader::{ElfLoadInfo, MEMSTRESS_ELF};
 use kernel::process::process_manager::PROCESS_MANAGER;
-use kernel::process::scheduler::SCHEDULER;
+use kernel::process::scheduler;
 use kernel::{AP_CORES_READY, MAX_CORES, boot_common, bsp_init, serial_println_core};
 use x86_64::instructions::{hlt, port::Port};
 
@@ -129,7 +129,7 @@ fn test_main() -> ! {
                 break;
             }
             Some((state, _)) => {
-                let queued = SCHEDULER.lock().is_pid_queued(pid);
+                let queued = scheduler::is_pid_queued(pid);
                 serial_println_core!(
                     "test_usermem_reclaim: pid={} state={:?} queued={} waiting...",
                     pid,
@@ -212,7 +212,7 @@ fn test_main() -> ! {
         let mut pm = PROCESS_MANAGER.lock();
         pm.cleanup_dead();
         let still_exists = pm.get_process(pid).is_ok();
-        let still_queued = SCHEDULER.lock().is_pid_queued(pid);
+        let still_queued = scheduler::is_pid_queued(pid);
         if still_exists {
             serial_println_core!("FAIL: pid {} still in PROCESS_MANAGER after cleanup", pid);
             success = false;

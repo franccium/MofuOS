@@ -13,8 +13,8 @@ fn project_root() -> PathBuf {
 
 fn kernel_max_cores(root: &Path) -> u8 {
     let path = root.join("kernel/src/lib.rs");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("can't read {}: {e}", path.display()));
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("can't read {}: {e}", path.display()));
     for line in content.lines() {
         let t = line.trim();
         if t.starts_with("pub const MAX_CORES") {
@@ -108,7 +108,10 @@ fn ensure_limine(root: &Path) {
 }
 
 fn limine_conf_path(root: &Path) -> PathBuf {
-    let candidates = [root.join("limine.conf"), root.join("bootloader/limine.conf")];
+    let candidates = [
+        root.join("limine.conf"),
+        root.join("bootloader/limine.conf"),
+    ];
     for p in &candidates {
         if p.exists() {
             return p.clone();
@@ -180,14 +183,27 @@ fn discover_usertest_bins(root: &Path) -> Vec<String> {
             let entry = entry.ok()?;
             let name = entry.file_name().into_string().ok()?;
             let stem = name.strip_suffix(".rs")?;
-            (stem.starts_with("test_user") || stem.starts_with("test_usermem")).then(|| stem.to_string())
+            (stem.starts_with("test_user") || stem.starts_with("test_usermem"))
+                .then(|| stem.to_string())
         })
         .collect();
     names.sort();
     names
 }
 
-fn build_all_test_kernels(root: &Path, bins: &[String]) {
+/// Splits the --release switch off the test name filters, test kernels then build with the release profile
+fn split_release_flag(args: &[String]) -> (bool, Vec<String>) {
+    let release = args.iter().any(|arg| arg == "--release");
+    let filters = args
+        .iter()
+        .filter(|arg| *arg != "--release")
+        .cloned()
+        .collect();
+
+    (release, filters)
+}
+
+fn build_all_test_kernels(root: &Path, bins: &[String], release: bool) {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root).args([
         "-Z",
@@ -198,13 +214,16 @@ fn build_all_test_kernels(root: &Path, bins: &[String]) {
         "--target",
         "x86_64-unknown-none",
     ]);
+    if release {
+        cmd.arg("--release");
+    }
     for name in bins {
         cmd.args(["--bin", name]);
     }
     run(&mut cmd);
 }
 
-fn package_test_iso(root: &Path, test_name: &str) -> PathBuf {
+fn package_test_iso(root: &Path, test_name: &str, release: bool) -> PathBuf {
     let iso_root = root.join(format!("target/test_iso_root_{test_name}"));
     if iso_root.exists() {
         fs::remove_dir_all(&iso_root).unwrap();
@@ -212,23 +231,58 @@ fn package_test_iso(root: &Path, test_name: &str) -> PathBuf {
     fs::create_dir_all(iso_root.join("boot/limine")).unwrap();
     fs::create_dir_all(iso_root.join("EFI/BOOT")).unwrap();
     let limine = root.join("target/limine");
-    let bin = root.join("target/x86_64-unknown-none/debug").join(test_name);
+    let profile_dir = if release { "release" } else { "debug" };
+    let bin = root
+        .join("target/x86_64-unknown-none")
+        .join(profile_dir)
+        .join(test_name);
     fs::copy(&bin, iso_root.join("boot/kernel")).unwrap();
-    fs::copy(limine_conf_path(root), iso_root.join("boot/limine/limine.conf")).unwrap();
-    for f in ["limine-bios.sys", "limine-bios-cd.bin", "limine-uefi-cd.bin"] {
+    fs::copy(
+        limine_conf_path(root),
+        iso_root.join("boot/limine/limine.conf"),
+    )
+    .unwrap();
+    for f in [
+        "limine-bios.sys",
+        "limine-bios-cd.bin",
+        "limine-uefi-cd.bin",
+    ] {
         fs::copy(limine.join(f), iso_root.join("boot/limine").join(f)).unwrap();
     }
-    fs::copy(limine.join("BOOTX64.EFI"), iso_root.join("EFI/BOOT/BOOTX64.EFI")).unwrap();
-    fs::copy(limine.join("BOOTIA32.EFI"), iso_root.join("EFI/BOOT/BOOTIA32.EFI")).unwrap();
+    fs::copy(
+        limine.join("BOOTX64.EFI"),
+        iso_root.join("EFI/BOOT/BOOTX64.EFI"),
+    )
+    .unwrap();
+    fs::copy(
+        limine.join("BOOTIA32.EFI"),
+        iso_root.join("EFI/BOOT/BOOTIA32.EFI"),
+    )
+    .unwrap();
     let iso = root.join(format!("target/test_{test_name}.iso"));
     run_quiet(Command::new("xorriso").args([
-        "-as", "mkisofs", "-b", "boot/limine/limine-bios-cd.bin",
-        "-no-emul-boot", "-boot-load-size", "4", "-boot-info-table",
-        "--efi-boot", "boot/limine/limine-uefi-cd.bin",
-        "-efi-boot-part", "--efi-boot-image", "--protective-msdos-label",
-        iso_root.to_str().unwrap(), "-o", iso.to_str().unwrap(),
+        "-as",
+        "mkisofs",
+        "-b",
+        "boot/limine/limine-bios-cd.bin",
+        "-no-emul-boot",
+        "-boot-load-size",
+        "4",
+        "-boot-info-table",
+        "--efi-boot",
+        "boot/limine/limine-uefi-cd.bin",
+        "-efi-boot-part",
+        "--efi-boot-image",
+        "--protective-msdos-label",
+        iso_root.to_str().unwrap(),
+        "-o",
+        iso.to_str().unwrap(),
     ]));
-    run_quiet(Command::new(limine.join("limine")).arg("bios-install").arg(&iso));
+    run_quiet(
+        Command::new(limine.join("limine"))
+            .arg("bios-install")
+            .arg(&iso),
+    );
     fs::remove_dir_all(&iso_root).unwrap();
     iso
 }
@@ -271,7 +325,8 @@ fn save_test_logs(root: &Path, test_name: &str, serial: &str, com2_raw_path: Opt
             core_writers[i] = Some(f);
         }
     }
-    let mut pid_writers: std::collections::HashMap<u32, std::fs::File> = std::collections::HashMap::new();
+    let mut pid_writers: std::collections::HashMap<u32, std::fs::File> =
+        std::collections::HashMap::new();
     for line in ansi_re.lines() {
         // core split: ^[Core N
         if line.starts_with("[Core ") {
@@ -288,7 +343,10 @@ fn save_test_logs(root: &Path, test_name: &str, serial: &str, com2_raw_path: Opt
             let entry = pid_writers.entry(pid).or_insert_with(|| {
                 std::fs::File::create(test_dir.join(format!("userspace_pid_{}.txt", pid))).unwrap()
             });
-            let cleaned = line.replacen(&format!("[pid={}]", pid), "", 1).trim().to_string();
+            let cleaned = line
+                .replacen(&format!("[pid={}]", pid), "", 1)
+                .trim()
+                .to_string();
             let _ = std::io::Write::write_all(entry, format!("{}\n", cleaned).as_bytes());
         }
     }
@@ -330,22 +388,56 @@ fn parse_pid(line: &str) -> Option<u32> {
     rest[..end].parse().ok()
 }
 
-fn run_test_with_timeout(root: &Path, iso: &Path, ovmf_code: &Path, ovmf_vars: &Path, timeout_secs: &str) -> TestResult {
+fn run_test_with_timeout(
+    root: &Path,
+    iso: &Path,
+    ovmf_code: &Path,
+    ovmf_vars: &Path,
+    timeout_secs: &str,
+) -> TestResult {
     let smp = qemu_smp_arg(root);
     // Prepare test_logs path for COM2 capture (file backend)
     // We don't yet know test_name here, so use generic temp file and let caller handle saving.
     // Keep stdio for COM1, file for COM2 to preserve both.
-    let com2_tmp = root.join("target").join(format!("com2_{}.log", std::process::id()));
+    let com2_tmp = root
+        .join("target")
+        .join(format!("com2_{}.log", std::process::id()));
     let com2_arg = format!("file:{}", com2_tmp.display());
     let out = Command::new("timeout")
         .arg(timeout_secs)
         .arg("qemu-system-x86_64")
-        .args(["-M", "q35", "-accel", "kvm", "-smp", &smp, "-cpu", "qemu64,+tsc-deadline,+apic"])
-        .args(["-drive", &format!("if=pflash,unit=0,format=raw,file={},readonly=on", ovmf_code.display())])
-        .args(["-drive", &format!("if=pflash,unit=1,format=raw,file={}", ovmf_vars.display())])
+        .args([
+            "-M",
+            "q35",
+            "-accel",
+            "kvm",
+            "-smp",
+            &smp,
+            "-cpu",
+            "qemu64,+tsc-deadline,+apic",
+        ])
+        .args([
+            "-drive",
+            &format!(
+                "if=pflash,unit=0,format=raw,file={},readonly=on",
+                ovmf_code.display()
+            ),
+        ])
+        .args([
+            "-drive",
+            &format!("if=pflash,unit=1,format=raw,file={}", ovmf_vars.display()),
+        ])
         .args(["-cdrom", iso.to_str().unwrap()])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
-        .args(["-serial", "stdio", "-serial", &com2_arg, "-display", "none", "-no-reboot"])
+        .args([
+            "-serial",
+            "stdio",
+            "-serial",
+            &com2_arg,
+            "-display",
+            "none",
+            "-no-reboot",
+        ])
         .args(["-m", "256M"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -381,9 +473,21 @@ fn build_user_rust_only(root: &Path) {
         eprintln!("user/rustspace/Cargo.toml not found — nothing to build");
         return;
     }
-    let _ = Command::new("cargo").args(["fmt"]).current_dir(&rustspace_dir).status();
+    let _ = Command::new("cargo")
+        .args(["fmt"])
+        .current_dir(&rustspace_dir)
+        .status();
     let status = Command::new("cargo")
-        .args(["+nightly", "build", "-Z", "build-std=core,alloc", "-Z", "json-target-spec", "--target", "x86_64-user.json"])
+        .args([
+            "+nightly",
+            "build",
+            "-Z",
+            "build-std=core,alloc",
+            "-Z",
+            "json-target-spec",
+            "--target",
+            "x86_64-user.json",
+        ])
         .current_dir(&rustspace_dir)
         .status();
     if let Ok(s) = status {
@@ -395,7 +499,8 @@ fn build_user_rust_only(root: &Path) {
     }
 }
 
-fn run_tests(root: &Path, filters: &[String]) {
+fn run_tests(root: &Path, args: &[String]) {
+    let (release, filters) = split_release_flag(args);
     let all_bins = discover_test_bins(root);
     if all_bins.is_empty() {
         eprintln!("No test binaries found in kernel/src/bin/test_*.rs");
@@ -405,7 +510,10 @@ fn run_tests(root: &Path, filters: &[String]) {
     let bins: Vec<String> = if filters.is_empty() {
         all_bins
     } else {
-        all_bins.into_iter().filter(|name| filters.iter().any(|f| name.contains(f.as_str()))).collect()
+        all_bins
+            .into_iter()
+            .filter(|name| filters.iter().any(|f| name.contains(f.as_str())))
+            .collect()
     };
     if bins.is_empty() {
         eprintln!("No tests matched the given filter(s).");
@@ -414,18 +522,21 @@ fn run_tests(root: &Path, filters: &[String]) {
     ensure_limine(root);
     build_user(root);
     println!("{BOLD}Building test kernels…{RESET}");
-    build_all_test_kernels(root, &bins);
+    build_all_test_kernels(root, &bins, release);
     let (ovmf_code, ovmf_vars) = ovmf(root);
     println!();
     let mut passed_names: Vec<&str> = Vec::new();
     let mut failed_names: Vec<(&str, Option<i32>)> = Vec::new();
     let smp = qemu_smp_arg(root);
-    println!("{BOLD}SMP cores:{RESET} {} (from kernel/src/lib.rs MAX_CORES)", kernel_max_cores(root));
+    println!(
+        "{BOLD}SMP cores:{RESET} {} (from kernel/src/lib.rs MAX_CORES)",
+        kernel_max_cores(root)
+    );
     println!("{BOLD}QEMU smp:{RESET} {}", smp);
     for name in &bins {
         print!("  {BOLD}{name}{RESET} ... ");
         std::io::stdout().flush().unwrap();
-        let iso = package_test_iso(root, name);
+        let iso = package_test_iso(root, name, release);
         let result = run_test(root, &iso, &ovmf_code, &ovmf_vars);
         // Save logs like log_splitter → test_logs/<name>/all.txt + core_N.txt + userspace
         save_test_logs(root, name, &result.serial, None);
@@ -447,7 +558,10 @@ fn run_tests(root: &Path, filters: &[String]) {
                 Some(TEST_FAILED_EXIT) => format!("{} (kernel reported failure)", TEST_FAILED_EXIT),
                 Some(c) => c.to_string(),
             };
-            println!("{RED}FAILED{RESET} (exit code: {code_str}) (log: test_logs/{}/all.txt)", name);
+            println!(
+                "{RED}FAILED{RESET} (exit code: {code_str}) (log: test_logs/{}/all.txt)",
+                name
+            );
             let serial = result.serial.trim();
             if !serial.is_empty() {
                 println!("  {YELLOW}---- serial output ----{RESET}");
@@ -461,7 +575,10 @@ fn run_tests(root: &Path, filters: &[String]) {
     }
     println!();
     if failed_names.is_empty() {
-        println!("{GREEN}{BOLD}test result: ok.{RESET} {} passed; 0 failed (logs in test_logs/)", passed_names.len());
+        println!(
+            "{GREEN}{BOLD}test result: ok.{RESET} {} passed; 0 failed (logs in test_logs/)",
+            passed_names.len()
+        );
     } else {
         println!("{BOLD}tests:{RESET}");
         for name in &passed_names {
@@ -477,7 +594,11 @@ fn run_tests(root: &Path, filters: &[String]) {
             println!("  {RED}FAILED{RESET} {name} (exit code: {code_str})");
         }
         println!();
-        println!("{RED}{BOLD}test result: FAILED.{RESET} {} passed; {} failed", passed_names.len(), failed_names.len());
+        println!(
+            "{RED}{BOLD}test result: FAILED.{RESET} {} passed; {} failed",
+            passed_names.len(),
+            failed_names.len()
+        );
         std::process::exit(1);
     }
 }
@@ -502,7 +623,12 @@ fn cflags() -> Vec<&'static str> {
 
 fn compile_c(src: &Path, out: &Path, extra_flags: &[&str]) {
     let mut cmd = Command::new(cc());
-    cmd.args(cflags()).args(extra_flags).arg("-c").arg(src).arg("-o").arg(out);
+    cmd.args(cflags())
+        .args(extra_flags)
+        .arg("-c")
+        .arg(src)
+        .arg("-o")
+        .arg(out);
     run(&mut cmd);
 }
 
@@ -513,9 +639,21 @@ fn build_user(root: &Path) {
     let rustspace_dir = user_dir.join("rustspace");
     if rustspace_dir.join("Cargo.toml").exists() {
         println!("Building Rust userspace…");
-        let _ = Command::new("cargo").args(["fmt"]).current_dir(&rustspace_dir).status();
+        let _ = Command::new("cargo")
+            .args(["fmt"])
+            .current_dir(&rustspace_dir)
+            .status();
         let status = Command::new("cargo")
-            .args(["+nightly", "build", "-Z", "build-std=core,alloc", "-Z", "json-target-spec", "--target", "x86_64-user.json"])
+            .args([
+                "+nightly",
+                "build",
+                "-Z",
+                "build-std=core,alloc",
+                "-Z",
+                "json-target-spec",
+                "--target",
+                "x86_64-user.json",
+            ])
             .current_dir(&rustspace_dir)
             .status();
         if let Ok(s) = status {
@@ -540,27 +678,57 @@ fn build_iso(root: &Path) {
     let limine = root.join("target/limine");
     let kernel_bin = kernel_bin(root, false);
     if !kernel_bin.exists() {
-        panic!("kernel binary not found at {} - build failed?", kernel_bin.display());
+        panic!(
+            "kernel binary not found at {} - build failed?",
+            kernel_bin.display()
+        );
     }
     fs::copy(&kernel_bin, iso_root.join("boot/kernel")).unwrap();
-    fs::copy(limine_conf_path(root), iso_root.join("boot/limine/limine.conf")).unwrap();
-    for f in ["limine-bios.sys", "limine-bios-cd.bin", "limine-uefi-cd.bin"] {
+    fs::copy(
+        limine_conf_path(root),
+        iso_root.join("boot/limine/limine.conf"),
+    )
+    .unwrap();
+    for f in [
+        "limine-bios.sys",
+        "limine-bios-cd.bin",
+        "limine-uefi-cd.bin",
+    ] {
         fs::copy(limine.join(f), iso_root.join("boot/limine").join(f)).unwrap();
     }
-    fs::copy(limine.join("BOOTX64.EFI"), iso_root.join("EFI/BOOT/BOOTX64.EFI")).unwrap();
-    fs::copy(limine.join("BOOTIA32.EFI"), iso_root.join("EFI/BOOT/BOOTIA32.EFI")).unwrap();
+    fs::copy(
+        limine.join("BOOTX64.EFI"),
+        iso_root.join("EFI/BOOT/BOOTX64.EFI"),
+    )
+    .unwrap();
+    fs::copy(
+        limine.join("BOOTIA32.EFI"),
+        iso_root.join("EFI/BOOT/BOOTIA32.EFI"),
+    )
+    .unwrap();
     let iso_path = root.join("target/template-x86_64.iso");
     run(Command::new("xorriso")
         .args([
-            "-as", "mkisofs", "-b", "boot/limine/limine-bios-cd.bin",
-            "-no-emul-boot", "-boot-load-size", "4", "-boot-info-table",
-            "--efi-boot", "boot/limine/limine-uefi-cd.bin",
-            "-efi-boot-part", "--efi-boot-image", "--protective-msdos-label",
+            "-as",
+            "mkisofs",
+            "-b",
+            "boot/limine/limine-bios-cd.bin",
+            "-no-emul-boot",
+            "-boot-load-size",
+            "4",
+            "-boot-info-table",
+            "--efi-boot",
+            "boot/limine/limine-uefi-cd.bin",
+            "-efi-boot-part",
+            "--efi-boot-image",
+            "--protective-msdos-label",
         ])
         .arg(&iso_root)
         .arg("-o")
         .arg(&iso_path));
-    run(Command::new(root.join("target/limine/limine")).arg("bios-install").arg(&iso_path));
+    run(Command::new(root.join("target/limine/limine"))
+        .arg("bios-install")
+        .arg(&iso_path));
     fs::remove_dir_all(&iso_root).unwrap();
     // Compat copy to repo root for legacy scripts expecting template-x86_64.iso
     let _ = fs::copy(&iso_path, root.join("template-x86_64.iso"));
@@ -578,25 +746,70 @@ fn build_hdd(root: &Path) {
     if hdd.exists() {
         fs::remove_file(&hdd).unwrap();
     }
-    run(Command::new("dd").args(["if=/dev/zero", "bs=1M", "count=0", "seek=64"]).arg(format!("of={}", hdd.display())));
-    run(Command::new("parted").args(["-s"]).arg(&hdd).args(["mklabel", "gpt"]));
-    run(Command::new("parted").args(["-s"]).arg(&hdd).args(["mkpart", "primary", "2048s", "4095s"]));
-    run(Command::new("parted").args(["-s"]).arg(&hdd).args(["set", "1", "bios_grub", "on"]));
-    run(Command::new("parted").args(["-s"]).arg(&hdd).args(["mkpart", "ESP", "fat32", "4096s", "100%"]));
-    run(Command::new("parted").args(["-s"]).arg(&hdd).args(["set", "2", "esp", "on"]));
-    run(Command::new(limine.join("limine")).arg("bios-install").arg(&hdd));
-    run(Command::new("mkfs.fat").args(["-F", "32", "--offset=4096"]).arg(&hdd));
+    run(Command::new("dd")
+        .args(["if=/dev/zero", "bs=1M", "count=0", "seek=64"])
+        .arg(format!("of={}", hdd.display())));
+    run(Command::new("parted")
+        .args(["-s"])
+        .arg(&hdd)
+        .args(["mklabel", "gpt"]));
+    run(Command::new("parted")
+        .args(["-s"])
+        .arg(&hdd)
+        .args(["mkpart", "primary", "2048s", "4095s"]));
+    run(Command::new("parted")
+        .args(["-s"])
+        .arg(&hdd)
+        .args(["set", "1", "bios_grub", "on"]));
+    run(Command::new("parted")
+        .args(["-s"])
+        .arg(&hdd)
+        .args(["mkpart", "ESP", "fat32", "4096s", "100%"]));
+    run(Command::new("parted")
+        .args(["-s"])
+        .arg(&hdd)
+        .args(["set", "2", "esp", "on"]));
+    run(Command::new(limine.join("limine"))
+        .arg("bios-install")
+        .arg(&hdd));
+    run(Command::new("mkfs.fat")
+        .args(["-F", "32", "--offset=4096"])
+        .arg(&hdd));
     let hdd_str = hdd.to_str().unwrap();
     let hdd_at_2m = format!("{hdd_str}@@2M");
     for dir in ["::/EFI", "::/EFI/BOOT", "::/boot", "::/boot/limine"] {
         run(Command::new("mmd").arg("-i").arg(&hdd_at_2m).arg(dir));
     }
-    run(Command::new("mcopy").args(["-i"]).arg(&hdd_at_2m).arg(&kernel_bin).arg("::/boot"));
-    run(Command::new("mcopy").args(["-i"]).arg(&hdd_at_2m).arg(limine_conf_path(root)).arg("::/boot/limine"));
-    run(Command::new("mcopy").args(["-i"]).arg(&hdd_at_2m).arg(limine.join("limine-uefi-cd.bin")).arg("::/boot/limine"));
-    run(Command::new("mcopy").args(["-i"]).arg(&hdd_at_2m).arg(limine.join("limine-bios.sys")).arg("::/boot/limine"));
-    run(Command::new("mcopy").args(["-i"]).arg(&hdd_at_2m).arg(limine.join("BOOTX64.EFI")).arg("::/EFI/BOOT"));
-    run(Command::new("mcopy").args(["-i"]).arg(&hdd_at_2m).arg(limine.join("BOOTIA32.EFI")).arg("::/EFI/BOOT"));
+    run(Command::new("mcopy")
+        .args(["-i"])
+        .arg(&hdd_at_2m)
+        .arg(&kernel_bin)
+        .arg("::/boot"));
+    run(Command::new("mcopy")
+        .args(["-i"])
+        .arg(&hdd_at_2m)
+        .arg(limine_conf_path(root))
+        .arg("::/boot/limine"));
+    run(Command::new("mcopy")
+        .args(["-i"])
+        .arg(&hdd_at_2m)
+        .arg(limine.join("limine-uefi-cd.bin"))
+        .arg("::/boot/limine"));
+    run(Command::new("mcopy")
+        .args(["-i"])
+        .arg(&hdd_at_2m)
+        .arg(limine.join("limine-bios.sys"))
+        .arg("::/boot/limine"));
+    run(Command::new("mcopy")
+        .args(["-i"])
+        .arg(&hdd_at_2m)
+        .arg(limine.join("BOOTX64.EFI"))
+        .arg("::/EFI/BOOT"));
+    run(Command::new("mcopy")
+        .args(["-i"])
+        .arg(&hdd_at_2m)
+        .arg(limine.join("BOOTIA32.EFI"))
+        .arg("::/EFI/BOOT"));
     let _ = fs::copy(&hdd, root.join("template-x86_64.hdd"));
     println!("HDD ready: {}", hdd.display());
 }
@@ -609,7 +822,15 @@ fn ensure_ata_disk(root: &Path) -> PathBuf {
     println!("Creating ATA disk image…");
     let template = root.join("disk_templates/fat32_os_disk_template_default");
     run(Command::new("bash")
-        .args(["scripts/create_ata_disk.sh", "-i", template.to_str().unwrap(), "-o", "ata_disk.img", "-s", "64"])
+        .args([
+            "scripts/create_ata_disk.sh",
+            "-i",
+            template.to_str().unwrap(),
+            "-o",
+            "ata_disk.img",
+            "-s",
+            "64",
+        ])
         .current_dir(root));
     ata_path
 }
@@ -638,7 +859,11 @@ fn ensure_ovmf(root: &Path) {
         ("/usr/share/edk2/x64", "OVMF_CODE.fd", "OVMF_VARS.fd"),
         ("/usr/share/edk2-ovmf/x64", "OVMF_CODE.fd", "OVMF_VARS.fd"),
         ("/usr/share/edk2/ovmf", "OVMF_CODE.fd", "OVMF_VARS.fd"),
-        ("/usr/share/qemu", "ovmf-x86_64-code.bin", "ovmf-x86_64-vars.bin"),
+        (
+            "/usr/share/qemu",
+            "ovmf-x86_64-code.bin",
+            "ovmf-x86_64-vars.bin",
+        ),
     ];
     for (dir, code_name, vars_name) in candidates {
         let base = Path::new(dir);
@@ -660,15 +885,16 @@ fn ensure_ovmf(root: &Path) {
         fs::copy(&legacy_vars, &vars_dst).unwrap();
         return;
     }
-    panic!(
-        "OVMF firmware not found"
-    );
+    panic!("OVMF firmware not found");
 }
 
 fn ovmf(root: &Path) -> (PathBuf, PathBuf) {
     ensure_ovmf(root);
     let ovmf_dir = root.join("target/ovmf");
-    (ovmf_dir.join("ovmf-code-x86_64.fd"), ovmf_dir.join("ovmf-vars-x86_64.fd"))
+    (
+        ovmf_dir.join("ovmf-code-x86_64.fd"),
+        ovmf_dir.join("ovmf-vars-x86_64.fd"),
+    )
 }
 
 fn run_iso(root: &Path) {
@@ -691,22 +917,46 @@ fn run_iso(root: &Path) {
         .expect("failed to spawn log_splitter.py");
     std::thread::sleep(std::time::Duration::from_millis(200));
     let smp = qemu_smp_arg(root);
-    println!("SMP cores: {} (from kernel/src/lib.rs MAX_CORES)", kernel_max_cores(root));
+    println!(
+        "SMP cores: {} (from kernel/src/lib.rs MAX_CORES)",
+        kernel_max_cores(root)
+    );
     let mut cmd = Command::new("qemu-system-x86_64");
-    
-    cmd.args(["-M", "q35", "-accel", "kvm", "-smp", &smp, "-cpu", "host,+tsc-deadline,+apic"])
-        .args(["-drive", &format!("if=pflash,unit=0,format=raw,file={},readonly=on", code.display())])
-        .args(["-drive", &format!("if=pflash,unit=1,format=raw,file={}", vars.display())])
-        .args(["-cdrom", iso.to_str().unwrap()])
-        .args(["-device", "piix3-ide,id=ide"])
-        .args(["-device", "ide-hd,drive=ata0,bus=ide.0,unit=0"])
-        .args(["-drive", &format!("file={},format=raw,id=ata0,if=none", ata.display())])
-        .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
-        .args(["-serial", &format!("unix:{socket1},server")])
-        .args(["-serial", &format!("unix:{socket2},server,nowait")])
-        .args(["-no-reboot"])
-        .args(["-monitor", "telnet:127.0.0.1:1234,server,nowait"])
-        .args(qemu_flags());
+
+    cmd.args([
+        "-M",
+        "q35",
+        "-accel",
+        "kvm",
+        "-smp",
+        &smp,
+        "-cpu",
+        "host,+tsc-deadline,+apic",
+    ])
+    .args([
+        "-drive",
+        &format!(
+            "if=pflash,unit=0,format=raw,file={},readonly=on",
+            code.display()
+        ),
+    ])
+    .args([
+        "-drive",
+        &format!("if=pflash,unit=1,format=raw,file={}", vars.display()),
+    ])
+    .args(["-cdrom", iso.to_str().unwrap()])
+    .args(["-device", "piix3-ide,id=ide"])
+    .args(["-device", "ide-hd,drive=ata0,bus=ide.0,unit=0"])
+    .args([
+        "-drive",
+        &format!("file={},format=raw,id=ata0,if=none", ata.display()),
+    ])
+    .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
+    .args(["-serial", &format!("unix:{socket1},server")])
+    .args(["-serial", &format!("unix:{socket2},server,nowait")])
+    .args(["-no-reboot"])
+    .args(["-monitor", "telnet:127.0.0.1:1234,server,nowait"])
+    .args(qemu_flags());
 
     let status = cmd.status().expect("failed to run qemu");
     let _ = log_child.kill();
@@ -723,19 +973,43 @@ fn run_nologs(root: &Path) {
     let (code, vars) = ovmf(root);
     let iso = root.join("target/template-x86_64.iso");
     let smp = qemu_smp_arg(root);
-    println!("SMP cores: {} (from kernel/src/lib.rs MAX_CORES)", kernel_max_cores(root));
+    println!(
+        "SMP cores: {} (from kernel/src/lib.rs MAX_CORES)",
+        kernel_max_cores(root)
+    );
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-M", "q35", "-accel", "kvm", "-smp", &smp, "-cpu", "host,+tsc-deadline,+apic"])
-        .args(["-drive", &format!("if=pflash,unit=0,format=raw,file={},readonly=on", code.display())])
-        .args(["-drive", &format!("if=pflash,unit=1,format=raw,file={}", vars.display())])
-        .args(["-cdrom", iso.to_str().unwrap()])
-        .args(["-device", "piix3-ide,id=ide"])
-        .args(["-device", "ide-hd,drive=ata0,bus=ide.0,unit=0"])
-        .args(["-drive", &format!("file={},format=raw,id=ata0,if=none", ata.display())])
-        .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
-        .args(["-no-reboot"])
-        .args(["-monitor", "telnet:127.0.0.1:1234,server,nowait"])
-        .args(qemu_flags());
+    cmd.args([
+        "-M",
+        "q35",
+        "-accel",
+        "kvm",
+        "-smp",
+        &smp,
+        "-cpu",
+        "host,+tsc-deadline,+apic",
+    ])
+    .args([
+        "-drive",
+        &format!(
+            "if=pflash,unit=0,format=raw,file={},readonly=on",
+            code.display()
+        ),
+    ])
+    .args([
+        "-drive",
+        &format!("if=pflash,unit=1,format=raw,file={}", vars.display()),
+    ])
+    .args(["-cdrom", iso.to_str().unwrap()])
+    .args(["-device", "piix3-ide,id=ide"])
+    .args(["-device", "ide-hd,drive=ata0,bus=ide.0,unit=0"])
+    .args([
+        "-drive",
+        &format!("file={},format=raw,id=ata0,if=none", ata.display()),
+    ])
+    .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
+    .args(["-no-reboot"])
+    .args(["-monitor", "telnet:127.0.0.1:1234,server,nowait"])
+    .args(qemu_flags());
     run(&mut cmd);
 }
 
@@ -743,22 +1017,34 @@ fn clean(root: &Path) {
     run(Command::new("cargo").arg("clean").current_dir(root));
     let xtask_target = root.join("xtask").join("target");
     if xtask_target.exists() {
-        fs::remove_dir_all(&xtask_target).unwrap_or_else(|e| panic!("failed to remove {}: {e}", xtask_target.display()));
+        fs::remove_dir_all(&xtask_target)
+            .unwrap_or_else(|e| panic!("failed to remove {}: {e}", xtask_target.display()));
     }
     // Legacy artefacts at repo root (from old GNUmakefile)
-    for p in ["template-x86_64.iso", "template-x86_64.hdd", "test_disk_image.fat32.img"] {
+    for p in [
+        "template-x86_64.iso",
+        "template-x86_64.hdd",
+        "test_disk_image.fat32.img",
+    ] {
         let _ = fs::remove_file(root.join(p));
     }
 }
 
 fn fmt(root: &Path, extra: &[String]) {
     for dir in [root, &root.join("xtask")] {
-        run(Command::new("cargo").args(["fmt", "--all"]).args(extra).current_dir(dir));
+        run(Command::new("cargo")
+            .args(["fmt", "--all"])
+            .args(extra)
+            .current_dir(dir));
     }
     // Also fmt rustspace separately (outside workspace)
     let rustspace = root.join("user/rustspace");
     if rustspace.join("Cargo.toml").exists() {
-        let _ = Command::new("cargo").args(["fmt", "--all"]).args(extra).current_dir(&rustspace).status();
+        let _ = Command::new("cargo")
+            .args(["fmt", "--all"])
+            .args(extra)
+            .current_dir(&rustspace)
+            .status();
     }
 }
 
@@ -783,7 +1069,8 @@ fn clippy(root: &Path, extra: &[String]) {
     }
 }
 
-fn run_usertests(root: &Path, filters: &[String]) {
+fn run_usertests(root: &Path, args: &[String]) {
+    let (release, filters) = split_release_flag(args);
     let all_bins = discover_usertest_bins(root);
     if all_bins.is_empty() {
         eprintln!("No usertest binaries found in kernel/src/bin/test_user*.rs or test_usermem*.rs");
@@ -792,7 +1079,10 @@ fn run_usertests(root: &Path, filters: &[String]) {
     let bins: Vec<String> = if filters.is_empty() {
         all_bins
     } else {
-        all_bins.into_iter().filter(|name| filters.iter().any(|f| name.contains(f.as_str()))).collect()
+        all_bins
+            .into_iter()
+            .filter(|name| filters.iter().any(|f| name.contains(f.as_str())))
+            .collect()
     };
     if bins.is_empty() {
         eprintln!("No usertests matched the given filter(s).");
@@ -801,18 +1091,21 @@ fn run_usertests(root: &Path, filters: &[String]) {
     ensure_limine(root);
     build_user_rust_only(root);
     println!("{BOLD}Building usertest kernels…{RESET}");
-    build_all_test_kernels(root, &bins);
+    build_all_test_kernels(root, &bins, release);
     let (ovmf_code, ovmf_vars) = ovmf(root);
     println!();
     let mut passed_names: Vec<&str> = Vec::new();
     let mut failed_names: Vec<(&str, Option<i32>)> = Vec::new();
     let smp = qemu_smp_arg(root);
-    println!("{BOLD}SMP cores:{RESET} {} (from kernel/src/lib.rs MAX_CORES)", kernel_max_cores(root));
+    println!(
+        "{BOLD}SMP cores:{RESET} {} (from kernel/src/lib.rs MAX_CORES)",
+        kernel_max_cores(root)
+    );
     println!("{BOLD}QEMU smp:{RESET} {}", smp);
     for name in &bins {
         print!("  {BOLD}{name}{RESET} ... ");
         std::io::stdout().flush().unwrap();
-        let iso = package_test_iso(root, name);
+        let iso = package_test_iso(root, name, release);
         let result = run_test_with_timeout(root, &iso, &ovmf_code, &ovmf_vars, "30");
         save_test_logs(root, name, &result.serial, None);
         if result.passed {
@@ -833,7 +1126,10 @@ fn run_usertests(root: &Path, filters: &[String]) {
                 Some(TEST_FAILED_EXIT) => format!("{} (kernel reported failure)", TEST_FAILED_EXIT),
                 Some(c) => c.to_string(),
             };
-            println!("{RED}FAILED{RESET} (exit code: {code_str}) (log: test_logs/{}/all.txt)", name);
+            println!(
+                "{RED}FAILED{RESET} (exit code: {code_str}) (log: test_logs/{}/all.txt)",
+                name
+            );
             let serial = result.serial.trim();
             if !serial.is_empty() {
                 println!("  {YELLOW}---- serial output ----{RESET}");
@@ -847,7 +1143,10 @@ fn run_usertests(root: &Path, filters: &[String]) {
     }
     println!();
     if failed_names.is_empty() {
-        println!("{GREEN}{BOLD}usertest result: ok.{RESET} {} passed; 0 failed (logs in test_logs/)", passed_names.len());
+        println!(
+            "{GREEN}{BOLD}usertest result: ok.{RESET} {} passed; 0 failed (logs in test_logs/)",
+            passed_names.len()
+        );
     } else {
         println!("{BOLD}usertests:{RESET}");
         for name in &passed_names {
@@ -863,14 +1162,18 @@ fn run_usertests(root: &Path, filters: &[String]) {
             println!("  {RED}FAILED{RESET} {name} (exit code: {code_str})");
         }
         println!();
-        println!("{RED}{BOLD}usertest result: FAILED.{RESET} {} passed; {} failed", passed_names.len(), failed_names.len());
+        println!(
+            "{RED}{BOLD}usertest result: FAILED.{RESET} {} passed; {} failed",
+            passed_names.len(),
+            failed_names.len()
+        );
         std::process::exit(1);
     }
 }
 
 fn print_usage() {
     eprintln!(
-        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO + ATA disk and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n   ata-disk     Create ATA disk image (storage/ata_disk.img)\n  test [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  usertest [filter…] Build and run userspace integration tests (kernel/src/bin/test_user*.rs, test_usermem*.rs)\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
+        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO + ATA disk and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n   ata-disk     Create ATA disk image (storage/ata_disk.img)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  usertest [--release] [filter…] Build and run userspace integration tests (kernel/src/bin/test_user*.rs, test_usermem*.rs)\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
     );
 }
 

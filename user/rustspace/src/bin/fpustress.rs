@@ -13,6 +13,10 @@ const EXIT_CODE_PANIC: i32 = 1;
 const EXIT_CODE_DIRTY_INITIAL_XMM: i32 = 2;
 const EXIT_CODE_BAD_INITIAL_MXCSR: i32 = 3;
 const EXIT_CODE_XMM_LOST_ACROSS_YIELD: i32 = 4;
+const EXIT_CODE_GPR_LOST_ACROSS_YIELD: i32 = 5;
+
+const GPR_PROBE_COUNT: usize = 4;
+const GPR_PROBE_ROUND_STRIDE: u64 = 0x0101_0101_0101_0101;
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy, PartialEq)]
@@ -189,6 +193,59 @@ unsafe fn yield_with_loaded_xmm(expected_bank: *const XmmBank, actual_bank: *mut
     }
 }
 
+/// Yields with xmm and r12-r15 loaded and relies on the kernel to give them all back
+/// Unlike yield_with_loaded_xmm nothing is pushed around the syscall, the registers
+/// are operands of the asm so the compiler knows they change
+#[inline(never)]
+unsafe fn yield_with_loaded_xmm_and_gprs(
+    expected_bank: *const XmmBank,
+    actual_bank: *mut XmmBank,
+    gprs: &mut [u64; GPR_PROBE_COUNT],
+) {
+    let [mut r12_value, mut r13_value, mut r14_value, mut r15_value] = *gprs;
+
+    unsafe {
+        asm!(
+            "push rdi",
+            load_xmm_bank!("rsi"),
+            "syscall",
+            "pop rdi",
+            store_xmm_bank!("rdi"),
+            inout("rax") SYS_YIELD => _,
+            inout("rdi") actual_bank => _,
+            inout("rsi") expected_bank => _,
+            inout("r12") r12_value,
+            inout("r13") r13_value,
+            inout("r14") r14_value,
+            inout("r15") r15_value,
+            out("rcx") _,
+            out("rdx") _,
+            out("r8") _,
+            out("r9") _,
+            out("r10") _,
+            out("r11") _,
+            out("xmm0") _,
+            out("xmm1") _,
+            out("xmm2") _,
+            out("xmm3") _,
+            out("xmm4") _,
+            out("xmm5") _,
+            out("xmm6") _,
+            out("xmm7") _,
+            out("xmm8") _,
+            out("xmm9") _,
+            out("xmm10") _,
+            out("xmm11") _,
+            out("xmm12") _,
+            out("xmm13") _,
+            out("xmm14") _,
+            out("xmm15") _,
+        );
+    }
+
+    *gprs = [r12_value, r13_value, r14_value, r15_value];
+}
+
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -241,6 +298,38 @@ extern "C" fn start_checked() -> ! {
         if actual_bank != expected_bank {
             write_str(b"fpustress: FAIL xmm lost across yield\n");
             unsafe { sys_exit(EXIT_CODE_XMM_LOST_ACROSS_YIELD) }
+        }
+    }
+
+    for round in 0..YIELD_ROUNDS {
+        let mut expected_bank = XmmBank {
+            registers: [0; XMM_REGISTER_COUNT],
+        };
+        for (register_index, value) in expected_bank.registers.iter_mut().enumerate() {
+            *value = (process_seed << 64) | ((round as u128) << 32) | register_index as u128;
+        }
+
+        let mut expected_gprs = [0u64; GPR_PROBE_COUNT];
+        for (gpr_index, value) in expected_gprs.iter_mut().enumerate() {
+            *value = (process_seed as u64)
+                .wrapping_add(GPR_PROBE_ROUND_STRIDE.wrapping_mul(round + gpr_index as u64));
+        }
+
+        let mut actual_bank = XmmBank {
+            registers: [0; XMM_REGISTER_COUNT],
+        };
+        let mut actual_gprs = expected_gprs;
+        unsafe {
+            yield_with_loaded_xmm_and_gprs(&expected_bank, &mut actual_bank, &mut actual_gprs)
+        };
+
+        if actual_bank != expected_bank {
+            write_str(b"fpustress: FAIL xmm lost across yield without saved gprs\n");
+            unsafe { sys_exit(EXIT_CODE_XMM_LOST_ACROSS_YIELD) }
+        }
+        if actual_gprs != expected_gprs {
+            write_str(b"fpustress: FAIL gpr lost across yield\n");
+            unsafe { sys_exit(EXIT_CODE_GPR_LOST_ACROSS_YIELD) }
         }
     }
 

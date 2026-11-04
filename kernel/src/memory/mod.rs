@@ -1,3 +1,6 @@
+/// Logs for address space creation and mapping
+pub const USER_MEMORY_DEBUG_PRINT: bool = false;
+
 pub mod allocator;
 pub mod memory;
 pub mod usermem;

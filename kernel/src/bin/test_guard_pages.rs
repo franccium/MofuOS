@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use kernel::gdt;
-use kernel::process::syscall;
+use kernel::process::task::MAX_TASKS;
 use kernel::{MAX_CORES, boot_common, serial_println_core};
 use x86_64::VirtAddr;
 use x86_64::instructions::{hlt, port::Port};
@@ -62,19 +62,16 @@ fn test_main() -> ! {
         let rsp0_guard = gdt::rsp0_guard_page(core_id);
         let ist0_guard = gdt::ist0_guard_page(core_id);
         let sched_guard = gdt::scheduler_guard_page(core_id);
-        let syscall_guard = syscall::syscall_guard_page(core_id);
 
         let (rsp0_bottom, rsp0_top) = gdt::rsp0_bounds(core_id);
         let (ist0_bottom, ist0_top) = gdt::ist0_bounds(core_id);
         let (sched_bottom, sched_top) = gdt::scheduler_bounds(core_id);
-        let (syscall_bottom, syscall_top) = syscall::syscall_bounds(core_id);
 
         // guard pages must be NOT mapped
         for (name, guard) in [
             ("RSP0", rsp0_guard),
             ("IST0", ist0_guard),
             ("SCHED", sched_guard),
-            ("SYSCALL", syscall_guard),
         ] {
             total_checks += 1;
             let mapped = is_kernel_page_mapped(guard);
@@ -102,7 +99,6 @@ fn test_main() -> ! {
             ("RSP0", rsp0_bottom),
             ("IST0", ist0_bottom),
             ("SCHED", sched_bottom),
-            ("SYSCALL", syscall_bottom),
         ] {
             total_checks += 1;
             let mapped = is_kernel_page_mapped(bottom);
@@ -126,12 +122,7 @@ fn test_main() -> ! {
         }
 
         // stack top-1 page must be mapped
-        for (name, top) in [
-            ("RSP0", rsp0_top),
-            ("IST0", ist0_top),
-            ("SCHED", sched_top),
-            ("SYSCALL", syscall_top),
-        ] {
+        for (name, top) in [("RSP0", rsp0_top), ("IST0", ist0_top), ("SCHED", sched_top)] {
             total_checks += 1;
             let last_byte = VirtAddr::new(top.as_u64() - 1);
             let mapped = is_kernel_page_mapped(last_byte);
@@ -154,12 +145,11 @@ fn test_main() -> ! {
             }
         }
 
-        // alignment checks: guard must be page aligned; GDT stacks bottom page aligned, syscall bottom has 8-byte offset due to stack_top field
+        // alignment checks: guard and stack bottom must be page aligned
         for (name, guard) in [
             ("RSP0", rsp0_guard),
             ("IST0", ist0_guard),
             ("SCHED", sched_guard),
-            ("SYSCALL", syscall_guard),
         ] {
             total_checks += 1;
             if guard.as_u64() & 0xFFF != 0 {
@@ -190,25 +180,74 @@ fn test_main() -> ! {
                 failed_checks += 1;
             }
         }
-        // syscall bottom is stack_top+8, so it is 8 bytes into page
+    }
+
+    // every task kernel stack has an unmapped guard right below a mapped stack
+    for slot_index in 0..MAX_TASKS {
+        let guard = gdt::task_guard_page(slot_index);
+        let (bottom, top) = gdt::task_stack_bounds(slot_index);
+        let last_byte = VirtAddr::new(top.as_u64() - 1);
+
         total_checks += 1;
-        if syscall_bottom.as_u64() & 0xFFF != 8 {
+        if is_kernel_page_mapped(guard) {
             serial_println_core!(
-                "FAIL: core {} SYSCALL bottom {:#x} expected offset 8",
-                core_id,
-                syscall_bottom.as_u64()
+                "FAIL: task slot {} guard {:#x} should be UNMAPPED but is mapped",
+                slot_index,
+                guard.as_u64()
             );
             success = false;
             failed_checks += 1;
         }
+
         total_checks += 1;
-        let page_base = VirtAddr::new(syscall_bottom.as_u64() & !0xFFF);
-        if syscall_guard + 4096u64 != page_base {
+        if !is_kernel_page_mapped(bottom) {
             serial_println_core!(
-                "FAIL: core {} SYSCALL guard {:#x}+4096 != page base {:#x}",
-                core_id,
-                syscall_guard.as_u64(),
-                page_base.as_u64()
+                "FAIL: task slot {} stack bottom {:#x} should be MAPPED but is not",
+                slot_index,
+                bottom.as_u64()
+            );
+            success = false;
+            failed_checks += 1;
+        }
+
+        total_checks += 1;
+        if !is_kernel_page_mapped(last_byte) {
+            serial_println_core!(
+                "FAIL: task slot {} stack top-1 {:#x} should be MAPPED but is not",
+                slot_index,
+                last_byte.as_u64()
+            );
+            success = false;
+            failed_checks += 1;
+        }
+
+        total_checks += 1;
+        if guard.as_u64() & 0xFFF != 0 || bottom.as_u64() & 0xFFF != 0 {
+            serial_println_core!(
+                "FAIL: task slot {} guard or bottom not page aligned",
+                slot_index
+            );
+            success = false;
+            failed_checks += 1;
+        }
+
+        total_checks += 1;
+        if guard + 4096u64 != bottom {
+            serial_println_core!(
+                "FAIL: task slot {} guard {:#x} +4096 != bottom {:#x}",
+                slot_index,
+                guard.as_u64(),
+                bottom.as_u64()
+            );
+            success = false;
+            failed_checks += 1;
+        }
+
+        total_checks += 1;
+        if top.as_u64() % 16 != 0 {
+            serial_println_core!(
+                "FAIL: task slot {} stack top not 16 byte aligned",
+                slot_index
             );
             success = false;
             failed_checks += 1;
